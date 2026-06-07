@@ -8,6 +8,7 @@ export interface PlaybackState {
 
 export interface RoomState {
   roomId: string;
+  roomName: string;
   /** 当前激活（正在播放）的视频 URL，由 SWITCH_VIDEO 更新 */
   activeVideoUrl: string | null;
   /** 房间内所有视频列表 */
@@ -26,7 +27,6 @@ interface RoomContextValue {
   setMembers: (members: Member[]) => void;
   addMember: (member: Member) => void;
   removeMember: (userId: string) => void;
-  setMemberOnline: (userId: string, isOnline: boolean) => void;
   setControlMode: (mode: ControlMode) => void;
   setControllerId: (userId: string | null) => void;
   setPlaybackState: (state: Partial<PlaybackState>) => void;
@@ -40,7 +40,6 @@ const RoomContext = createContext<RoomContextValue>({
   setMembers: () => {},
   addMember: () => {},
   removeMember: () => {},
-  setMemberOnline: () => {},
   setControlMode: () => {},
   setControllerId: () => {},
   setPlaybackState: () => {},
@@ -74,8 +73,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const addMember = useCallback((member: Member) => {
     setRoomState((prev) => {
       if (!prev) return prev;
-      const exists = prev.members.some((m) => m.userId === member.userId);
-      if (exists) return prev;
+      // 已存在则跳过（幂等）
+      if (prev.members.some((m) => m.userId === member.userId)) return prev;
       return { ...prev, members: [...prev.members, member] };
     });
   }, []);
@@ -83,26 +82,11 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const removeMember = useCallback((userId: string) => {
     setRoomState((prev) => {
       if (!prev) return prev;
-      return {
-        ...prev,
-        members: prev.members.map((m) =>
-          m.userId === userId ? { ...m, isOnline: false } : m,
-        ),
-      };
+      return { ...prev, members: prev.members.filter((m) => m.userId !== userId) };
     });
   }, []);
 
-  const setMemberOnline = useCallback((userId: string, isOnline: boolean) => {
-    setRoomState((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        members: prev.members.map((m) =>
-          m.userId === userId ? { ...m, isOnline } : m,
-        ),
-      };
-    });
-  }, []);
+  // setMemberOnline 已移除：isOnline 语义废弃，在房间即在线，离开即从列表移除
 
   const setControlMode = useCallback((mode: ControlMode) => {
     setRoomState((prev) => prev ? { ...prev, controlMode: mode } : prev);
@@ -129,7 +113,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setMembers,
         addMember,
         removeMember,
-        setMemberOnline,
         setControlMode,
         setControllerId,
         setPlaybackState,

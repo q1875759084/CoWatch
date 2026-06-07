@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect, type MutableRefObject } from 'react';
 import { useParams } from 'react-router-dom';
 import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
@@ -12,12 +12,43 @@ import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import styles from './index.module.scss';
 
+/**
+ * SYNC_PROGRESS 进度同步阈值（秒）。
+ *
+ * 收到 SYNC_PROGRESS 时，若本地进度与远端偏差在此范围内，浏览器自然追上，无需 seek。
+ * 只有偏差超过阈值（真正失步）时才执行 seek，避免频繁 seek 打断缓冲。
+ * 游戏复盘场景对同步精度要求高，设为 0.5s。
+ */
+const SEEK_THRESHOLD_SEC = 0.5;
+
 export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const { userInfo } = useUser();
   const { roomState, initRoom, setActiveVideoUrl } = useRoom();
+
+  /**
+   * 暂存 ROOM_STATE 下发的播放初始化参数。
+   * ROOM_STATE（WS）和 HTTP 初始化是并行的异步路径，VideoPlayer 挂载时机不确定；
+   * 用 ref 暂存，在 VideoPlayer 挂载时（callback ref 触发）立即消费。
+   */
+  const pendingInitRef = useRef<{ isPlaying: boolean; currentTime: number } | null>(null);
   const videoRef = useRef<VideoPlayerHandle>(null);
-  const isSyncingRef = useRef(false);
+
+  /**
+   * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
+   * 比 useEffect([activeVideoUrl]) 更可靠，因为它直接响应组件挂载事件。
+   */
+  const setVideoRef = useCallback((handle: VideoPlayerHandle | null) => {
+    (videoRef as MutableRefObject<VideoPlayerHandle | null>).current = handle;
+    if (handle && pendingInitRef.current) {
+      const { isPlaying, currentTime } = pendingInitRef.current;
+      pendingInitRef.current = null;
+      // rAF 确保 video 元素完成首次渲染后再操作
+      requestAnimationFrame(() => {
+        handle.initPlayback(isPlaying, currentTime);
+      });
+    }
+  }, []);
 
   // 初始化房间状态 + 视频列表
   useEffect(() => {
@@ -28,6 +59,7 @@ export default function RoomPage() {
     ]).then(([info, videosData]) => {
       initRoom({
         roomId: info.roomId,
+        roomName: info.roomName,
         activeVideoUrl: info.videoUrl,
         videos: videosData.videos.map((v) => ({
           id: v.id,
@@ -44,35 +76,45 @@ export default function RoomPage() {
     });
   }, [roomId]);
 
+  /**
+   * 收到 SYNC_PROGRESS：偏差超过阈值才 seek，避免频繁 seek 打断缓冲。
+   */
   const handleSyncProgress = useCallback((currentTime: number) => {
-    isSyncingRef.current = true;
-    videoRef.current?.seekTo(currentTime);
-    requestAnimationFrame(() => { isSyncingRef.current = false; });
-  }, []);
-
-  const handleSyncState = useCallback((isPlaying: boolean, currentTime: number) => {
-    isSyncingRef.current = true;
-    videoRef.current?.seekTo(currentTime);
-    if (isPlaying) {
-      videoRef.current?.play();
-    } else {
-      videoRef.current?.pause();
+    const handle = videoRef.current;
+    if (!handle) return;
+    if (Math.abs(handle.getCurrentTime() - currentTime) >= SEEK_THRESHOLD_SEC) {
+      handle.syncSeek(currentTime);
     }
-    requestAnimationFrame(() => { isSyncingRef.current = false; });
   }, []);
 
-  const handleSwitchVideo = useCallback((videoUrl: string) => {
-    // SWITCH_VIDEO 广播过来时，播放器 src 会因 activeVideoUrl 更新而重载
-    // 无需手动操作 videoRef，React 重渲染会自动处理
-    void videoUrl;
+  /**
+   * 收到 SYNC_STATE（播放/暂停 + 时间）：全员同步执行。
+   */
+  const handleSyncState = useCallback((isPlaying: boolean, currentTime: number) => {
+    if (isPlaying) {
+      videoRef.current?.syncSeekAndPlay(currentTime);
+    } else {
+      videoRef.current?.syncSeekAndPause(currentTime);
+    }
+  }, []);
+
+  /**
+   * 收到 ROOM_STATE：保存播放初始化参数，等 VideoPlayer 就绪后执行。
+   */
+  const handleRoomState = useCallback((isPlaying: boolean, currentTime: number) => {
+    if (videoRef.current) {
+      videoRef.current.initPlayback(isPlaying, currentTime);
+    } else {
+      pendingInitRef.current = { isPlaying, currentTime };
+    }
   }, []);
 
   const { sendMessage } = useRoomWs({
     roomId: roomId!,
     token: getAccessToken() ?? '',
+    onRoomState: handleRoomState,
     onSyncProgress: handleSyncProgress,
     onSyncState: handleSyncState,
-    onSwitchVideo: handleSwitchVideo,
   });
 
   // 点击视频列表中的"播放"按钮：广播 SWITCH_VIDEO，自己也立即切换
@@ -86,33 +128,26 @@ export default function RoomPage() {
   }
 
   const isAdmin = roomState.members.find((m) => m.userId === userInfo?.userId)?.isAdmin ?? false;
-  const isController =
-    roomState.controlMode === 'free' ||
-    roomState.controllerId === userInfo?.userId;
+  const isController = roomState.controllerId === userInfo?.userId;
 
   return (
     <div className={styles.page}>
       <div className={styles.content}>
         {/* 左侧主内容区 */}
         <main className={styles.main}>
-          {/* 播放器区域：外层约束最大高度，内层 playerRatio 保持 16:9 */}
+          {/* 播放器区域 */}
           <div className={styles.playerArea}>
             <div className={styles.playerRatio}>
               {roomState.activeVideoUrl ? (
                 <VideoPlayer
-                  ref={videoRef}
+                  ref={setVideoRef}
                   src={roomState.activeVideoUrl}
                   disabled={!isController}
-                  isSyncingRef={isSyncingRef}
                   onProgressChange={(currentTime) => {
-                    if (!isSyncingRef.current) {
-                      sendMessage('SYNC_PROGRESS', { currentTime });
-                    }
+                    sendMessage('SYNC_PROGRESS', { currentTime });
                   }}
                   onPlayStateChange={(isPlaying, currentTime) => {
-                    if (!isSyncingRef.current) {
-                      sendMessage('SYNC_STATE', { isPlaying, currentTime });
-                    }
+                    sendMessage('SYNC_STATE', { isPlaying, currentTime });
                   }}
                 />
               ) : (
@@ -137,22 +172,19 @@ export default function RoomPage() {
               onPlay={handlePlayVideo}
             />
           </div>
-
         </main>
 
         {/* 右侧控制面板 */}
         <aside className={styles.panel}>
           <ControlPanel
+            roomId={roomState.roomId}
+            roomName={roomState.roomName}
             members={roomState.members}
             controllerId={roomState.controllerId}
-            controlMode={roomState.controlMode}
             isAdmin={isAdmin}
             currentUserId={userInfo?.userId ?? ''}
             onTransferControl={(targetUserId) => {
               sendMessage('TRANSFER_CONTROL', { targetUserId });
-            }}
-            onModeChange={(mode) => {
-              sendMessage('MODE_CHANGE', { mode });
             }}
           />
         </aside>

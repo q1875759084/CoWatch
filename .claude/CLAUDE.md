@@ -10,7 +10,7 @@
 
 | 角色 | 说明 |
 |------|------|
-| 管理员 | 房间创建者，可上传视频、切换控制模式、指定控制者 |
+| 管理员 | 房间创建者，可上传视频、指定控制者 |
 | 成员 | 注册用户通过邀请链接加入房间 |
 
 **身份方案：** 注册登录账号体系，JWT 双 Token（短期 `accessToken` 存内存/LS + 长期 `refreshToken` 存 HttpOnly Cookie），前端 axios 拦截器实现无感刷新。
@@ -40,6 +40,7 @@
 - OSS 预签名直传用 XHR（不能带自定义 Authorization），后端接口上传用 `request.put` + `onUploadProgress`
 - `__dirname` 在 `tsx` 直接运行时指向源文件目录（`src/`），路径层级与编译后运行不同，写静态文件路径时需注意
 - WebSocket 消息类型定义在 `src/types/room.ts`，增加新消息类型时前后端同步更新
+- SQLite schema 新增字段时，`CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，需手动执行 `ALTER TABLE ... ADD COLUMN` 迁移旧数据库文件
 
 ## 编码规范
 

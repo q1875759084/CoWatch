@@ -1,10 +1,9 @@
-export type ControlMode = 'designated' | 'free';
+export type ControlMode = 'designated';
 
 export interface Member {
   userId: string;
   nickname: string;
   isAdmin: boolean;
-  isOnline: boolean;
 }
 
 export interface VideoItem {
@@ -17,6 +16,7 @@ export interface VideoItem {
 
 export interface RoomInfo {
   roomId: string;
+  roomName: string;
   videoUrl: string | null;
   controlMode: ControlMode;
   controllerId: string | null;
@@ -29,10 +29,8 @@ export type WsMessageType =
   | 'SYNC_PROGRESS'
   | 'SYNC_STATE'
   | 'TRANSFER_CONTROL'
-  | 'MODE_CHANGE'
   | 'SWITCH_VIDEO'
   | 'CONTROL_CHANGED'
-  | 'MODE_CHANGED'
   | 'MEMBER_JOINED'
   | 'MEMBER_LEFT'
   | 'ROOM_STATE'
@@ -61,10 +59,6 @@ export interface ControlChangedData {
   controllerNickname: string;
 }
 
-export interface ModeChangedData {
-  mode: ControlMode;
-}
-
 export interface MemberJoinedData {
   userId: string;
   nickname: string;
@@ -81,6 +75,9 @@ export interface RoomStateData {
   controllerId: string | null;
   videos: VideoItem[];
   members?: Member[];
+  /** 当前房间播放状态，供新加入成员初始化（后端内存维护） */
+  isPlaying?: boolean;
+  currentTime?: number;
 }
 
 export interface VideoAddedData extends VideoItem {}

@@ -36,9 +36,9 @@ export function RoomList() {
               to={`/room/${room.room_id}/lobby`}
               className={`${styles.roomItem} ${activeRoomId === room.room_id ? styles.active : ''}`}
             >
-              <div className={styles.roomIcon}>{room.room_id.slice(0, 1).toUpperCase()}</div>
+              <div className={styles.roomIcon}>{(room.room_name || room.room_id).slice(0, 1).toUpperCase()}</div>
               <div className={styles.roomInfo}>
-                <div className={styles.roomId}>{room.room_id}</div>
+                <div className={styles.roomId}>{room.room_name || room.room_id}</div>
                 {room.is_admin === 1 && (
                   <div className={styles.adminBadge}>管理员</div>
                 )}

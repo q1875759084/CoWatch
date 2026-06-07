@@ -9,11 +9,12 @@ import type {
 import type { RoomInfo } from '@/types/room';
 
 /**
- * 创建房间（userId 由 Bearer Token 携带，无需显式传入）
+ * 创建房间，传入房间名（userId 由 Bearer Token 携带，无需显式传入）
  */
-export async function createRoomApi(): Promise<CreateRoomResponse> {
+export async function createRoomApi(name: string): Promise<CreateRoomResponse> {
   const res = await request.post<{ code: number; message: string; data: CreateRoomResponse }>(
     '/rooms',
+    { name },
   );
   return res.data.data;
 }

@@ -4,10 +4,9 @@ import styles from './index.module.scss';
 interface MemberListProps {
   members: Member[];
   controllerId?: string | null;
-  /** designated 模式下管理员可点击指定控制者 */
+  /** 管理员可点击指定控制者 */
   onSelectController?: (userId: string) => void;
   isAdmin?: boolean;
-  controlMode?: 'designated' | 'free';
 }
 
 export default function MemberList({
@@ -15,7 +14,6 @@ export default function MemberList({
   controllerId,
   onSelectController,
   isAdmin,
-  controlMode,
 }: MemberListProps) {
   return (
     <ul className={styles.list}>
@@ -23,12 +21,8 @@ export default function MemberList({
         const isController = member.userId === controllerId;
         const canClick =
           isAdmin &&
-          controlMode === 'designated' &&
           onSelectController &&
           !isController;
-
-        // 只展示在线成员
-        if (!member.isOnline) return null;
 
         return (
           <li

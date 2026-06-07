@@ -21,6 +21,7 @@ export interface AuthResponse {
 
 export interface CreateRoomResponse {
   roomId: string;
+  roomName: string;
   inviteUrl: string;
 }
 
@@ -32,6 +33,7 @@ export interface JoinRoomResponse {
 
 export interface MyRoom {
   room_id: string;
+  room_name: string;
   video_url: string | null;
   is_admin: 0 | 1;
   joined_at: number;

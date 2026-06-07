@@ -5,7 +5,6 @@ import type {
   SyncProgressData,
   SyncStateData,
   ControlChangedData,
-  ModeChangedData,
   MemberJoinedData,
   MemberLeftData,
   RoomStateData,
@@ -17,27 +16,26 @@ interface UseRoomWsOptions {
   roomId: string;
   /** accessToken，通过 WS 连接参数传给后端鉴权 */
   token: string;
+  /** 收到 ROOM_STATE 时通知调用方初始化播放状态（isPlaying + currentTime） */
+  onRoomState?: (isPlaying: boolean, currentTime: number) => void;
   /** 收到 SYNC_PROGRESS 时通知播放器同步（防回环由调用方负责） */
   onSyncProgress?: (currentTime: number) => void;
   /** 收到 SYNC_STATE 时通知播放器同步 */
   onSyncState?: (isPlaying: boolean, currentTime: number) => void;
-  /** 收到 SWITCH_VIDEO 时切换播放器视频 */
-  onSwitchVideo?: (videoUrl: string) => void;
 }
 
 export function useRoomWs({
   roomId,
   token,
+  onRoomState,
   onSyncProgress,
   onSyncState,
-  onSwitchVideo,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
     setMembers,
     addMember,
     removeMember,
-    setControlMode,
     setControllerId,
     setActiveVideoUrl,
     addVideo,
@@ -81,9 +79,7 @@ export function useRoomWs({
         case 'ROOM_STATE': {
           const d = msg.data as unknown as RoomStateData | undefined;
           if (d) {
-            setControlMode(d.controlMode);
             setControllerId(d.controllerId);
-            // 用后端最新在线状态覆盖 HTTP 拉取的历史脏数据
             if (d.members?.length) {
               setMembers(d.members);
             }
@@ -94,6 +90,11 @@ export function useRoomWs({
             // 初始化当前激活视频
             if (d.videoUrl) {
               setActiveVideoUrl(d.videoUrl);
+            }
+            // 通知调用方初始化播放状态（如房间正在播放，新加入成员需自动跟上）
+            console.log('[WS] ROOM_STATE received', { isPlaying: d.isPlaying, currentTime: d.currentTime, videoUrl: d.videoUrl });
+            if (onRoomState) {
+              onRoomState(d.isPlaying ?? false, d.currentTime ?? 0);
             }
           }
           break;
@@ -123,14 +124,6 @@ export function useRoomWs({
           break;
         }
 
-        case 'MODE_CHANGED': {
-          const d = msg.data as unknown as ModeChangedData | undefined;
-          if (d) {
-            setControlMode(d.mode);
-          }
-          break;
-        }
-
         case 'MEMBER_JOINED': {
           const d = msg.data as unknown as MemberJoinedData | undefined;
           if (d) {
@@ -138,7 +131,6 @@ export function useRoomWs({
               userId: d.userId,
               nickname: d.nickname,
               isAdmin: d.isAdmin,
-              isOnline: true,
             });
           }
           break;
@@ -170,7 +162,6 @@ export function useRoomWs({
           const d = msg.data as unknown as SwitchVideoData | undefined;
           if (d?.videoUrl) {
             setActiveVideoUrl(d.videoUrl);
-            onSwitchVideo?.(d.videoUrl);
           }
           break;
         }
