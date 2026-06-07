@@ -1,0 +1,156 @@
+---
+name: /code-review
+description: 对指定文件或目录执行 CarryHub 项目规范的后置代码质量审查。先做 Skill 诊断按需加载专业规范，再执行通用规范检查，输出分级问题报告和重构建议。
+argument-hint: 可选，指定文件路径或目录（不填则审查本次对话中涉及的文件）
+---
+
+# CarryHub 代码质量审查
+
+## 第一步：确定审查范围
+
+**优先级（按顺序判断）：**
+1. 用户通过 `$ARGUMENTS` 指定了路径 → 审查该路径下所有 `.ts/.tsx` 文件
+2. 当前对话有生成/修改记录 → 审查本次涉及的文件
+3. 两者都无 → 询问用户要审查哪些文件
+
+确定范围后，列出待审查文件清单，告知用户共 N 个文件。
+
+---
+
+## 第二步：Skill 诊断（按需加载专业规范）
+
+**扫描所有待审查文件，识别以下代码模式，按需读取对应 Skill 文件：**
+
+| 检测到的代码模式 | 激活 Skill | 读取路径 |
+|----------------|-----------|---------|
+| 使用 `bizAxios` / `axios` / `useRequest` / `fetch` 发起请求 | carry-hub-request | `.catpaw/skills/carry-hub-request/SKILL.md` |
+| 使用 `permissions` / `hasPermission` / `useAuthStore` / `PermissionRoute` | carry-hub-auth | `.catpaw/skills/carry-hub-auth/SKILL.md` |
+| 多维布尔状态组合（≥3个布尔维度的 if-else 组合判断） | ⚠️ 标记为位掩码重构候选 | 在报告中说明 |
+| 超长条件分支链（单文件 if/else/case > 5 个） | ⚠️ 标记为 Map/策略模式重构候选 | 在报告中说明 |
+
+**激活规则：**
+- 检测到对应模式 → 立即读取该 Skill 文件，将其规范作为该文件的专项审查标准
+- 未检测到 → 不加载，避免无关 Skill 污染审查上下文
+- 同一文件可同时激活多个 Skill
+
+诊断完成后，告知用户本次激活了哪些 Skill，然后进入逐文件审查。
+
+---
+
+## 第三步：逐文件审查
+
+对每个文件，按以下顺序检查，**发现问题记录，所有文件审查完后统一输出报告**。
+
+### A. 结构规模
+
+| 检查项 | 阈值 | 级别 |
+|--------|------|------|
+| 组件文件行数 | > 300 行 | 🔴 必须处理 |
+| hooks/utils 文件行数 | > 150 行 | 🟡 建议处理 |
+| 函数入参数量 | > 4 个 | 🟡 建议处理 |
+| 单函数行数 | > 80 行 | 🟡 建议处理 |
+
+### B. 条件逻辑复杂度
+
+| 检查项 | 阈值 | 级别 |
+|--------|------|------|
+| 单文件 if/else/case 分支总数 | > 5 个 | 🔴 必须处理 |
+| if 嵌套层数 | > 2 层 | 🟡 建议处理 |
+| 多维二元状态组合（≥3维） | 存在即标记 | 🔴 必须处理 |
+
+多维状态检测模式：
+```ts
+if (isA && isB) { ... }
+else if (isA && !isB) { ... }
+else if (!isA && isB) { ... }
+```
+
+### C. React 规范
+
+| 检查项 | 级别 |
+|--------|------|
+| 手写 `useEffect` 发起网络请求（应改用 `useRequest`） | 🔴 必须处理 |
+| `&&` 条件渲染（应改用三目或 `!!`） | 🟡 建议处理 |
+| 非基本类型用 `\|\|` / `??` 设置默认值 | 🔴 必须处理 |
+| Class 组件 | 🔴 必须处理 |
+| Props 用 `type` 定义（应改用 `interface`） | 🟡 建议处理 |
+| `useCallback` 未用 `useMemoizedFn` 替代 | 🟡 建议处理 |
+
+### D. TypeScript 规范
+
+| 检查项 | 级别 |
+|--------|------|
+| 使用 `any`（无注释说明原因） | 🔴 必须处理 |
+| 使用 `@ts-ignore` | 🔴 必须处理 |
+| 公共类型未在 `types/` 目录定义 | 🟡 建议处理 |
+| API 响应未用 `ApiResponse<T>` 约束 | 🟡 建议处理 |
+| 类型转换无默认值（如 `Number(x)` 未加 `\|\| 0`） | 🟡 建议处理 |
+
+### E. 依赖与架构规范
+
+| 检查项 | 级别 |
+|--------|------|
+| 子包间直接互相 import（绕过 `@carry/shared`） | 🔴 必须处理 |
+| 直接使用 `axios`（绕过 `bizAxios`） | 🔴 必须处理 |
+| 权限判断未使用 `usePermission` / `PermissionRoute` | 🟡 建议处理 |
+| 组件内直接写请求逻辑（应封装到 `api/` 目录） | 🟡 建议处理 |
+| 常量未在 `constants/` 维护（魔法数字/字符串） | 🟡 建议处理 |
+| Mock 数据硬编码在业务代码中 | 🔴 必须处理 |
+
+### F. 错误处理
+
+| 检查项 | 级别 |
+|--------|------|
+| 异步操作无 `try/catch`（静默失败） | 🔴 必须处理 |
+| 错误未用 `message.error()` 展示给用户 | 🟡 建议处理 |
+| 4xx 与 5xx 错误未分类处理 | 🟡 建议处理 |
+
+### G. Skill 专项审查（仅对激活了对应 Skill 的文件执行）
+
+- **carry-hub-request 已激活**：对文件中的请求相关代码，按 Skill 规范逐条核查（bizAxios 使用、响应类型、错误分类处理、重试场景）
+- **carry-hub-auth 已激活**：对文件中的权限相关代码，按 Skill 规范逐条核查（三层权限控制、权限码来源、usePermission 用法）
+
+---
+
+## 第四步：输出报告
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 CarryHub 代码质量审查报告
+审查文件：N 个 | 激活 Skill：carry-hub-request, carry-hub-auth
+发现问题：🔴 X 个 | 🟡 Y 个
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+【packages/enterprise/src/api/enterprise.ts】
+🔴 [carry-hub-request] 直接使用 axios，未经 bizAxios（第 3 行）
+   → import bizAxios from '@carry/shared/utils/bizAxios'
+🟡 [carry-hub-request] 响应未用 ApiResponse<T> 约束（第 12 行）
+
+【packages/enterprise/src/pages/List/index.tsx】
+🔴 [通用] 条件分支 9 个（第 45-120 行）
+   → 状态码映射建议改为 STATUS_MAP 对象
+🟡 [通用] 行数 287 行（接近 300 行上限）
+
+【packages/enterprise/src/hooks/useEnterpriseFilter.ts】
+🔴 [通用] 手写 useEffect 发起请求（第 23 行）
+   → 替换为 useRequest：useRequest(fetchList, { refreshDeps: [params] })
+🔴 [通用] 多维状态组合（第 56-78 行，3维×8种组合）
+   → 建议使用 Map 或位掩码方案重构
+🔴 [carry-hub-auth] hasPermission 调用未从 usePermission 解构（第 89 行）
+   → const { hasPermission } = usePermission()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 必须处理（4项）
+🟡 建议处理（2项）
+
+是否立即处理 🔴 问题？[Y 开始逐个修复 / N 仅记录]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+## 第五步：修复阶段
+
+用户确认处理后，**按文件逐个修复**，修复完成后对该文件重新执行对应检查项，确认无遗留问题。
+
+🟡 问题由用户决定是否处理，不强制介入。

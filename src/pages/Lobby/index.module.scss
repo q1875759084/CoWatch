@@ -1,0 +1,102 @@
+.page {
+  min-height: 100vh;
+  background: #0f172a;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 28px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.roomCode {
+  font-size: 14px;
+  color: #718096;
+}
+
+.code {
+  font-weight: 700;
+  color: #63b3ed;
+  letter-spacing: 2px;
+  font-size: 16px;
+}
+
+.headerRight {
+  font-size: 13px;
+  color: #718096;
+}
+
+.onlineCount {
+  color: #68d391;
+}
+
+.content {
+  flex: 1;
+  display: flex;
+  gap: 0;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  padding: 24px 20px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  overflow-y: auto;
+}
+
+.sectionTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: #718096;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 16px;
+}
+
+.main {
+  flex: 1;
+  padding: 40px 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.mainTitle {
+  font-size: 24px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin: 0;
+}
+
+.mainDesc {
+  font-size: 14px;
+  color: #718096;
+  margin: 0;
+}
+
+.waitingBox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  width: 100%;
+  gap: 16px;
+}
+
+.waitingIcon {
+  font-size: 48px;
+}
+
+.waitingText {
+  font-size: 16px;
+  color: #718096;
+  margin: 0;
+}

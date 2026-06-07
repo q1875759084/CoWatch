@@ -1,0 +1,79 @@
+.panel {
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.section {
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+
+  &:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+  }
+}
+
+.sectionTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4a5568;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin: 0 0 12px;
+}
+
+.controllerInfo {
+  font-size: 13px;
+}
+
+.freeMode {
+  color: #68d391;
+}
+
+.designatedMode {
+  color: #e2e8f0;
+}
+
+.youBadge {
+  color: #63b3ed;
+  font-size: 12px;
+}
+
+.modeToggle {
+  display: flex;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.modeBtn {
+  flex: 1;
+  padding: 8px 0;
+  background: transparent;
+  border: none;
+  color: #718096;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.04);
+    color: #a0aec0;
+  }
+
+  &.active {
+    background: rgba(99, 179, 237, 0.15);
+    color: #63b3ed;
+    font-weight: 600;
+  }
+}
+
+.modeHint {
+  font-size: 11px;
+  color: #4a5568;
+  margin: 0;
+}

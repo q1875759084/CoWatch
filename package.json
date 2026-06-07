@@ -1,0 +1,46 @@
+{
+  "name": "cowatch",
+  "version": "1.0.0",
+  "description": "CoWatch 游戏复盘网站前端",
+  "main": "index.js",
+  "scripts": {
+    "dev": "webpack serve --config webpack.dev.js",
+    "build": "webpack --config webpack.prod.js",
+    "type-check": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@babel/core": "7.29.7",
+    "@babel/preset-env": "7.29.7",
+    "@babel/preset-react": "7.29.7",
+    "@babel/preset-typescript": "7.29.7",
+    "@types/node": "20.19.41",
+    "@types/react": "19.1.6",
+    "@types/react-dom": "19.1.6",
+    "babel-loader": "9.2.1",
+    "css-loader": "6.10.0",
+    "dotenv": "17.4.2",
+    "html-webpack-plugin": "5.6.7",
+    "sass": "1.71.0",
+    "sass-loader": "14.2.1",
+    "style-loader": "3.3.4",
+    "typescript": "5.7.3",
+    "webpack": "5.107.1",
+    "webpack-cli": "5.1.4",
+    "webpack-dev-server": "5.2.4",
+    "webpack-merge": "6.0.1"
+  },
+  "dependencies": {
+    "@cmjndy/monitor": "^0.1.1",
+    "axios": "1.15.2",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-router-dom": "7.6.1"
+  }
+}
