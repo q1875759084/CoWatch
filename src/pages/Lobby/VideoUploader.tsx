@@ -1,7 +1,7 @@
 import { useState, useRef, type ChangeEvent } from 'react';
 import { getUploadUrlApi, confirmVideoUploadApi } from '@/api/room';
 import { useRoom } from '@/context/RoomContext';
-import { ApiError } from '@/utils/request';
+import request, { ApiError } from '@/utils/request';
 import styles from './VideoUploader.module.scss';
 
 type UploadStatus = 'idle' | 'uploading' | 'done' | 'error';
@@ -113,46 +113,31 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 
 /**
  * 本地模式：PUT 文件到后端接口，读取响应 JSON 中的 videoUrl
+ * 使用封装的 axios 实例，自动注入 Bearer Token 并支持无感刷新
  */
-function uploadToBackend(
+async function uploadToBackend(
   uploadUrl: string,
   file: File,
   fileName: string,
   onProgress: (pct: number) => void,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    // 传 fileName 以便后端保留扩展名
-    xhr.open('PUT', `${uploadUrl}?fileName=${encodeURIComponent(fileName)}`, true);
-    xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
-      }
-    };
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          const json = JSON.parse(xhr.responseText);
-          const videoUrl = json?.data?.videoUrl as string | undefined;
-          if (videoUrl) {
-            resolve(videoUrl);
-          } else {
-            reject(new Error('后端未返回 videoUrl'));
-          }
-        } catch {
-          reject(new Error('解析后端响应失败'));
+  const res = await request.put<{ data: { videoUrl: string } }>(
+    `${uploadUrl}?fileName=${encodeURIComponent(fileName)}`,
+    file,
+    {
+      headers: { 'Content-Type': file.type || 'video/mp4' },
+      // baseURL 设为空字符串，避免 request 实例的 /api 前缀重复拼接
+      baseURL: '',
+      onUploadProgress: (e) => {
+        if (e.total) {
+          onProgress(Math.round((e.loaded / e.total) * 100));
         }
-      } else {
-        reject(new Error(`上传失败：HTTP ${xhr.status}`));
-      }
-    };
-
-    xhr.onerror = () => reject(new Error('上传网络错误'));
-    xhr.send(file);
-  });
+      },
+    },
+  );
+  const videoUrl = res.data?.data?.videoUrl;
+  if (!videoUrl) throw new Error('后端未返回 videoUrl');
+  return videoUrl;
 }
 
 /**
