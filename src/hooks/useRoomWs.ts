@@ -39,7 +39,6 @@ export function useRoomWs({
     setControlMode,
     setControllerId,
     setVideoUrl,
-    setRoomStatus,
   } = useRoom();
 
   // 发送消息的稳定引用
@@ -84,7 +83,6 @@ export function useRoomWs({
             setControlMode(d.controlMode);
             setControllerId(d.controllerId);
             if (d.videoUrl) setVideoUrl(d.videoUrl);
-            setRoomStatus(d.status);
           }
           break;
         }
@@ -145,7 +143,6 @@ export function useRoomWs({
         case 'ROOM_STARTED': {
           const d = msg.data as unknown as RoomStartedData | undefined;
           if (d) {
-            setRoomStatus('watching');
             if (d.videoUrl) setVideoUrl(d.videoUrl);
             onRoomStarted?.(d.videoUrl);
           }

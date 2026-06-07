@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-import type { Member, ControlMode, RoomStatus } from '@/types/room';
+import type { Member, ControlMode } from '@/types/room';
 
 export interface PlaybackState {
   currentTime: number;
@@ -9,7 +9,6 @@ export interface PlaybackState {
 export interface RoomState {
   roomId: string;
   videoUrl: string | null;
-  status: RoomStatus;
   members: Member[];
   controlMode: ControlMode;
   controllerId: string | null;
@@ -27,7 +26,6 @@ interface RoomContextValue {
   setControlMode: (mode: ControlMode) => void;
   setControllerId: (userId: string | null) => void;
   setPlaybackState: (state: Partial<PlaybackState>) => void;
-  setRoomStatus: (status: RoomStatus) => void;
 }
 
 const RoomContext = createContext<RoomContextValue>({
@@ -41,7 +39,6 @@ const RoomContext = createContext<RoomContextValue>({
   setControlMode: () => {},
   setControllerId: () => {},
   setPlaybackState: () => {},
-  setRoomStatus: () => {},
 });
 
 export function RoomProvider({ children }: { children: ReactNode }) {
@@ -108,10 +105,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const setRoomStatus = useCallback((status: RoomStatus) => {
-    setRoomState((prev) => prev ? { ...prev, status } : prev);
-  }, []);
-
   return (
     <RoomContext.Provider
       value={{
@@ -125,7 +118,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setControlMode,
         setControllerId,
         setPlaybackState,
-        setRoomStatus,
       }}
     >
       {children}

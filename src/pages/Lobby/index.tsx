@@ -24,7 +24,6 @@ export default function LobbyPage() {
       initRoom({
         roomId: info.roomId,
         videoUrl: info.videoUrl,
-        status: info.status,
         members: info.members,
         controlMode: info.controlMode,
         controllerId: info.controllerId,

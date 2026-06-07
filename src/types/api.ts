@@ -28,12 +28,10 @@ export interface JoinRoomResponse {
   roomId: string;
   isAdmin: boolean;
   videoUrl: string | null;
-  status: 'waiting' | 'watching' | 'closed';
 }
 
 export interface MyRoom {
   room_id: string;
-  status: string;
   video_url: string | null;
   is_admin: 0 | 1;
   joined_at: number;

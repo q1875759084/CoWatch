@@ -4,12 +4,6 @@ import { useMyRooms } from '@/hooks/useMyRooms';
 import { RoomModal } from './RoomModal';
 import styles from './RoomList.module.scss';
 
-const STATUS_LABEL: Record<string, string> = {
-  waiting: '等待中',
-  watching: '复盘中',
-  closed: '已关闭',
-};
-
 /**
  * 左侧房间列表 + "+" 按钮（创建/加入房间弹窗入口）
  */
@@ -45,7 +39,6 @@ export function RoomList() {
               <div className={styles.roomIcon}>{room.room_id.slice(0, 1).toUpperCase()}</div>
               <div className={styles.roomInfo}>
                 <div className={styles.roomId}>{room.room_id}</div>
-                <div className={styles.roomStatus}>{STATUS_LABEL[room.status] ?? room.status}</div>
                 {room.is_admin === 1 && (
                   <div className={styles.adminBadge}>管理员</div>
                 )}

@@ -1,5 +1,4 @@
 export type ControlMode = 'designated' | 'free';
-export type RoomStatus = 'waiting' | 'watching' | 'closed';
 
 export interface Member {
   userId: string;
@@ -10,7 +9,6 @@ export interface Member {
 
 export interface RoomInfo {
   roomId: string;
-  status: RoomStatus;
   videoUrl: string | null;
   controlMode: ControlMode;
   controllerId: string | null;
@@ -76,7 +74,6 @@ export interface RoomStartedData {
 
 export interface RoomStateData {
   videoUrl: string | null;
-  status: RoomStatus;
   controlMode: ControlMode;
   controllerId: string | null;
 }
