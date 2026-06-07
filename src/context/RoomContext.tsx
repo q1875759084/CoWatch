@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-import type { Member, ControlMode } from '@/types/room';
+import type { Member, ControlMode, VideoItem } from '@/types/room';
 
 export interface PlaybackState {
   currentTime: number;
@@ -8,7 +8,10 @@ export interface PlaybackState {
 
 export interface RoomState {
   roomId: string;
-  videoUrl: string | null;
+  /** 当前激活（正在播放）的视频 URL，由 SWITCH_VIDEO 更新 */
+  activeVideoUrl: string | null;
+  /** 房间内所有视频列表 */
+  videos: VideoItem[];
   members: Member[];
   controlMode: ControlMode;
   controllerId: string | null;
@@ -18,7 +21,8 @@ export interface RoomState {
 interface RoomContextValue {
   roomState: RoomState | null;
   initRoom: (state: RoomState) => void;
-  setVideoUrl: (url: string) => void;
+  setActiveVideoUrl: (url: string) => void;
+  addVideo: (video: VideoItem) => void;
   setMembers: (members: Member[]) => void;
   addMember: (member: Member) => void;
   removeMember: (userId: string) => void;
@@ -31,7 +35,8 @@ interface RoomContextValue {
 const RoomContext = createContext<RoomContextValue>({
   roomState: null,
   initRoom: () => {},
-  setVideoUrl: () => {},
+  setActiveVideoUrl: () => {},
+  addVideo: () => {},
   setMembers: () => {},
   addMember: () => {},
   removeMember: () => {},
@@ -48,8 +53,18 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setRoomState(state);
   }, []);
 
-  const setVideoUrl = useCallback((url: string) => {
-    setRoomState((prev) => prev ? { ...prev, videoUrl: url } : prev);
+  const setActiveVideoUrl = useCallback((url: string) => {
+    setRoomState((prev) => prev ? { ...prev, activeVideoUrl: url } : prev);
+  }, []);
+
+  const addVideo = useCallback((video: VideoItem) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      // 避免重复追加
+      const exists = prev.videos.some((v) => v.id === video.id);
+      if (exists) return prev;
+      return { ...prev, videos: [...prev.videos, video] };
+    });
   }, []);
 
   const setMembers = useCallback((members: Member[]) => {
@@ -59,7 +74,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const addMember = useCallback((member: Member) => {
     setRoomState((prev) => {
       if (!prev) return prev;
-      // 避免重复添加
       const exists = prev.members.some((m) => m.userId === member.userId);
       if (exists) return prev;
       return { ...prev, members: [...prev.members, member] };
@@ -110,7 +124,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       value={{
         roomState,
         initRoom,
-        setVideoUrl,
+        setActiveVideoUrl,
+        addVideo,
         setMembers,
         addMember,
         removeMember,

@@ -27,7 +27,8 @@ export default function WatchRoomPage() {
     getRoomInfoApi(roomId).then((info) => {
       initRoom({
         roomId: info.roomId,
-        videoUrl: info.videoUrl,
+        activeVideoUrl: info.videoUrl,
+        videos: [],
         members: info.members,
         controlMode: info.controlMode,
         controllerId: info.controllerId,
@@ -80,10 +81,10 @@ export default function WatchRoomPage() {
       <div className={styles.content}>
         {/* 视频播放器区域 */}
         <div className={styles.playerArea}>
-          {roomState.videoUrl ? (
+          {roomState.activeVideoUrl ? (
             <VideoPlayer
               ref={videoRef}
-              src={roomState.videoUrl}
+              src={roomState.activeVideoUrl}
               disabled={!isController}
               isSyncingRef={isSyncingRef}
               onProgressChange={(currentTime) => {

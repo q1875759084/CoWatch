@@ -27,10 +27,13 @@ export default function MemberList({
           onSelectController &&
           !isController;
 
+        // 只展示在线成员
+        if (!member.isOnline) return null;
+
         return (
           <li
             key={member.userId}
-            className={`${styles.item} ${!member.isOnline ? styles.offline : ''} ${isController ? styles.controller : ''}`}
+            className={`${styles.item} ${isController ? styles.controller : ''}`}
             onClick={canClick ? () => onSelectController!(member.userId) : undefined}
             style={{ cursor: canClick ? 'pointer' : 'default' }}
             title={canClick ? '点击指定为控制者' : undefined}
@@ -42,7 +45,6 @@ export default function MemberList({
             <span className={styles.badges}>
               {member.isAdmin && <span className={styles.adminBadge}>管理员</span>}
               {isController && <span className={styles.controllerBadge}>控制中</span>}
-              {!member.isOnline && <span className={styles.offlineBadge}>离线</span>}
             </span>
           </li>
         );

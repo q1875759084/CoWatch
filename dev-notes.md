@@ -50,3 +50,39 @@
 - `timeupdate` 回调中检查 `isSyncingRef.current`，为 `true` 时跳过广播
 
 **注意：** 进度条广播还需加 throttle 200ms，避免拖动时消息过于密集。
+
+---
+
+## 踩坑记录
+
+### XHR 绕过 axios 拦截器导致上传 401
+
+**现象：** 视频文件上传接口返回 401，getUploadUrl 接口却正常（200）。
+
+**根因：** `VideoUploader` 使用原生 `XMLHttpRequest` 直接 PUT 文件到后端，完全绕过了 axios 请求拦截器，导致 `Authorization: Bearer <token>` 头没有被自动注入。
+
+**解决：** 改用封装的 `request`（axios 实例）调用 `request.put(url, file, { onUploadProgress })`，进度回调用 `onUploadProgress` 替代 `xhr.upload.onprogress`，token 由拦截器自动注入，无感刷新也正常触发。
+
+**补充：** OSS 预签名直传例外——OSS 通过 URL query 参数鉴权，加上自定义 `Authorization` 头反而会报错，这种场景继续用 XHR。
+
+---
+
+### Express 静态文件目录与 tsx 直接运行时 `__dirname` 不一致导致视频 404
+
+**现象：** 视频上传成功（磁盘文件 4.2MB），但播放器显示 0:00 黑屏，`/uploads/...` 路由返回 404。
+
+**根因：** `app.ts` 中写的是：
+```ts
+const uploadsDir = path.resolve(__dirname, '../../uploads');
+```
+这是按"编译后 `dist/src/app.js`"的层级写的。但开发环境用 `tsx src/app.ts` 直接运行，`__dirname` 指向 `src/`，`../../uploads` 解析到 `Desktop/uploads`（不存在）。
+
+与此同时 controller 里写的是 `'../../../uploads'`，从 `src/controllers/rooms/` 上溯三层正好到项目根 `CoWatch-backend/uploads`，两者路径不一致。
+
+**解决：** `app.ts` 改为：
+```ts
+const uploadsDir = path.resolve(__dirname, '../uploads');
+```
+从 `src/` 上溯一层即到项目根，与 controller 写文件路径对齐。
+
+**规律：** 用 `tsx` 直接运行 TypeScript 时，`__dirname` 就是源文件所在目录；而 `tsc` 编译后运行时 `__dirname` 是 `dist/` 下对应的目录，相对层级不同，需要区分对待。

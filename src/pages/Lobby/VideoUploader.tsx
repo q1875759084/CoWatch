@@ -1,6 +1,5 @@
 import { useState, useRef, type ChangeEvent } from 'react';
 import { getUploadUrlApi, confirmVideoUploadApi } from '@/api/room';
-import { useRoom } from '@/context/RoomContext';
 import request, { ApiError } from '@/utils/request';
 import styles from './VideoUploader.module.scss';
 
@@ -15,7 +14,6 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
-  const { setVideoUrl } = useRoom();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -31,7 +29,7 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
       // 1. 向后端请求上传地址
       //    - OSS 模式：返回 OSS 预签名 PUT URL，mode 为空
       //    - 本地模式：返回后端本地上传接口地址，mode === 'local'
-      const { uploadUrl, videoUrl: ossVideoUrl, mode } = await getUploadUrlApi(
+      const { uploadUrl, videoUrl: ossVideoUrl, mode, fileName: remoteFileName } = await getUploadUrlApi(
         roomId,
         file.name,
         file.type || 'video/mp4',
@@ -39,24 +37,21 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 
       if (mode === 'local') {
         // ── 本地开发模式 ──────────────────────────────────────────────────
-        // 直接 PUT 文件到后端，后端落盘后在响应 JSON 里返回真实 videoUrl
-        const finalVideoUrl = await uploadToBackend(
+        // 直接 PUT 文件到后端，后端落盘后写入 room_videos 并广播 VIDEO_ADDED
+        await uploadToBackend(
           uploadUrl,
           file,
           file.name,
           (pct) => setProgress(pct),
         );
-        setVideoUrl(finalVideoUrl);
+        // VIDEO_ADDED WS 消息会自动将视频追加到列表，无需手动更新 Context
       } else {
         // ── OSS 模式 ──────────────────────────────────────────────────────
         // 2. 直传 OSS（XHR PUT，监听 progress）
         await uploadToOss(uploadUrl, file, (pct) => setProgress(pct));
 
-        // 3. 通知后端保存 videoUrl（OSS 模式下 ossVideoUrl 非空）
-        await confirmVideoUploadApi(roomId, ossVideoUrl);
-
-        // 4. 更新本地 RoomContext（WebSocket 也会广播 VIDEO_READY）
-        setVideoUrl(ossVideoUrl);
+        // 3. 通知后端追加到 room_videos，后端广播 VIDEO_ADDED
+        await confirmVideoUploadApi(roomId, ossVideoUrl, remoteFileName || file.name);
       }
 
       setStatus('done');
@@ -74,7 +69,7 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
   return (
     <div className={styles.wrapper}>
       {status === 'idle' || status === 'error' ? (
-        <label className={styles.uploadArea}>
+        <label className={styles.idleBox}>
           <input
             ref={inputRef}
             type="file"
@@ -82,9 +77,10 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
             hidden
             onChange={handleFileChange}
           />
-          <span className={styles.icon}>🎬</span>
-          <span className={styles.label}>点击选择录屏文件</span>
-          <span className={styles.hint}>支持 mp4、mov、avi 等常见格式</span>
+          <span className={styles.idleText}>
+            点击选择录屏文件
+            <span className={styles.idleHint}>&ensp;支持 mp4、mov、avi 等常见格式</span>
+          </span>
           {status === 'error' && <span className={styles.errorText}>{errorMsg}</span>}
         </label>
       ) : status === 'uploading' ? (
@@ -118,11 +114,12 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 async function uploadToBackend(
   uploadUrl: string,
   file: File,
-  fileName: string,
+  _fileName: string,
   onProgress: (pct: number) => void,
-): Promise<string> {
-  const res = await request.put<{ data: { videoUrl: string } }>(
-    `${uploadUrl}?fileName=${encodeURIComponent(fileName)}`,
+): Promise<void> {
+  // uploadUrl 已由后端 getUploadUrl 拼入 fileName 参数，无需重复追加
+  await request.put(
+    uploadUrl,
     file,
     {
       headers: { 'Content-Type': file.type || 'video/mp4' },
@@ -135,9 +132,7 @@ async function uploadToBackend(
       },
     },
   );
-  const videoUrl = res.data?.data?.videoUrl;
-  if (!videoUrl) throw new Error('后端未返回 videoUrl');
-  return videoUrl;
+  // videoUrl 由后端通过 VIDEO_ADDED WS 消息广播，无需从响应中读取
 }
 
 /**

@@ -69,7 +69,7 @@ export default function ControlPanel({
       {/* 成员列表 */}
       <section className={styles.section}>
         <h3 className={styles.sectionTitle}>
-          成员 ({members.filter((m) => m.isOnline).length}/{members.length})
+          成员 ({members.filter((m) => m.isOnline).length} 人在线)
         </h3>
         <MemberList
           members={members}

@@ -44,6 +44,19 @@ export interface MyRoomsResponse {
 export interface UploadUrlResponse {
   uploadUrl: string;
   videoUrl: string;
+  fileName: string;
   /** 本地开发模式时值为 'local' */
   mode?: 'local';
+}
+
+export interface VideoItemResponse {
+  id: string;
+  videoUrl: string;
+  fileName: string;
+  uploaderId: string;
+  createdAt: number;
+}
+
+export interface RoomVideosResponse {
+  videos: VideoItemResponse[];
 }

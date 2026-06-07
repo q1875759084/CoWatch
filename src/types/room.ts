@@ -7,6 +7,14 @@ export interface Member {
   isOnline: boolean;
 }
 
+export interface VideoItem {
+  id: string;
+  videoUrl: string;
+  fileName: string;
+  uploaderId: string;
+  createdAt: number;
+}
+
 export interface RoomInfo {
   roomId: string;
   videoUrl: string | null;
@@ -22,14 +30,13 @@ export type WsMessageType =
   | 'SYNC_STATE'
   | 'TRANSFER_CONTROL'
   | 'MODE_CHANGE'
-  | 'START_WATCH'
+  | 'SWITCH_VIDEO'
   | 'CONTROL_CHANGED'
   | 'MODE_CHANGED'
   | 'MEMBER_JOINED'
   | 'MEMBER_LEFT'
-  | 'ROOM_STARTED'
   | 'ROOM_STATE'
-  | 'VIDEO_READY'
+  | 'VIDEO_ADDED'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -68,16 +75,17 @@ export interface MemberLeftData {
   userId: string;
 }
 
-export interface RoomStartedData {
-  videoUrl: string;
-}
-
 export interface RoomStateData {
   videoUrl: string | null;
   controlMode: ControlMode;
   controllerId: string | null;
+  videos: VideoItem[];
+  members?: Member[];
 }
 
-export interface VideoReadyData {
+export interface VideoAddedData extends VideoItem {}
+
+export interface SwitchVideoData {
   videoUrl: string;
+  videoId?: string;
 }

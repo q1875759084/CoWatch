@@ -1,102 +1,90 @@
 .page {
-  min-height: 100vh;
-  background: #0f172a;
+  height: 100%;
   display: flex;
   flex-direction: column;
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 28px;
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.roomCode {
-  font-size: 14px;
-  color: #718096;
-}
-
-.code {
-  font-weight: 700;
-  color: #63b3ed;
-  letter-spacing: 2px;
-  font-size: 16px;
-}
-
-.headerRight {
-  font-size: 13px;
-  color: #718096;
-}
-
-.onlineCount {
-  color: #68d391;
+  background: #0a0f1e;
+  overflow: hidden;
 }
 
 .content {
   flex: 1;
   display: flex;
-  gap: 0;
   overflow: hidden;
 }
 
-.sidebar {
-  width: 260px;
-  flex-shrink: 0;
-  padding: 24px 20px;
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
-  overflow-y: auto;
-}
-
-.sectionTitle {
-  font-size: 13px;
-  font-weight: 600;
-  color: #718096;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin: 0 0 16px;
-}
+// ── 左侧主内容区 ────────────────────────────────────────────────────────────
 
 .main {
   flex: 1;
-  padding: 40px 48px;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 16px;
+  overflow-y: auto;
+  min-width: 0;
 }
 
-.mainTitle {
-  font-size: 24px;
-  font-weight: 700;
-  color: #e2e8f0;
-  margin: 0;
+// 播放器
+// 外层容器：撑满列宽，高度由 max-height 约束（视口 - TopBar 48px - 底部预留 180px）
+// 内层视频通过 aspect-ratio + margin: auto 在约束范围内居中缩放
+.playerArea {
+  width: 100%;
+  // 高度上限：防止宽屏时播放器无限拉高
+  max-height: calc(100vh - 48px - 180px);
+  background: #000;
+  flex-shrink: 0;
+  // 内层居中
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
 }
 
-.mainDesc {
-  font-size: 14px;
-  color: #718096;
-  margin: 0;
+// 真正保持 16:9 比例的元素
+// 同时受 max-width(100%) 和 max-height(100%) 双重约束
+// 浏览器会取两者中更严格的一侧，另一侧自动缩小
+.playerRatio {
+  width: 100%;
+  max-width: 100%;
+  // 高度由 aspect-ratio 按宽度推算，但不能超过父容器高度
+  aspect-ratio: 16 / 9;
+  max-height: 100%;
+  // 当高度触顶时，让宽度跟着收缩
+  height: auto;
+  position: relative;
 }
 
-.waitingBox {
+.noVideo {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  flex: 1;
-  width: 100%;
-  gap: 16px;
+  gap: 12px;
+  color: #4a5568;
+  font-size: 14px;
+
+  p { margin: 0; }
 }
 
-.waitingIcon {
-  font-size: 48px;
+.noVideoIcon {
+  font-size: 40px;
 }
 
-.waitingText {
-  font-size: 16px;
-  color: #718096;
-  margin: 0;
+// 视频列表区
+.videoListSection {
+  padding: 0 24px;
+  flex-shrink: 0;
+}
+
+// 上传区
+.uploaderSection {
+  padding: 16px 24px 24px;
+  flex-shrink: 0;
+}
+
+// ── 右侧控制面板 ────────────────────────────────────────────────────────────
+
+.panel {
+  width: 280px;
+  flex-shrink: 0;
+  background: #0f172a;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  overflow-y: auto;
 }

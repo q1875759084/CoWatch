@@ -4,6 +4,7 @@ import type {
   JoinRoomResponse,
   MyRoomsResponse,
   UploadUrlResponse,
+  RoomVideosResponse,
 } from '@/types/api';
 import type { RoomInfo } from '@/types/room';
 
@@ -63,8 +64,22 @@ export async function getUploadUrlApi(
 }
 
 /**
- * 确认视频上传完成（OSS 模式）
+ * 获取房间视频列表
  */
-export async function confirmVideoUploadApi(roomId: string, videoUrl: string): Promise<void> {
-  await request.put(`/rooms/${roomId}/video`, { videoUrl });
+export async function getVideosApi(roomId: string): Promise<RoomVideosResponse> {
+  const res = await request.get<{ code: number; message: string; data: RoomVideosResponse }>(
+    `/rooms/${roomId}/videos`,
+  );
+  return res.data.data;
+}
+
+/**
+ * 确认视频上传完成（OSS 模式）：传入 videoUrl + fileName
+ */
+export async function confirmVideoUploadApi(
+  roomId: string,
+  videoUrl: string,
+  fileName?: string,
+): Promise<void> {
+  await request.put(`/rooms/${roomId}/video`, { videoUrl, fileName });
 }

@@ -8,37 +8,39 @@ import type {
   ModeChangedData,
   MemberJoinedData,
   MemberLeftData,
-  RoomStartedData,
   RoomStateData,
-  VideoReadyData,
+  VideoAddedData,
+  SwitchVideoData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
   roomId: string;
   /** accessToken，通过 WS 连接参数传给后端鉴权 */
   token: string;
-  /** 收到 ROOM_STARTED 时的跳转回调 */
-  onRoomStarted?: (videoUrl: string) => void;
   /** 收到 SYNC_PROGRESS 时通知播放器同步（防回环由调用方负责） */
   onSyncProgress?: (currentTime: number) => void;
   /** 收到 SYNC_STATE 时通知播放器同步 */
   onSyncState?: (isPlaying: boolean, currentTime: number) => void;
+  /** 收到 SWITCH_VIDEO 时切换播放器视频 */
+  onSwitchVideo?: (videoUrl: string) => void;
 }
 
 export function useRoomWs({
   roomId,
   token,
-  onRoomStarted,
   onSyncProgress,
   onSyncState,
+  onSwitchVideo,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
+    setMembers,
     addMember,
     removeMember,
     setControlMode,
     setControllerId,
-    setVideoUrl,
+    setActiveVideoUrl,
+    addVideo,
   } = useRoom();
 
   // 发送消息的稳定引用
@@ -55,7 +57,6 @@ export function useRoomWs({
   useEffect(() => {
     if (!roomId || !token) return;
 
-    // 构建 WebSocket URL（开发环境通过 webpack-dev-server proxy 代理）
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/socket?roomId=${roomId}&token=${encodeURIComponent(token)}`;
 
@@ -82,7 +83,18 @@ export function useRoomWs({
           if (d) {
             setControlMode(d.controlMode);
             setControllerId(d.controllerId);
-            if (d.videoUrl) setVideoUrl(d.videoUrl);
+            // 用后端最新在线状态覆盖 HTTP 拉取的历史脏数据
+            if (d.members?.length) {
+              setMembers(d.members);
+            }
+            // 初始化视频列表
+            if (d.videos?.length) {
+              d.videos.forEach((v) => addVideo(v));
+            }
+            // 初始化当前激活视频
+            if (d.videoUrl) {
+              setActiveVideoUrl(d.videoUrl);
+            }
           }
           break;
         }
@@ -140,19 +152,25 @@ export function useRoomWs({
           break;
         }
 
-        case 'ROOM_STARTED': {
-          const d = msg.data as unknown as RoomStartedData | undefined;
+        case 'VIDEO_ADDED': {
+          const d = msg.data as unknown as VideoAddedData | undefined;
           if (d) {
-            if (d.videoUrl) setVideoUrl(d.videoUrl);
-            onRoomStarted?.(d.videoUrl);
+            addVideo({
+              id: d.id,
+              videoUrl: d.videoUrl,
+              fileName: d.fileName,
+              uploaderId: d.uploaderId,
+              createdAt: d.createdAt,
+            });
           }
           break;
         }
 
-        case 'VIDEO_READY': {
-          const d = msg.data as unknown as VideoReadyData | undefined;
+        case 'SWITCH_VIDEO': {
+          const d = msg.data as unknown as SwitchVideoData | undefined;
           if (d?.videoUrl) {
-            setVideoUrl(d.videoUrl);
+            setActiveVideoUrl(d.videoUrl);
+            onSwitchVideo?.(d.videoUrl);
           }
           break;
         }
