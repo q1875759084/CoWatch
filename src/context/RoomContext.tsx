@@ -1,11 +1,6 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import type { Member, ControlMode, VideoItem } from '@/types/room';
 
-export interface PlaybackState {
-  currentTime: number;
-  isPlaying: boolean;
-}
-
 export interface RoomState {
   roomId: string;
   roomName: string;
@@ -16,7 +11,6 @@ export interface RoomState {
   members: Member[];
   controlMode: ControlMode;
   controllerId: string | null;
-  playbackState: PlaybackState;
 }
 
 interface RoomContextValue {
@@ -29,7 +23,6 @@ interface RoomContextValue {
   removeMember: (userId: string) => void;
   setControlMode: (mode: ControlMode) => void;
   setControllerId: (userId: string | null) => void;
-  setPlaybackState: (state: Partial<PlaybackState>) => void;
 }
 
 const RoomContext = createContext<RoomContextValue>({
@@ -42,7 +35,6 @@ const RoomContext = createContext<RoomContextValue>({
   removeMember: () => {},
   setControlMode: () => {},
   setControllerId: () => {},
-  setPlaybackState: () => {},
 });
 
 export function RoomProvider({ children }: { children: ReactNode }) {
@@ -96,13 +88,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setRoomState((prev) => prev ? { ...prev, controllerId: userId } : prev);
   }, []);
 
-  const setPlaybackState = useCallback((state: Partial<PlaybackState>) => {
-    setRoomState((prev) => {
-      if (!prev) return prev;
-      return { ...prev, playbackState: { ...prev.playbackState, ...state } };
-    });
-  }, []);
-
   return (
     <RoomContext.Provider
       value={{
@@ -115,7 +100,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         removeMember,
         setControlMode,
         setControllerId,
-        setPlaybackState,
       }}
     >
       {children}

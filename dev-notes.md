@@ -24,7 +24,103 @@
 
 ---
 
+### CDN 流量优化演进路线（转码 + Service Worker）
+
+**背景：** 游戏录屏 1080p60 H264，30 分钟约 2.6GB。8 人复盘，主控反复在多个视频片段之间切换，浏览器无法有效缓存视频，每次切换几乎等于重新下载。
+
+**问题量化（腾讯云 CDN，0.21 元/GB）：**
+
+| 方案 | 8人极端场景一晚流量 | 一晚费用 | 月费（每周2次）|
+|------|-------------------|---------|--------------|
+| 原始方案（无转码、无SW） | ~187GB | ~40 元 | ~320 元 |
+| 仅 FFmpeg 转码（CRF 28） | ~23GB | ~5.3 元 | ~42 元 |
+| 转码 + Service Worker | ~7.7GB | ~2.1 元 | ~17 元 |
+
+**三阶段演进：**
+
+**① 原始方案**：录屏直传 OSS，浏览器无视频缓存，每次切换片段重新下载 2.6GB，8人每晚约 **187GB / 40元**。
+
+**② FFmpeg 本地转码（CRF 28 + faststart）**：
+- 用户上传前在本地用脚本转码，30 分钟从 2.6GB 压缩到 **320MB**（约 1/8）
+- 同时将 `moov` atom 移到文件头（`-movflags +faststart`），解决 seek 卡顿问题
+- 单项优化收益最大：流量降至 23GB，费用 **降低 87%**
+- 实现成本极低：后端提供静态 `.bat` 脚本下载，前端加下载按钮
+
+**③ Service Worker 视频缓存**：
+- SW 拦截视频的 Range 请求，首次请求时拉取完整文件写入 Cache Storage（磁盘级缓存）
+- 后续所有 Range 请求（seek、重复播放、切换回来）直接从缓存切片返回 206，不产生任何网络流量
+- 腾讯云 COS + CDN 原生支持 Range 请求（`206 Partial Content`），可直接对接
+- 注意：SW 缓存 Range 响应需手动处理分片重组，不能直接用 `cache.match`（详见下方"SW 视频缓存：Range 请求重组与预缓存"）
+- 在转码基础上再降 66%：7.7GB / 2.1 元，月费 **17 元**
+
+**关键洞察：**
+- **转码是单项收益最大的优化**，从 40 元 → 5 元，且实现成本极低（静态脚本分发）
+- **SW 在反复切换场景才显著**，如果复盘时每段只看一遍，转码后不加 SW 费用也在 2–3 元
+- **CRF 不控制文件大小，控制质量下限**——原文件已高度压缩时，CRF 23（高质量档）反而比原文件更大（见下方"FFmpeg CRF 反直觉"）
+
+---
+
 ## 工具与概念
+
+### SW 视频缓存：Range 请求重组与预缓存
+
+**背景：** 视频播放器不会一次性请求整个视频文件，而是通过多个 `Range` 请求分段拉取（如 `bytes=0-65535`）。这导致两个问题需要解决：
+
+**问题一：无法直接缓存 Range 响应**
+
+普通资源可以用 `cache.match(request)` 直接命中缓存。视频 Range 请求每次的 Range 区间不同，相同 URL 的请求因 Range 头不同而无法直接命中。
+
+**解决：** 缓存策略改为"缓存完整文件，按需切片返回"：
+1. 首次遇到某视频 URL → 发起**无 Range 的完整请求**，将整个文件存入 Cache Storage
+2. 后续任意 Range 请求 → 从缓存的 `ArrayBuffer` 中 `.slice(start, end+1)` 切片，构造 `206 Partial Content` 响应返回
+3. 缓存 key 统一为不带请求头的 URL，确保不同 Range 请求都能命中同一缓存条目
+
+**问题二：SW 激活窗口期导致非主控成员缓存 miss**
+
+SW 生命周期：`注册 → install → wait → activate`，activate 完成后才能拦截请求。首次访问时有短暂窗口期，若视频 Range 请求早于 SW activate 触发（多发生在非主控成员进入房间时），这些请求直接到达服务器，SW 无法缓存，后续 seek 仍产生真实流量。
+
+**解决：主动预缓存（postMessage 协议）**
+
+页面拿到视频列表后立即通过 `postMessage` 通知 SW，SW 在后台逐个下载并缓存所有视频，无需等待用户播放：
+
+```ts
+// Lobby/index.tsx：视频列表加载后通知 SW
+navigator.serviceWorker.ready.then((reg) => {
+  reg.active?.postMessage({ type: 'PRECACHE_VIDEOS', urls: videoUrls });
+});
+```
+
+```ts
+// sw.ts：接收指令，后台串行下载缓存
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'PRECACHE_VIDEOS') return;
+  event.waitUntil(precacheVideos(event.data.urls));
+});
+```
+
+**DevTools 验证方法：**
+- Application → Cache Storage → `cowatch-video-v1`：确认视频文件已缓存，`Content-Length` 与文件大小一致
+- Application → Service Workers → 点击 `sw.js` 链接 → SW 专属 Console 查看 `[SW] 缓存命中 / 缓存未命中` 日志
+- Network 面板大小列显示 `(ServiceWorker)` = 所有请求经过 SW 处理（含缓存命中和首次下载两种情况，无法仅凭此区分）
+
+**注意：** `(ServiceWorker)` 出现在大小列不代表命中缓存，只代表请求经过了 SW 的 fetch 事件。区分命中缓存的方式：看响应头是否只有 SW 自己构造的 4 个字段（无 `ETag`、`Last-Modified`、`Server` 等服务端原生响应头）。
+
+---
+
+### FFmpeg CRF 参数：控制质量下限而非文件大小上限
+
+**背景：** 用 CRF 23（高质量档）对原始录屏转码，输出文件反而比原文件更大（529MB → 540MB）。
+
+**根因：** CRF（Constant Rate Factor）控制的是**质量下限**，不是文件大小：
+- CRF 越小 → 质量越高 → 编码器保留更多细节 → 文件可能更大
+- 当原文件已经是高压缩率编码（如 NVENC 高码率模式），其质量本身就低于 CRF 23 的标准，libx264 会"补回"原文件丢弃的细节，导致输出更大
+
+**结论：**
+- 对已高度压缩的录屏，CRF 23 无意义，应直接用 CRF 26–28
+- 实测 CRF 28 下，30 分钟录屏从 ~2.6GB → **320MB**（约 1/8），游戏画面复盘清晰度可接受
+- CRF 选择参考：23=高质量、26=均衡、28=小文件（游戏复盘推荐 28）
+
+---
 
 ### 前端优先 + Mock 驱动开发策略
 
@@ -97,6 +193,25 @@ video.addEventListener('seeked', onSeeked);
 
 ---
 
+### MP4 moov 位置导致跟随方首次播放卡顿（已验证）
+
+**背景：** 主控 A 播放视频到中途，B 进入房间后通过 `initPlayback` 直接 seek 到 A 的当前位置，出现明显卡顿；重播同一段时不卡顿。
+
+**根因：** 录屏软件（如 N 卡）默认将 MP4 的 `moov` atom（索引信息）写在文件末尾。浏览器播放该文件时，必须先下载完整个文件才能解析索引，然后才能响应任意位置的 seek。B 进房间时 seek 到一个未缓冲的时间点，浏览器没有索引无法定位，触发 `waiting` 状态，表现为卡顿。重播时浏览器已有完整缓存，所以流畅。
+
+**解决：** 用 FFmpeg 将 `moov` 移到文件头（`-movflags +faststart`），浏览器拿到文件开头就能解析索引，任意位置 seek 都可以立即发出正确的 HTTP Range 请求，不需要等待完整下载。
+
+```bash
+# 仅移动 moov，不重新编码，速度极快
+ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
+```
+
+**验证结论：** 用 `trailer.mp4`（4.2MB / 52s）测试，转换后 B 跟随 A 首次播放不再卡顿，seek 响应正常。推断大文件（1.5GB）转码压缩时同步加上 `+faststart` 即可解决该问题。
+
+**注意：** 压缩脚本（`compress_*.bat` / `compress_balanced.sh`）已包含 `-movflags +faststart`，用户只需在上传前用脚本转码即可，无需额外操作。
+
+---
+
 ## 踩坑记录
 
 ### XHR 绕过 axios 拦截器导致上传 401
@@ -145,6 +260,20 @@ sqlite3 database/cowatch.sqlite3 "ALTER TABLE rooms ADD COLUMN name TEXT NOT NUL
 ```
 
 **规律：** 每次 schema 有字段变更，都需要对已有数据库文件单独跑迁移语句。生产环境应使用迁移工具（如 `better-sqlite3-migrate`、`flyway`）管理版本化 schema 变更，避免手动操作遗漏。
+
+---
+
+### Blob 下载接口被业务拦截器误判为失败
+
+**现象：** 调用 `downloadBatApi` 下载 `.bat` 文件时，前端抛出 `ApiError: 请求失败`，而后端实际返回了 200 和正确的 Blob 内容。
+
+**根因：** 封装的 `request`（axios 实例）响应拦截器会读取 `response.data.code` 做业务 code 校验。后端返回的是二进制 Blob，没有 `.code` 字段，拦截器将其判断为失败并抛错。此外，接口路径写成了 `/bat` 而非完整路径 `/api/bat`，导致请求打到前端 dev server 而非后端。
+
+**解决：** 改用原生 `axios.get`（非封装实例），绕过业务拦截器，直接获得 Blob；同时修正 API 路径为 `/api/bat`。代码注释中说明绕过原因。
+
+**结论：** 以下两类场景允许绕过封装的 `request`，直接用原生 `axios` 或 `XHR`：
+1. **OSS 预签名直传**：OSS 通过 URL query 鉴权，带自定义 `Authorization` 头会报错，用 XHR
+2. **后端返回非 JSON 数据**（如 Blob 文件下载）：业务拦截器假定响应为 JSON 并做 code 校验，用原生 axios 绕过；需在注释中说明原因
 
 ---
 

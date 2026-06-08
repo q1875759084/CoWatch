@@ -6,8 +6,8 @@ import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
 import { getRoomInfoApi, getVideosApi } from '@/api/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
-import VideoPlayer, { type VideoPlayerHandle } from '@/pages/WatchRoom/VideoPlayer';
-import ControlPanel from '@/pages/WatchRoom/ControlPanel';
+import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
+import ControlPanel from './ControlPanel';
 import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import styles from './index.module.scss';
@@ -71,8 +71,23 @@ export default function RoomPage() {
         members: info.members,
         controlMode: info.controlMode,
         controllerId: info.controllerId,
-        playbackState: { currentTime: 0, isPlaying: false },
       });
+
+      // 视频列表加载完成后，通知 SW 提前预缓存所有视频。
+      // 解决问题：SW 激活存在短暂窗口期，若视频首次 Range 请求早于 SW activate
+      // 完成，则该请求无法被拦截缓存，后续 seek 仍会产生真实网络请求。
+      // 通过主动预缓存，确保任意成员在实际播放前缓存已就绪。
+      const videoUrls = videosData.videos
+        .map((v) => v.videoUrl)
+        .filter(Boolean) as string[];
+      if (videoUrls.length > 0 && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.ready.then((registration) => {
+          registration.active?.postMessage({
+            type: 'PRECACHE_VIDEOS',
+            urls: videoUrls,
+          });
+        });
+      }
     });
   }, [roomId]);
 

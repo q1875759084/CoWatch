@@ -10,10 +10,19 @@ if (!isCI) {
 }
 
 module.exports = {
-  entry: './src/index.tsx',
+  entry: {
+    // 主应用入口
+    main: './src/index.tsx',
+    // Service Worker：必须输出到根路径，且文件名固定（注册时路径对应）
+    // 使用独立 entry 确保 SW 是独立文件，不被 bundle 合并
+    sw: './src/sw.ts',
+  },
   output: {
     path: path.resolve(__dirname, 'dist'),
-    filename: 'bundle.[contenthash].js',
+    // main → bundle.[contenthash].js，sw → sw.js（固定文件名，SW 注册需要稳定路径）
+    filename: (pathData) => {
+      return pathData.chunk?.name === 'sw' ? 'sw.js' : 'bundle.[contenthash].js';
+    },
     clean: true,
     // SPA 使用 history 模式路由，资源路径必须是绝对路径
     publicPath: '/',

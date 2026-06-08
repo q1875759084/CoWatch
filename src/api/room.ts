@@ -1,3 +1,4 @@
+import axios from 'axios';
 import request from '@/utils/request';
 import type {
   CreateRoomResponse,
@@ -83,4 +84,26 @@ export async function confirmVideoUploadApi(
   fileName?: string,
 ): Promise<void> {
   await request.put(`/rooms/${roomId}/video`, { videoUrl, fileName });
+}
+
+/**
+ * 下载转码脚本（.bat）
+ * 按画质档位返回对应的静态脚本文件，无需鉴权。
+ * 使用原生 axios 而非封装的 request，避免业务拦截器对 Blob 响应做 code 校验导致误报错。
+ */
+export async function downloadBatApi(
+  preset: 'high' | 'balanced' | 'small',
+): Promise<void> {
+  const res = await axios.get<Blob>('/api/bat', {
+    params: { preset },
+    responseType: 'blob',
+  });
+  const url = URL.createObjectURL(res.data);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `compress_${preset}.bat`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
