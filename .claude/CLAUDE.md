@@ -21,18 +21,25 @@
 |------|------|------|
 | 登录/注册 | `/auth` | 账号注册与登录 |
 | Dashboard | `/` | 我的房间列表、创建/加入房间入口 |
-| 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 |
+| 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 + 进度条 Tag 标注（主控在时间轴打标注，点击跳转并同步给所有成员） |
 
 ### 技术栈
 
 | 端 | 技术 |
 |----|------|
-| 前端 | React 19 + Webpack 5 + TypeScript，Node 20 |
+| 前端 | React 19 + Webpack 5 + TypeScript + antd 5.x，Node 20 |
 | 后端 | Node.js 20 + Express + ws 库 + SQLite（better-sqlite3），用 `tsx` 直接运行 TS |
 | 视频存储 | 阿里云 OSS（预签名直传）或本地 `/uploads` 目录（开发环境） |
 | 实时通信 | WebSocket（ws 库），服务端广播房间事件 |
 
 **项目结构：** 前后端分离，非 Monorepo。`CoWatch/`（前端）和 `CoWatch-backend/`（后端）各自独立。
+
+## 成员列表设计
+
+成员列表是**当前在线快照**，不是历史记录：
+- WS 连接建立时加入列表，断开时从列表移除（`MEMBER_JOINED` / `MEMBER_LEFT` 事件驱动）
+- 列表中的成员即当前在线的人，**不存在 `isOnline` 字段**，列表本身就代表「在线」
+- 离开房间的成员不会保留在列表中，也不记录曾经来过的人
 
 ## 关键约定
 
@@ -43,6 +50,9 @@
 - `__dirname` 在 `tsx` 直接运行时指向源文件目录（`src/`），路径层级与编译后运行不同，写静态文件路径时需注意
 - WebSocket 消息类型定义在 `src/types/room.ts`，增加新消息类型时前后端同步更新
 - SQLite schema 新增字段时，`CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，需手动执行 `ALTER TABLE ... ADD COLUMN` 迁移旧数据库文件
+- 视频上传前在前端做两层校验（`src/utils/validateVideo.ts`）：① 读文件头 32KB 扫描 moov/mdat 顺序（moov 必须在 mdat 之前）；② 用临时 `<video>` 获取时长后计算平均码率（当前上限 8 Mbps，对应 CRF 28）；失败时用 antd `Modal.error()` 弹窗告知用户
+- 视频上传链路按白名单分流：白名单用户（`users.is_upload_whitelist = 1`）走 OSS 直传（`getUploadUrl` 返回预签名 URL，`mode` 为空）；非白名单用户走后端代理中转（返回 `mode: 'proxy'`，前端 POST 到 `/upload-proxy`，后端流式 putStream 到 OSS）
+- 后端 `uploadGuard` 中间件挂载在 `POST /upload-proxy` 上（非白名单用户上传路径）：校验 Sec-Fetch 请求头 + 每日中转总字节数上限 5GB（`Content-Length` 预检 + 真实写入后 `addDailyBytes` 计费）；白名单用户不经过此中间件；OSS 服务端的 `content-length-range` Policy 待接入 COS 时对白名单直传启用
 
 ## 编码规范
 

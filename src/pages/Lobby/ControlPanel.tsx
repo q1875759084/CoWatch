@@ -8,9 +8,9 @@ import styles from './ControlPanel.module.scss';
 type EncodePreset = 'high' | 'balanced' | 'small';
 
 const PRESET_OPTIONS: { value: EncodePreset; label: string; desc: string }[] = [
-  { value: 'high',     label: '高画质', desc: 'CRF 23 · ~1.5 GB/30min' },
-  { value: 'balanced', label: '均衡',   desc: 'CRF 26 · ~1 GB/30min' },
-  { value: 'small',    label: '小体积', desc: 'CRF 28 · ~700 MB/30min' },
+  { value: 'high',     label: '高画质', desc: 'CRF 23 · 原文件已压缩时可能比原文件更大' },
+  { value: 'balanced', label: '均衡',   desc: 'CRF 26 · 约原文件 60–70%' },
+  { value: 'small',    label: '小体积', desc: 'CRF 28 · 约原文件 1/8，实测 30min ≈ 320MB' },
 ];
 
 interface ControlPanelProps {

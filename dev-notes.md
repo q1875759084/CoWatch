@@ -14,13 +14,84 @@
 
 ---
 
-### 视频存储选 OSS 预签名直传
+### 视频存储选 COS 预签名直传
 
 **背景：** 房主需要上传录屏视频供所有成员播放。
 
-**结论：** 前端直传 OSS（阿里云），服务端只负责生成预签名 PUT URL 和保存访问 URL，不经手视频流。
+**结论：** 前端直传腾讯云 COS，服务端只负责生成预签名 PUT URL 和保存访问 URL，不经手视频流。
 
 **原因：** 服务器零带宽压力，所有成员直接从 CDN 拉流，播放流畅；服务端只同步进度控制事件，职责清晰。
+
+**迁移记录：** 2026-06 从阿里云 OSS 切换到腾讯云 COS（`cos-nodejs-sdk-v5`），`ossService.ts` 完全重写，对外接口签名不变，Controller 和路由零改动。详见 `docs/cos-setup.md`。
+
+---
+
+### OSS 预签名直传的安全边界与上传防护设计
+
+**背景：** 采用 OSS 预签名直传后，文件完全绕过后端，后端在上传过程中对文件内容一无所知，无法在服务端校验文件大小、码率等。需要明确各种防护手段的有效边界。
+
+**OSS 直传链路（关键认知）：**
+```
+① GET /api/rooms/:roomId/upload-url  → 后端生成预签名 URL 返回前端（后端不知道文件大小）
+② PUT https://oss.xxx.com/...        → 前端直接上传到 OSS，完全绕过后端
+③ PUT /api/rooms/:roomId/video       → 前端通知后端 confirm，只传 videoUrl 字符串
+```
+后端在整个过程中看不到文件，只能在 ① 和 ③ 两个节点做控制。
+
+**各防护手段的可靠性分析：**
+
+| 手段 | 有效性 | 说明 |
+|------|--------|------|
+| IP 限速 | ❌ 无效 | 文件不经后端，IP 无法感知上传流量；内网多人共用一个 IP 也会误伤 |
+| fileSize 参数校验 | ❌ 不可靠 | 客户端传入，脚本直接写 `fileSize=1` 绕过 |
+| 文件切片 + 时长上报 | ❌ 不可靠 | 同样来自客户端，可任意伪造 |
+| Sec-Fetch 请求头校验 | ⚠️ 增加成本 | 浏览器自动注入且 JS 无法修改，脚本默认不带；但 Postman/Python 可手动添加 |
+| userId 每日调用次数限制 | ✅ 有效（次数维度） | 后端内存计数，可靠；但无法限制单文件大小 |
+| OSS Policy `content-length-range` | ✅ 最可靠 | OSS 服务端强制执行，客户端无法绕过，切换 COS 时启用 |
+| 前端码率校验 | ✅ 覆盖误操作 | 挡住正常用户，定位是"用户教育"而非安全边界 |
+
+**~~当前落地方案（已废弃，见下方「最终落地方案」）~~**
+
+~~挂载在 `GET /upload-url` 上，三层校验：~~
+1. ~~**Sec-Fetch 请求头校验**：两个头都不存在则拒绝~~
+2. ~~**userId 每日调用 `upload-url` 次数限制**：默认 10 次，内存 Map 按日重置~~
+3. ~~**白名单豁免**：`users.is_upload_whitelist = 1` 的用户不受次数限制~~
+
+> **废弃原因：** 次数限制防不住"每次上传小文件"的绕过方式，攻击者可以在 10 次配额内反复上传占满 OSS；同时 `upload-url` 节点后端看不到文件，无法感知真实流量。改为分流架构（见下方）。
+
+---
+
+**最终落地方案（`middleware/uploadGuard.ts` + `controller/proxyUpload`）：**
+
+**上传链路按白名单分流：**
+
+| 用户类型 | 上传路径 | 说明 |
+|---------|---------|------|
+| 白名单用户（`is_upload_whitelist = 1`） | COS 直传 | `getUploadUrl` 返回 OSS 预签名 URL，前端直接 PUT，不经后端，`mode` 为空 |
+| 非白名单用户 | 后端代理中转 | `getUploadUrl` 返回 `mode: 'proxy'`，前端 POST 到 `/upload-proxy`，后端流式转发到 OSS |
+
+**`uploadGuard` 中间件（挂载在 `POST /:roomId/upload-proxy`）：**
+1. **Sec-Fetch 请求头校验**：两个头都不存在则拒绝（增加脚本伪造成本）
+2. **每日中转总字节数预检**：用 `Content-Length` 做快速判断，超过 5GB 则拒绝
+3. **实际计费**：文件真实写入 OSS 完成后，通过 `addDailyBytes(userId, realBytes)` 计入当日用量（防止恶意请求用声明大小占用配额）
+
+**代理上传流程（零临时文件）：**
+```
+① GET /upload-url → 后端返回 { mode: 'proxy', uploadUrl: '/upload-proxy?objectKey=...&fileType=...&fileName=...' }
+② POST /upload-proxy → uploadGuard 预检 → req 可读流直接 putStream 到 OSS → 完成后 addDailyBytes + 写库广播
+```
+
+**白名单操作（无需重启服务，直接改数据库即时生效）：**
+```sql
+-- 旧数据库迁移（新建数据库无需执行）
+ALTER TABLE users ADD COLUMN is_upload_whitelist INTEGER NOT NULL DEFAULT 0;
+
+-- 设置白名单
+UPDATE users SET is_upload_whitelist = 1 WHERE username = '目标用户名';
+```
+
+**TODO（接入腾讯云 COS 时）：**
+- 白名单用户的 `getUploadUrl` 中启用 Policy `content-length-range`，单文件上限 4GB（1小时 × 8Mbps ÷ 8）
 
 ---
 
@@ -305,6 +376,52 @@ video.addEventListener('seeked', onSeeked);
 **SYNC_PROGRESS 阈值优化：** 父组件 `handleSyncProgress` 增加阈值（`SEEK_THRESHOLD_SEC = 0.5s`），与当前播放时间差值超过阈值才执行 `seekTo`，避免频繁 seek 打断浏览器缓冲导致卡顿。游戏复盘场景对同步精度要求高，0.5s 已足够——正常播放时双方偏差远低于 0.5s，浏览器自然追上，该阈值不会增加 seek 频率。
 
 **移除自由模式（最终决策）：** 自由模式（任意成员可控）在实际使用中弊大于利——多人同时拖进度条时互相广播，造成混乱且与保护计数器产生复杂竞态。最终只保留 designated（指定控制者）模式，控制权单一来源，彻底消除多发送方引起的竞态。实现上删除了 `MODE_CHANGE` / `MODE_CHANGED` 消息处理，`canControl` 只判断 `controller_id`，前端 `isController` 简化为 `controllerId === userId`。
+
+---
+
+### 视频上传前端码率校验
+
+**背景：** 用户可能上传未压缩的原始录屏（30~80 Mbps），导致 COS 存储和 CDN 流量爆炸。大小限制不够精准（高码率 5 分钟可能比低码率 30 分钟还小），需要直接校验码率。
+
+**实现位置：** `src/utils/validateVideo.ts`，在 `VideoUploader` 触发上传前调用。
+
+**校验一：moov 索引位置**
+- 只读文件头 32KB，扫描 MP4 box 顺序（每个 box 开头 8 字节：4 字节大小 + 4 字节类型名）
+- 若先遇到 `mdat` 再遇到 `moov`，说明未经 `-movflags +faststart` 处理，直接拒绝
+- 失败原因：moov 在末尾时浏览器必须完整下载才能 seek，播放体验极差
+
+**校验二：平均码率**
+- 创建临时 `<video>` 元素，`src` 指向 `File` 的 ObjectURL，监听 `loadedmetadata` 获取 `duration`
+- 计算：`码率(Mbps) = 文件大小(bytes) × 8 / duration(秒) / 1_000_000`
+- 当前阈值：**8 Mbps**（对应 CRF 28 视频流上限 6 Mbps + 音频 0.13 Mbps + 余量）
+- 注意：JS 算出的是**总平均码率**（视频流 + 音频 + 容器开销），比纯视频流高约 0.1~0.2 Mbps，阈值需留余量
+
+**校验顺序：moov 必须在码率之前**
+- moov 在末尾时，`<video>.duration` 可能无法正确获取（需等待完整下载），导致码率计算不准
+- 先过 moov 校验，再做码率校验，顺序不可颠倒
+
+**失败提示：** 用 antd `Modal.error()` 弹窗（title + detail 分层），比内联小字更醒目，用户知道该用压缩工具处理
+
+**TODO：** 后续根据房间/会员等级动态调整阈值（高级房间放开到 14 Mbps 对应 CRF 23）
+
+---
+
+### 1080p 60Hz H.264（libx264）各 CRF 档位码率与文件大小参考
+
+游戏录屏高动态画面，仅供估算，实际因场景复杂度而异：
+
+| 档位 | 视频流码率 | 30 分钟文件大小 |
+|------|-----------|----------------|
+| 原始录屏（N卡 NVENC 默认） | 30~80 Mbps | 6.6~17.6 GB |
+| CRF 23（high） | 8~14 Mbps | 1.8~3.2 GB |
+| CRF 26（balanced） | 5~9 Mbps | 1.1~2.0 GB |
+| CRF 28（small）← 推荐 | 3~6 Mbps | 0.7~1.3 GB |
+| CRF 30（smaller） | 2~4 Mbps | 0.4~0.9 GB |
+| CRF 32（min） | 1~3 Mbps | 0.2~0.7 GB |
+
+JS 算出的总平均码率 ≈ 视频流码率 + 音频（AAC 128k ≈ 0.13 Mbps）+ 容器开销（可忽略）。
+
+快速推算：`文件大小(MB) ≈ 码率(Mbps) × 时长(秒) ÷ 8`
 
 ---
 

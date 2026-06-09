@@ -47,8 +47,13 @@ export interface UploadUrlResponse {
   uploadUrl: string;
   videoUrl: string;
   fileName: string;
-  /** 本地开发模式时值为 'local' */
-  mode?: 'local';
+  /**
+   * 上传模式：
+   * - undefined：白名单用户 OSS 直传（默认）
+   * - 'proxy'：非白名单用户走后端代理中转上传
+   * - 'local'：本地开发模式，文件落盘到后端本地
+   */
+  mode?: 'local' | 'proxy';
 }
 
 export interface VideoItemResponse {

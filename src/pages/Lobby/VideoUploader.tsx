@@ -1,6 +1,8 @@
 import { useState, useRef, type ChangeEvent } from 'react';
+import { Modal } from 'antd';
 import { getUploadUrlApi, confirmVideoUploadApi } from '@/api/room';
 import request, { ApiError } from '@/utils/request';
+import { validateVideoFile } from '@/utils/validateVideo';
 import styles from './VideoUploader.module.scss';
 
 type UploadStatus = 'idle' | 'uploading' | 'done' | 'error';
@@ -21,9 +23,30 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
     if (!file) return;
 
     setFileName(file.name);
+    setErrorMsg('');
+
+    // 上传前校验：moov 索引位置 + 平均码率
+    // 先切换到 uploading 展示文件名，让用户知道正在处理
     setStatus('uploading');
     setProgress(0);
-    setErrorMsg('');
+
+    const validateResult = await validateVideoFile(file);
+    if (!validateResult.ok) {
+      // 校验失败：回到 idle 状态，通过 antd Modal 弹窗告知用户
+      setStatus('idle');
+      if (inputRef.current) inputRef.current.value = '';
+      Modal.error({
+        title: validateResult.errorTitle ?? '视频校验失败',
+        content: (
+          <div style={{ whiteSpace: 'pre-line', lineHeight: 1.7 }}>
+            {validateResult.errorDetail}
+          </div>
+        ),
+        okText: '我知道了',
+        width: 480,
+      });
+      return;
+    }
 
     try {
       // 1. 向后端请求上传地址
@@ -45,12 +68,25 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
           (pct) => setProgress(pct),
         );
         // VIDEO_ADDED WS 消息会自动将视频追加到列表，无需手动更新 Context
+      } else if (mode === 'proxy') {
+        // ── 代理上传模式（非白名单用户）────────────────────────────────────
+        // 文件经后端中转写入 OSS，后端负责写入 room_videos 并广播 VIDEO_ADDED
+        // 使用封装的 axios 实例，自动注入 Bearer Token
+        // uploadUrl 已由后端拼入 objectKey / fileType / fileName 等参数
+        await uploadToBackend(
+          uploadUrl,
+          file,
+          file.name,
+          (pct) => setProgress(pct),
+          'POST',
+        );
+        // VIDEO_ADDED WS 消息会自动将视频追加到列表
       } else {
-        // ── OSS 模式 ──────────────────────────────────────────────────────
-        // 2. 直传 OSS（XHR PUT，监听 progress）
+        // ── OSS 直传模式（白名单用户）────────────────────────────────────
+        // 直接 PUT 到 OSS 预签名 URL（绕过后端，减少带宽消耗）
         await uploadToOss(uploadUrl, file, (pct) => setProgress(pct));
 
-        // 3. 通知后端追加到 room_videos，后端广播 VIDEO_ADDED
+        // 通知后端追加到 room_videos，后端广播 VIDEO_ADDED
         await confirmVideoUploadApi(roomId, ossVideoUrl, remoteFileName || file.name);
       }
 
@@ -108,30 +144,35 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 }
 
 /**
- * 本地模式：PUT 文件到后端接口，读取响应 JSON 中的 videoUrl
+ * 本地模式 / 代理上传模式：将文件发送到后端接口
  * 使用封装的 axios 实例，自动注入 Bearer Token 并支持无感刷新
+ *
+ * @param method - HTTP 方法，本地模式为 'PUT'，代理上传模式为 'POST'（默认 'PUT'）
  */
 async function uploadToBackend(
   uploadUrl: string,
   file: File,
   _fileName: string,
   onProgress: (pct: number) => void,
+  method: 'PUT' | 'POST' = 'PUT',
 ): Promise<void> {
-  // uploadUrl 已由后端 getUploadUrl 拼入 fileName 参数，无需重复追加
-  await request.put(
-    uploadUrl,
-    file,
-    {
-      headers: { 'Content-Type': file.type || 'video/mp4' },
-      // baseURL 设为空字符串，避免 request 实例的 /api 前缀重复拼接
-      baseURL: '',
-      onUploadProgress: (e) => {
-        if (e.total) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
-        }
-      },
+  // uploadUrl 已由后端 getUploadUrl 拼入 fileName 等参数，无需重复追加
+  const config = {
+    headers: { 'Content-Type': file.type || 'video/mp4' },
+    // baseURL 设为空字符串，避免 request 实例的 /api 前缀重复拼接
+    baseURL: '',
+    onUploadProgress: (e: { loaded: number; total?: number }) => {
+      if (e.total) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
     },
-  );
+  };
+
+  if (method === 'POST') {
+    await request.post(uploadUrl, file, config);
+  } else {
+    await request.put(uploadUrl, file, config);
+  }
   // videoUrl 由后端通过 VIDEO_ADDED WS 消息广播，无需从响应中读取
 }
 
