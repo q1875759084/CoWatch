@@ -29,7 +29,7 @@
 |----|------|
 | 前端 | React 19 + Webpack 5 + TypeScript + antd 5.x，Node 20 |
 | 后端 | Node.js 20 + Express + ws 库 + SQLite（better-sqlite3），用 `tsx` 直接运行 TS |
-| 视频存储 | 阿里云 OSS（预签名直传）或本地 `/uploads` 目录（开发环境） |
+| 视频存储 | 腾讯云 COS（预签名直传）或本地 `/uploads` 目录（开发环境） |
 | 实时通信 | WebSocket（ws 库），服务端广播房间事件 |
 
 **项目结构：** 前后端分离，非 Monorepo。`CoWatch/`（前端）和 `CoWatch-backend/`（后端）各自独立。

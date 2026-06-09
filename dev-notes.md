@@ -308,6 +308,34 @@ function buildRangeResponseFromStream(cachedResponse, range, totalSize, contentT
 
 ---
 
+### Context 职责边界：依赖注入 vs 状态管理
+
+**背景：** `RoomContext` 将 `members`、`videos`、`controllerId`、`activeVideoUrl` 等实时更新的字段全部放在同一个 `value` 对象里，任意字段变化都会导致整棵 Provider 子树重渲染。
+
+**根因：** Context 底层用引用相等性（`===`）比较，没有"订阅某个 key"的能力，只有"订阅整个 context value"的能力。本质上 Context 是**依赖注入**机制，不是状态管理：
+
+- **适合 Context 的场景**：主题（dark/light）、i18n locale、当前登录用户信息、路由/认证状态——变化极低频的"配置型数据"
+- **不适合 Context 的场景**：频繁更新的业务状态（房间成员、播放进度、视频列表）——每次更新都会让所有消费组件重渲染
+
+**真正的状态管理解决了什么：** Zustand / Jotai 的核心能力是**发布订阅 + selector 精细订阅**，只有 selector 返回值变化才通知对应组件，互相完全隔离：
+
+```ts
+// Zustand：只订阅 controllerId，members 变化不触发重渲染
+const controllerId = useRoomStore(state => state.controllerId);
+
+// Jotai：atom 粒度订阅
+const [controllerId] = useAtom(controllerIdAtom);
+```
+
+**CoWatch 现状分析：**
+
+- `UserContext`（`userInfo`、`login`、`logout`）：低频变化，接近配置型数据，用 Context 合理
+- `RoomContext`（`members`、`videos`、`controllerId`、`activeVideoUrl`）：实时更新的业务状态，用 Context 是性能隐患，应迁移到 Zustand/Jotai
+
+**TODO：** 将 `RoomContext` 中实时更新的业务状态迁移到 Zustand 或 Jotai，`UserContext` 保持不变。
+
+---
+
 ### 前端优先 + Mock 驱动开发策略
 
 **背景：** 前后端分离项目，开发者更熟悉前端，希望先调试 UI 流程而不依赖后端服务。
