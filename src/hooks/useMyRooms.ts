@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useRequest } from 'ahooks';
 import { getMyRoomsApi } from '@/api/room';
 import type { MyRoom } from '@/types/api';
 
@@ -12,20 +12,11 @@ interface UseMyRoomsResult {
  * 拉取当前登录用户参与的所有房间列表
  */
 export function useMyRooms(): UseMyRoomsResult {
-  const [rooms, setRooms] = useState<MyRoom[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data, loading, run: refresh } = useRequest(getMyRoomsApi);
 
-  const fetchRooms = useCallback(() => {
-    setLoading(true);
-    getMyRoomsApi()
-      .then((data) => setRooms(data.rooms))
-      .catch(() => setRooms([]))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    fetchRooms();
-  }, [fetchRooms]);
-
-  return { rooms, loading, refresh: fetchRooms };
+  return {
+    rooms: data?.rooms ?? [],
+    loading,
+    refresh,
+  };
 }

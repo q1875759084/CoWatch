@@ -1,4 +1,5 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef } from 'react';
+import { useMemoizedFn } from 'ahooks';
 import { useRoom } from '@/context/RoomContext';
 import type {
   WsMessage,
@@ -10,18 +11,25 @@ import type {
   RoomStateData,
   VideoAddedData,
   SwitchVideoData,
+  Tag,
+  TagAddedData,
+  TagDeletedData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
   roomId: string;
   /** accessToken，通过 WS 连接参数传给后端鉴权 */
   token: string;
-  /** 收到 ROOM_STATE 时通知调用方初始化播放状态（isPlaying + currentTime） */
-  onRoomState?: (isPlaying: boolean, currentTime: number) => void;
+  /** 收到 ROOM_STATE 时通知调用方初始化播放状态，附带 tags 和当前激活视频 URL */
+  onRoomState?: (isPlaying: boolean, currentTime: number, tags?: Tag[], videoUrl?: string | null) => void;
   /** 收到 SYNC_PROGRESS 时通知播放器同步（防回环由调用方负责） */
   onSyncProgress?: (currentTime: number) => void;
   /** 收到 SYNC_STATE 时通知播放器同步 */
   onSyncState?: (isPlaying: boolean, currentTime: number) => void;
+  /** 收到 TAG_ADDED 时通知调用方追加 tag */
+  onTagAdded?: (tag: Tag) => void;
+  /** 收到 TAG_DELETED 时通知调用方移除 tag */
+  onTagDeleted?: (id: string) => void;
 }
 
 export function useRoomWs({
@@ -30,6 +38,8 @@ export function useRoomWs({
   onRoomState,
   onSyncProgress,
   onSyncState,
+  onTagAdded,
+  onTagDeleted,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -41,16 +51,23 @@ export function useRoomWs({
     addVideo,
   } = useRoom();
 
+  /**
+   * useMemoizedFn：返回引用稳定的函数，内部始终调用最新的回调实现。
+   * 解决 ws.onmessage 闭包只能捕获初始回调的问题，无需手动维护 callbacksRef。
+   */
+  const stableOnRoomState    = useMemoizedFn(onRoomState    ?? (() => {}));
+  const stableOnSyncProgress = useMemoizedFn(onSyncProgress ?? (() => {}));
+  const stableOnSyncState    = useMemoizedFn(onSyncState    ?? (() => {}));
+  const stableOnTagAdded     = useMemoizedFn(onTagAdded     ?? (() => {}));
+  const stableOnTagDeleted   = useMemoizedFn(onTagDeleted   ?? (() => {}));
+
   // 发送消息的稳定引用
-  const sendMessage = useCallback(
-    (type: string, data?: Record<string, unknown>) => {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type, data }));
-      }
-    },
-    [],
-  );
+  const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type, data }));
+    }
+  });
 
   useEffect(() => {
     if (!roomId || !token) return;
@@ -91,56 +108,41 @@ export function useRoomWs({
             if (d.videoUrl) {
               setActiveVideoUrl(d.videoUrl);
             }
-            // 通知调用方初始化播放状态（如房间正在播放，新加入成员需自动跟上）
             console.log('[WS] ROOM_STATE received', { isPlaying: d.isPlaying, currentTime: d.currentTime, videoUrl: d.videoUrl });
-            if (onRoomState) {
-              onRoomState(d.isPlaying ?? false, d.currentTime ?? 0);
-            }
+            stableOnRoomState(d.isPlaying ?? false, d.currentTime ?? 0, d.tags, d.videoUrl);
           }
           break;
         }
 
         case 'SYNC_PROGRESS': {
           const d = msg.data as unknown as SyncProgressData | undefined;
-          if (d && onSyncProgress) {
-            onSyncProgress(d.currentTime);
-          }
+          if (d) stableOnSyncProgress(d.currentTime);
           break;
         }
 
         case 'SYNC_STATE': {
           const d = msg.data as unknown as SyncStateData | undefined;
-          if (d && onSyncState) {
-            onSyncState(d.isPlaying, d.currentTime);
-          }
+          if (d) stableOnSyncState(d.isPlaying, d.currentTime);
           break;
         }
 
         case 'CONTROL_CHANGED': {
           const d = msg.data as unknown as ControlChangedData | undefined;
-          if (d) {
-            setControllerId(d.controllerId);
-          }
+          if (d) setControllerId(d.controllerId);
           break;
         }
 
         case 'MEMBER_JOINED': {
           const d = msg.data as unknown as MemberJoinedData | undefined;
           if (d) {
-            addMember({
-              userId: d.userId,
-              nickname: d.nickname,
-              isAdmin: d.isAdmin,
-            });
+            addMember({ userId: d.userId, nickname: d.nickname, isAdmin: d.isAdmin });
           }
           break;
         }
 
         case 'MEMBER_LEFT': {
           const d = msg.data as unknown as MemberLeftData | undefined;
-          if (d) {
-            removeMember(d.userId);
-          }
+          if (d) removeMember(d.userId);
           break;
         }
 
@@ -160,9 +162,19 @@ export function useRoomWs({
 
         case 'SWITCH_VIDEO': {
           const d = msg.data as unknown as SwitchVideoData | undefined;
-          if (d?.videoUrl) {
-            setActiveVideoUrl(d.videoUrl);
-          }
+          if (d?.videoUrl) setActiveVideoUrl(d.videoUrl);
+          break;
+        }
+
+        case 'TAG_ADDED': {
+          const d = msg.data as unknown as TagAddedData | undefined;
+          if (d) stableOnTagAdded(d);
+          break;
+        }
+
+        case 'TAG_DELETED': {
+          const d = msg.data as unknown as TagDeletedData | undefined;
+          if (d) stableOnTagDeleted(d.id);
           break;
         }
 

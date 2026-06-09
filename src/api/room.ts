@@ -6,7 +6,9 @@ import type {
   MyRoomsResponse,
   UploadUrlResponse,
   RoomVideosResponse,
+  RoomTagsResponse,
 } from '@/types/api';
+import type { Tag } from '@/types/room';
 import type { RoomInfo } from '@/types/room';
 
 /**
@@ -84,6 +86,17 @@ export async function confirmVideoUploadApi(
   fileName?: string,
 ): Promise<void> {
   await request.put(`/rooms/${roomId}/video`, { videoUrl, fileName });
+}
+
+/**
+ * 获取房间内某视频的 Tag 列表
+ */
+export async function getTagsApi(roomId: string, videoId: string): Promise<Tag[]> {
+  const res = await request.get<{ code: number; message: string; data: RoomTagsResponse }>(
+    `/rooms/${roomId}/tags`,
+    { params: { videoId } },
+  );
+  return res.data.data.tags;
 }
 
 /**

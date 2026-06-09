@@ -62,3 +62,7 @@ export interface VideoItemResponse {
 export interface RoomVideosResponse {
   videos: VideoItemResponse[];
 }
+
+export interface RoomTagsResponse {
+  tags: import('./room').Tag[];
+}

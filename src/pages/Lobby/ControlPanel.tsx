@@ -1,4 +1,5 @@
-import { useState, useCallback } from 'react';
+import { useState } from 'react';
+import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
 import MemberList from '@/components/MemberList';
 import { downloadBatApi } from '@/api/room';
@@ -35,26 +36,20 @@ export default function ControlPanel({
   const isController = controllerId === currentUserId;
 
   const [copied, setCopied] = useState(false);
-  const handleCopy = useCallback(() => {
+  const handleCopy = useMemoizedFn(() => {
     void navigator.clipboard.writeText(roomId).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
-  }, [roomId]);
+  });
 
   // 编码设置折叠区状态
   const [encodeExpanded, setEncodeExpanded] = useState(false);
   const [encodePreset, setEncodePreset] = useState<EncodePreset>('balanced');
-  const [downloading, setDownloading] = useState(false);
-
-  const handleDownloadBat = useCallback(async () => {
-    setDownloading(true);
-    try {
-      await downloadBatApi(encodePreset);
-    } finally {
-      setDownloading(false);
-    }
-  }, [encodePreset]);
+  const { loading: downloading, run: handleDownloadBat } = useRequest(
+    () => downloadBatApi(encodePreset),
+    { manual: true },
+  );
 
   return (
     <div className={styles.panel}>

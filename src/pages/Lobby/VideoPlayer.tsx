@@ -1,9 +1,9 @@
 import {
   useRef,
-  useCallback,
   forwardRef,
   useImperativeHandle,
 } from 'react';
+import { useMemoizedFn } from 'ahooks';
 import { throttle } from '@/utils/throttle';
 import styles from './VideoPlayer.module.scss';
 
@@ -41,10 +41,12 @@ interface VideoPlayerProps {
   disabled: boolean;
   onProgressChange: (currentTime: number) => void;
   onPlayStateChange: (isPlaying: boolean, currentTime: number) => void;
+  /** 视频元数据加载完毕时回调，返回视频总时长（秒） */
+  onDurationChange?: (duration: number) => void;
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
-  ({ src, disabled, onProgressChange, onPlayStateChange }, ref) => {
+  ({ src, disabled, onProgressChange, onPlayStateChange, onDurationChange }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
 
     /**
@@ -151,20 +153,19 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       },
     }));
 
-    // throttle 200ms，避免拖动进度条时消息过频
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    const throttledProgressChange = useCallback(
-      throttle((time: unknown) => onProgressChange(time as number), 200),
-      [onProgressChange],
-    );
+    // throttle 200ms，避免拖动进度条时消息过频。
+    // 用 useRef 固定 throttle 实例（整个组件生命周期只创建一次），
+    // 再用 useMemoizedFn 提供稳定的调用引用。
+    const stableOnProgressChange = useMemoizedFn(onProgressChange);
+    const throttledProgressChangeRef = useRef(throttle((time: number) => stableOnProgressChange(time), 200));
 
-    const handleTimeUpdate = useCallback(() => {
+    const handleTimeUpdate = useMemoizedFn(() => {
       const video = videoRef.current;
       if (!video) return;
-      throttledProgressChange(video.currentTime);
-    }, [throttledProgressChange]);
+      throttledProgressChangeRef.current(video.currentTime);
+    });
 
-    const handlePlay = useCallback(() => {
+    const handlePlay = useMemoizedFn(() => {
       const video = videoRef.current;
       if (!video) return;
       if (remotePendingRef.current > 0) {
@@ -172,9 +173,9 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         return;
       }
       onPlayStateChange(true, video.currentTime);
-    }, [onPlayStateChange]);
+    });
 
-    const handlePause = useCallback(() => {
+    const handlePause = useMemoizedFn(() => {
       const video = videoRef.current;
       if (!video) return;
       if (remotePendingRef.current > 0) {
@@ -182,15 +183,21 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         return;
       }
       onPlayStateChange(false, video.currentTime);
-    }, [onPlayStateChange]);
+    });
 
-    const handleClick = useCallback(() => {
+    const handleLoadedMetadata = useMemoizedFn(() => {
+      const video = videoRef.current;
+      if (!video || !onDurationChange) return;
+      onDurationChange(video.duration);
+    });
+
+    const handleClick = useMemoizedFn(() => {
       // 用户首次点击时，若视频正处于静音自动播放状态，取消静音
       if (unmutePendingRef.current && videoRef.current) {
         unmutePendingRef.current = false;
         videoRef.current.muted = false;
       }
-    }, []);
+    });
 
     return (
       <div className={styles.wrapper} onClick={handleClick}>
@@ -201,6 +208,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           onTimeUpdate={handleTimeUpdate}
           onPlay={handlePlay}
           onPause={handlePause}
+          onLoadedMetadata={handleLoadedMetadata}
           controls={!disabled}
           style={{ pointerEvents: disabled ? 'none' : 'auto' }}
           preload="metadata"

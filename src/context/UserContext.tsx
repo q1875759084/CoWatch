@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
+import { useMemoizedFn } from 'ahooks';
 import { setAccessToken, clearAccessToken, getAccessToken } from '@/utils/token';
 import { saveUserInfo, loadUserInfo, clearUserInfo, type StoredUserInfo } from '@/utils/storage';
 import { getProfileApi, logoutApi } from '@/api/auth';
@@ -50,18 +51,18 @@ export function UserProvider({ children }: { children: ReactNode }) {
       .finally(() => setIsAuthLoading(false));
   }, []);
 
-  const login = useCallback((accessToken: string, info: StoredUserInfo) => {
+  const login = useMemoizedFn((accessToken: string, info: StoredUserInfo) => {
     setAccessToken(accessToken);
     saveUserInfo(info);
     setUserInfo(info);
-  }, []);
+  });
 
-  const logout = useCallback(async () => {
+  const logout = useMemoizedFn(async () => {
     try { await logoutApi(); } catch { /* 网络异常也要能退出 */ }
     clearAccessToken();
     clearUserInfo();
     setUserInfo(null);
-  }, []);
+  });
 
   return (
     <UserContext.Provider value={{ userInfo, isAuthLoading, login, logout }}>

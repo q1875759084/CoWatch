@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, type ReactNode } from 'react';
+import { useMemoizedFn } from 'ahooks';
 import type { Member, ControlMode, VideoItem } from '@/types/room';
 
 export interface RoomState {
@@ -40,15 +41,15 @@ const RoomContext = createContext<RoomContextValue>({
 export function RoomProvider({ children }: { children: ReactNode }) {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
 
-  const initRoom = useCallback((state: RoomState) => {
+  const initRoom = useMemoizedFn((state: RoomState) => {
     setRoomState(state);
-  }, []);
+  });
 
-  const setActiveVideoUrl = useCallback((url: string) => {
+  const setActiveVideoUrl = useMemoizedFn((url: string) => {
     setRoomState((prev) => prev ? { ...prev, activeVideoUrl: url } : prev);
-  }, []);
+  });
 
-  const addVideo = useCallback((video: VideoItem) => {
+  const addVideo = useMemoizedFn((video: VideoItem) => {
     setRoomState((prev) => {
       if (!prev) return prev;
       // 避免重复追加
@@ -56,37 +57,37 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       if (exists) return prev;
       return { ...prev, videos: [...prev.videos, video] };
     });
-  }, []);
+  });
 
-  const setMembers = useCallback((members: Member[]) => {
+  const setMembers = useMemoizedFn((members: Member[]) => {
     setRoomState((prev) => prev ? { ...prev, members } : prev);
-  }, []);
+  });
 
-  const addMember = useCallback((member: Member) => {
+  const addMember = useMemoizedFn((member: Member) => {
     setRoomState((prev) => {
       if (!prev) return prev;
       // 已存在则跳过（幂等）
       if (prev.members.some((m) => m.userId === member.userId)) return prev;
       return { ...prev, members: [...prev.members, member] };
     });
-  }, []);
+  });
 
-  const removeMember = useCallback((userId: string) => {
+  const removeMember = useMemoizedFn((userId: string) => {
     setRoomState((prev) => {
       if (!prev) return prev;
       return { ...prev, members: prev.members.filter((m) => m.userId !== userId) };
     });
-  }, []);
+  });
 
   // setMemberOnline 已移除：isOnline 语义废弃，在房间即在线，离开即从列表移除
 
-  const setControlMode = useCallback((mode: ControlMode) => {
+  const setControlMode = useMemoizedFn((mode: ControlMode) => {
     setRoomState((prev) => prev ? { ...prev, controlMode: mode } : prev);
-  }, []);
+  });
 
-  const setControllerId = useCallback((userId: string | null) => {
+  const setControllerId = useMemoizedFn((userId: string | null) => {
     setRoomState((prev) => prev ? { ...prev, controllerId: userId } : prev);
-  }, []);
+  });
 
   return (
     <RoomContext.Provider
