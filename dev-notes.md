@@ -107,6 +107,121 @@ self.addEventListener('message', (event) => {
 
 ---
 
+**⚠️ 演进：V1 方案的性能陷阱 → V2 Range 片段级缓存**
+
+**V1 方案（已废弃，保留供参考）：**
+
+缓存完整文件，按需切片返回。核心逻辑：
+
+```ts
+// fetch 拦截：首次请求时拉完整文件存入缓存
+const cacheKey = new Request(request.url, { headers: {} }); // 去掉 Range 头作为 key
+const cachedResponse = await cache.match(cacheKey);
+if (cachedResponse) {
+  // 命中缓存 → 读整个 ArrayBuffer 再切片返回
+  return buildRangeResponse(cachedResponse, rangeHeader);
+}
+// 未命中 → 发无 Range 的完整请求，缓存整个文件
+const fullResponse = await fetch(new Request(request.url, { headers: {} }));
+await cache.put(cacheKey, fullResponse.clone());
+
+// buildRangeResponse 的问题所在：
+async function buildRangeResponse(cachedResponse, rangeHeader) {
+  const arrayBuffer = await cachedResponse.clone().arrayBuffer(); // ← 每次把整个文件读进内存
+  const { start, end } = parseRange(rangeHeader, arrayBuffer.byteLength);
+  return new Response(arrayBuffer.slice(start, end + 1), { status: 206, ... });
+}
+```
+
+**V1 的致命问题：** 每次 Range 请求都会把整个文件（300MB）读入内存做 `arrayBuffer()`。主控 seek 一次 → 非主控触发多次 Range 请求 → 每次都是 300MB 内存操作 → SW 线程阻塞 → 画面卡顿逐秒变化。
+
+---
+
+**V2 方案（当前，Range 片段级缓存）：**
+
+以 `URL + Range头` 作为缓存 key，每个片段独立存储，命中时直接返回对应片段，无需读取整个文件：
+
+```ts
+// 缓存 key = URL + '?_range=' + encodeURIComponent(rangeHeader)
+// 注意：Cache API 禁止带 # fragment 的 URL 作为 key（静默失败），必须用 query 参数
+function buildCacheKey(url: string, rangeHeader: string | null): string {
+  if (!rangeHeader) return url;
+  return `${url}?_range=${encodeURIComponent(rangeHeader)}`;
+}
+
+// fetch 拦截：精确匹配 Range 片段
+const cacheKeyStr = buildCacheKey(request.url, rangeHeader);
+const cachedResponse = await cache.match(new Request(cacheKeyStr));
+if (cachedResponse) {
+  return cachedResponse.clone(); // ← 直接返回，无内存操作
+}
+// 未命中：透传请求，将响应片段写入缓存
+const response = await fetch(request.clone());
+await cache.put(new Request(cacheKeyStr), response.clone());
+```
+
+**V2 的预缓存：** 先用 `Range: bytes=0-0` 探测文件总大小，再按 4MB 分片逐个下载写入缓存，与浏览器播放器的常见 Range 分片大小对齐，命中率高。
+
+**Cache Storage 里的变化：** V1 每个视频 1 条记录（完整文件）；V2 每个视频约 `文件大小 ÷ 4MB` 条记录（如 300MB 文件 ≈ 75 条片段）。
+
+---
+
+**⚠️ 演进：V2 方案不可行 → V3 完整文件缓存 + ReadableStream 流式切片（当前）**
+
+**V2 的根本问题：Cache API 不支持存储 206 响应。**
+
+```
+TypeError: Failed to execute 'put' on 'Cache': Partial response (status code 206) is unsupported
+```
+
+Cache Storage 只能存储 `200 OK` 响应，存 `206 Partial Content` 会直接抛异常。V2 的"Range 片段级缓存"方案在浏览器层面不可行。
+
+**V3 方案：回到 V1 的"缓存完整文件"思路，但用 ReadableStream 替换 ArrayBuffer 切片。**
+
+V1 的性能问题出在 `arrayBuffer()` 把整个文件读进内存，V3 改用 TransformStream 流式跳过前 N 字节，只传输目标 Range 区间：
+
+```ts
+// 流式切片，不把整个文件读入内存
+function buildRangeResponseFromStream(cachedResponse, range, totalSize, contentType) {
+  const { start, end } = range;
+  let bytesSkipped = 0;
+  let bytesSent = 0;
+
+  const { readable, writable } = new TransformStream({
+    transform(chunk, controller) {
+      const chunkStart = bytesSkipped + bytesSent;
+      const chunkEnd = chunkStart + chunk.byteLength - 1;
+      if (chunkEnd < start) { bytesSkipped += chunk.byteLength; return; }  // 目标区间之前，跳过
+      if (chunkStart > end) { controller.terminate(); return; }            // 目标区间之后，终止
+      const slice = chunk.slice(Math.max(0, start - chunkStart), Math.min(chunk.byteLength, end - chunkStart + 1));
+      bytesSent += slice.byteLength;
+      controller.enqueue(slice);
+      if (bytesSent >= end - start + 1) controller.terminate();
+    },
+  });
+  cachedResponse.clone().body.pipeTo(writable).catch(() => {}); // terminate 后 pipeTo 会抛 AbortError，正常忽略
+  return new Response(readable, { status: 206, headers: { 'Content-Range': `bytes ${start}-${end}/${totalSize}`, ... } });
+}
+```
+
+**Cache Storage 里的变化：** V3 与 V1 相同，每个视频 1 条完整文件记录。
+
+---
+
+**⚠️ 踩坑：无痕模式下 SW 缓存始终为空**
+
+**现象：** 用无痕窗口模拟第二个用户，Cache Storage 始终为空，SW Console 报 `Unexpected internal error`，`cache.put` 静默失败。
+
+**根因：** 无痕模式的 Cache Storage 配额极低（通常 < 100MB），300MB 以上的视频文件超出配额，`cache.put` 抛异常。这是浏览器的固有限制，与 SW 实现无关。
+
+**解决：用 Chrome 多用户 Profile 代替无痕窗口**
+
+右上角头像图标 → **添加 Chrome 个人资料** → 新窗口打开测试链接。多 Profile 是完全独立的浏览器环境，有完整的 Cache Storage 配额，同时与主窗口的登录态、缓存完全隔离，是模拟多用户的正确方式。
+
+> Edge 基于 Chromium，与 Chrome 对 SW / Cache Storage 的支持完全一致，也可以作为第二个客户端。Safari 的 SW 支持较保守（`TransformStream`、`pipeTo` 在旧版不可用，且 SW 生命周期更激进），调试阶段不建议用 Safari 测试 SW 逻辑。
+
+---
+
 ### FFmpeg CRF 参数：控制质量下限而非文件大小上限
 
 **背景：** 用 CRF 23（高质量档）对原始录屏转码，输出文件反而比原文件更大（529MB → 540MB）。
