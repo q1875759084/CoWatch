@@ -46,14 +46,19 @@ function isVideoRequest(request: Request): boolean {
 }
 
 /**
- * 剥离腾讯云 COS / CDN 时效签名 query 参数，返回纯路径 URL（用作 cache key）。
+ * 剥离时效签名 query 参数，返回纯路径 URL（用作 cache key）。
  *
- * COS 签名参数：q-sign-algorithm, q-ak, q-sign-time, q-key-time, q-header-list,
- *               q-url-param-list, q-signature
- * 剥离后 URL 仅保留 scheme + host + pathname，与签名无关，同一视频始终命中同一缓存条目。
+ * 兼容两种签名模式：
+ *   - CDN TypeA 鉴权：sign={timestamp}-{rand}-{uid}-{md5}，剥离 sign 参数
+ *   - COS 直连签名（本地开发 / 未配置 CDN 鉴权）：q-sign-* 系列参数，一并剥离
+ *
+ * 剥离后 URL 仅保留 scheme + host + pathname，同一视频无论签名如何轮换始终命中同一缓存条目。
  */
 function stripCosSignature(url: string): string {
   const u = new URL(url);
+  // CDN TypeA 鉴权参数
+  u.searchParams.delete('sign');
+  // COS 直连签名参数（本地开发回退路径）
   [
     'q-sign-algorithm',
     'q-ak',
