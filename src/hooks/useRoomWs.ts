@@ -151,6 +151,7 @@ export function useRoomWs({
           if (d) {
             addVideo({
               id: d.id,
+              objectKey: d.objectKey,
               videoUrl: d.videoUrl,
               fileName: d.fileName,
               uploaderId: d.uploaderId,
@@ -162,6 +163,7 @@ export function useRoomWs({
 
         case 'SWITCH_VIDEO': {
           const d = msg.data as unknown as SwitchVideoData | undefined;
+          // 后端广播带签名的 videoUrl，直接更新激活视频 URL
           if (d?.videoUrl) setActiveVideoUrl(d.videoUrl);
           break;
         }

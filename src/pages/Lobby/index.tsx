@@ -28,6 +28,11 @@ export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const { userInfo } = useUser();
   const { roomState, initRoom, setActiveVideoUrl } = useRoom();
+  /**
+   * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
+   * 用于 VideoList 高亮当前播放项，以及切换视频时发送 SWITCH_VIDEO WS 消息
+   */
+  const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
 
   /**
    * 暂存 ROOM_STATE 下发的播放初始化参数。
@@ -76,9 +81,11 @@ export default function RoomPage() {
       getRoomInfoApi(roomId),
       getVideosApi(roomId),
     ]).then(([info, videosData]) => {
+      // listVideos 返回 objectKey，播放 URL 由 WS ROOM_STATE / SWITCH_VIDEO 下发
       const videos = videosData.videos.map((v) => ({
         id: v.id,
-        videoUrl: v.videoUrl,
+        objectKey: v.objectKey,
+        videoUrl: null as string | null,
         fileName: v.fileName,
         uploaderId: v.uploaderId,
         createdAt: v.createdAt,
@@ -121,10 +128,14 @@ export default function RoomPage() {
     } else {
       pendingInitRef.current = { isPlaying, currentTime };
     }
-    // 初始化 activeVideoId，防止 activeVideoUrl 变化的 useEffect 触发多余 tag 请求
+    // 初始化 activeVideoId / activeObjectKey，防止 useEffect([activeVideoUrl]) 触发多余 tag 请求
+    // ROOM_STATE.videoUrl 是签名播放 URL，在 ROOM_STATE 下发时 videosRef 里已经有含 objectKey 的视频条目
     if (videoUrl) {
       const matched = videosRef.current.find((v) => v.videoUrl === videoUrl);
-      if (matched) setActiveVideoId(matched.id);
+      if (matched) {
+        setActiveVideoId(matched.id);
+        setActiveObjectKey(matched.objectKey);
+      }
     }
     if (roomTags) {
       setTags(roomTags);
@@ -175,14 +186,17 @@ export default function RoomPage() {
   });
 
   /**
-   * 本地点击"播放"：广播 SWITCH_VIDEO，更新本地激活视频，立即拉取 tags。
+   * 本地点击"播放"：向后端发送 SWITCH_VIDEO（携带 objectKey）。
+   * 后端签名后广播带 videoUrl 的 SWITCH_VIDEO 下行消息，
+   * useRoomWs 收到后调用 setActiveVideoUrl 更新播放 URL。
+   * 本地优先设置 activeObjectKey （列表立即高亮）， activeVideoId（tag 归属）。
    */
-  const handlePlayVideo = useMemoizedFn((videoUrl: string, videoId: string) => {
-    setActiveVideoUrl(videoUrl);
+  const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
+    setActiveObjectKey(objectKey);
     setActiveVideoId(videoId);
     setTags([]);
     setDuration(0);
-    sendMessage('SWITCH_VIDEO', { videoUrl, videoId });
+    sendMessage('SWITCH_VIDEO', { objectKey, videoId });
     fetchTags(videoId);
   });
 
@@ -198,29 +212,19 @@ export default function RoomPage() {
    * 初始进房间时 ROOM_STATE 已经带来了 tags（handleRoomState 处理），
    * 但 activeVideoId 为空，video.id !== '' 成立，会触发一次拉取。
    * 为避免这次多余请求，ROOM_STATE 处理时同步设置 activeVideoId。
+   *
+   * SW 无需 postMessage 注入域名：isVideoRequest 改为路径特征判断（/cowatch/*.mp4），
+   * 对任意域名（COS / CDN / 本地）均生效，不存在时序竞态问题。
    */
   const activeVideoUrl = roomState?.activeVideoUrl;
   useEffect(() => {
     if (!roomId || !activeVideoUrl || !roomState) return;
 
-    // 通知 SW 将视频的 origin 加入白名单（COS / CDN 域名与页面域名不同，SW 需动态感知）
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      try {
-        const videoOrigin = new URL(activeVideoUrl).origin;
-        if (videoOrigin !== window.location.origin) {
-          navigator.serviceWorker.controller.postMessage({
-            type: 'ADD_VIDEO_ORIGIN',
-            origin: videoOrigin,
-          });
-        }
-      } catch {
-        // URL 解析失败（如相对路径）时跳过，同域视频无需通知
-      }
-    }
-
+    // activeVideoUrl 是签名 URL，在 roomState.videos 里与 video.videoUrl 对比
     const video = roomState.videos.find((v) => v.videoUrl === activeVideoUrl);
     if (!video || video.id === activeVideoId) return;
-    // 远端切换了视频，同步 activeVideoId 并拉取 tags
+    // 远端切换了视频，同步 activeObjectKey / activeVideoId 并拉取 tags
+    setActiveObjectKey(video.objectKey);
     setActiveVideoId(video.id);
     setTags([]);
     setDuration(0);
@@ -303,7 +307,7 @@ export default function RoomPage() {
           <div className={styles.videoListSection}>
             <VideoList
               videos={roomState.videos}
-              activeVideoUrl={roomState.activeVideoUrl}
+              activeObjectKey={activeObjectKey}
               onPlay={handlePlayVideo}
             />
           </div>

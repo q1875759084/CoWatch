@@ -52,10 +52,15 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const addVideo = useMemoizedFn((video: VideoItem) => {
     setRoomState((prev) => {
       if (!prev) return prev;
-      // 避免重复追加
-      const exists = prev.videos.some((v) => v.id === video.id);
-      if (exists) return prev;
-      return { ...prev, videos: [...prev.videos, video] };
+      const idx = prev.videos.findIndex((v) => v.id === video.id);
+      if (idx === -1) {
+        // 新视频：追加到列表末尾
+        return { ...prev, videos: [...prev.videos, video] };
+      }
+      // 已存在：合并更新（ROOM_STATE 下发的含签名 videoUrl，覆盖 HTTP 初始化时的 null）
+      const updated = [...prev.videos];
+      updated[idx] = { ...updated[idx], ...video };
+      return { ...prev, videos: updated };
     });
   });
 

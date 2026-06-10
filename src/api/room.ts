@@ -78,14 +78,17 @@ export async function getVideosApi(roomId: string): Promise<RoomVideosResponse> 
 }
 
 /**
- * 确认视频上传完成（OSS 模式）：传入 videoUrl + fileName
+ * 确认视频上传完成（白名单用户 COS 直传后调用）
+ *
+ * 传入 objectKey（由 getUploadUrlApi 返回，原样回传）和原始文件名。
+ * 后端将 objectKey 存入 room_videos，并广播带签名的 VIDEO_ADDED 消息。
  */
 export async function confirmVideoUploadApi(
   roomId: string,
-  videoUrl: string,
+  objectKey: string,
   fileName?: string,
 ): Promise<void> {
-  await request.put(`/rooms/${roomId}/video`, { videoUrl, fileName });
+  await request.put(`/rooms/${roomId}/video`, { objectKey, fileName });
 }
 
 /**

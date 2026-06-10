@@ -95,6 +95,64 @@ UPDATE users SET is_upload_whitelist = 1 WHERE username = '目标用户名';
 
 ---
 
+### COS 私有读写 + 时效签名 URL（objectKey 存库，读时签名）
+
+**背景：** COS 存储桶从公开读改为私有读写，所有 GET 访问需要时效签名。需要决定 URL 的生成时机、存储方式和有效期设计。
+
+**核心问题链（识别顺序）：**
+
+```
+① 存储桶设私有  →  videoUrl 必须带签名参数才能播放
+② 签名有时效    →  不能把带签名的 URL 存数据库（过期后无法播放）
+③ 签名 URL 带 query 参数  →  SW cache key 会随签名变化，同一视频每次签名不同导致永远缓存未命中
+④ 需要 objectKey 存库  →  读取时按需生成签名 URL
+```
+
+**决策：objectKey 存库，读时签名（方案 B）**
+
+| 字段 | 存法 | 说明 |
+|------|------|------|
+| `room_videos.video_url` | objectKey（`cowatch/{roomId}/{uuid}-{fileName}.mp4`） | 稳定标识，无签名，永久有效 |
+| 播放 URL | 临时生成，仅下发，不落库 | 每次切换视频时实时签名，有效期 30 分钟 |
+
+**签名时机设计（方案 B：SWITCH_VIDEO 时签名）：**
+
+两个可选时机：
+- **方案 A：进房间时统一签名**（`ROOM_STATE` 下发时对所有视频并发签名）
+  - 缺陷：有 N 个视频时，最晚播放的视频签名从"进房间时刻"起算，用户 20 分钟后才点播该视频，签名已近过期
+- **方案 B：SWITCH_VIDEO 时签名（最终选择）**
+  - 收到 WS `SWITCH_VIDEO { objectKey }` → 后端实时签名 → 广播 `SWITCH_VIDEO { objectKey, videoUrl: 签名URL }`
+  - 签名从"切换时刻"起算，有效期覆盖从切换到首次完整下载完成的时间窗口
+
+**有效期设计（30 分钟）：**
+
+签名有效期不需要覆盖整场复盘（2~4 小时），只需覆盖"首次完整下载到 SW Cache"的时间窗口：
+- SW 缓存完成后，所有后续 Range 请求走本地 Cache Storage，完全不触碰 COS
+- 最大文件约 1GB（CRF 28 转码后），普通带宽（5Mbps）约需 27 分钟下载完成
+- 30 分钟有足够余量，且不会给攻击者留下过长的盗链窗口
+
+**SW cache key 策略（stripCosSignature）：**
+
+```ts
+// 剥离 COS 签名 query 参数，以纯路径为 cache key
+// 签名每 30 分钟轮换，但 pathname 不变 → 同一视频永远命中同一缓存条目
+function stripCosSignature(url: string): string {
+  const u = new URL(url);
+  ['q-sign-algorithm','q-ak','q-sign-time','q-key-time',
+   'q-header-list','q-url-param-list','q-signature'].forEach((p) => u.searchParams.delete(p));
+  return u.toString();
+}
+```
+
+**前端字段命名规范（objectKey vs videoUrl 的职责分离）：**
+
+| 字段 | 含义 | 用途 |
+|------|------|------|
+| `objectKey` | COS 唯一路径标识，永久稳定 | 切换视频时发 WS、列表高亮（`activeObjectKey`） |
+| `videoUrl` | 带签名的临时播放 URL | 播放器 `<video src>`、SW 拦截后发网络请求 |
+
+---
+
 ### nginx 大小限制职责分层
 
 **背景：** 宿主机 nginx 默认 `client_max_body_size 1MB`，大文件上传被 413 拦截，但容器内 nginx 已设 `4096M`。由此引发对"应该在哪一层做大小限制"的讨论。
@@ -607,24 +665,66 @@ sqlite3 database/cowatch.sqlite3 "ALTER TABLE rooms ADD COLUMN name TEXT NOT NUL
 
 **关键认知：** 两种模式的差异不在播放链路，而在上传时存入数据库的 `videoUrl` 格式——本地存储存相对路径，COS 直传存完整 COS URL。播放时直接用这个 URL，导致 SW 拦截条件不同。
 
-**解决：** 运行时动态注入，两处改动：
+---
 
-1. **`sw.ts`** 新增 `message` 事件监听：
+**⚠️ 初版解决方案（postMessage 动态注入 origin）——已废弃**
+
+运行时从页面向 SW postMessage 注入 COS/CDN 的 origin，SW 维护白名单 `VIDEO_ORIGINS[]` 做判断：
+
 ```ts
+// sw.ts
+const VIDEO_ORIGINS: string[] = [];
 self.addEventListener('message', (event) => {
-  const { type, origin } = event.data ?? {};
-  if (type === 'ADD_VIDEO_ORIGIN' && origin && !VIDEO_ORIGINS.includes(origin)) {
-    VIDEO_ORIGINS.push(origin);
-  }
+  if (event.data?.type === 'ADD_VIDEO_ORIGIN') VIDEO_ORIGINS.push(event.data.origin);
 });
+function isVideoRequest(request) {
+  return VIDEO_ORIGINS.some((o) => new URL(request.url).origin === o);
+}
+
+// Lobby/index.tsx（activeVideoUrl 变化时）
+navigator.serviceWorker.controller.postMessage({ type: 'ADD_VIDEO_ORIGIN', origin: videoOrigin });
 ```
 
-2. **`Lobby/index.tsx`** 在 `activeVideoUrl` 变化的 `useEffect` 里通知 SW：
+**废弃原因——两个根本缺陷：**
+
+1. **时序竞态**：`SWITCH_VIDEO` 消息到达 → 前端更新 `activeVideoUrl` → `useEffect` 触发 `postMessage` → SW 收到并写入白名单。这整条链路是异步的，而播放器的第一个 Range 请求在 `<video src=...>` 赋值后**立即**发出，极大概率早于 postMessage 到达 SW，导致首个 Range 请求漏网，SW 没有机会缓存完整文件，后续所有 seek 都产生真实流量。
+
+2. **与时效签名 URL 不兼容**：COS 私有读写模式下，videoUrl 带签名 query 参数（`q-sign-*`），每次切换视频签名不同，cache key 跟签名走则同一视频无法命中；剥离签名后 key 稳定但需在 SW 里实现签名剥离逻辑，且 SW 还需要用原始带签名 URL 去发网络请求，两套 URL 并存逻辑复杂。
+
+---
+
+**最终解决方案（路径特征判断 + 签名剥离）：**
+
+**核心洞察：** 所有视频（COS / CDN / 本地）的 objectKey 格式固定为 `cowatch/{roomId}/{uuid}-{fileName}.mp4`，路径特征不依赖域名，可以直接用 pathname 判断，彻底绕开跨域识别问题。
+
+**两处改动：**
+
+**① `isVideoRequest` 改为路径特征判断**（sw.ts）：
 ```ts
-const videoOrigin = new URL(activeVideoUrl).origin;
-if (videoOrigin !== window.location.origin) {
-  navigator.serviceWorker.controller.postMessage({ type: 'ADD_VIDEO_ORIGIN', origin: videoOrigin });
+function isVideoRequest(request: Request): boolean {
+  const { pathname } = new URL(request.url);
+  // objectKey 格式固定，无论域名如何（COS/CDN/本地）路径特征不变
+  return pathname.startsWith('/cowatch/') && pathname.endsWith('.mp4');
 }
 ```
 
-**设计优点：** 无需硬编码 COS 域名，CDN 接入后域名变了也自动适配；`VIDEO_ORIGINS` 是内存数组，SW 重启后自动清空，下次页面加载时前端会重新 postMessage 补充。
+**② `stripCosSignature` 剥离时效签名，以纯路径为 cache key**（sw.ts）：
+```ts
+function stripCosSignature(url: string): string {
+  const u = new URL(url);
+  ['q-sign-algorithm','q-ak','q-sign-time','q-key-time',
+   'q-header-list','q-url-param-list','q-signature'].forEach((p) => u.searchParams.delete(p));
+  return u.toString();
+}
+
+// fetch 拦截中：
+const cacheKeyUrl = stripCosSignature(request.url);  // 纯路径，签名轮换不影响命中
+const cacheKey = new Request(cacheKeyUrl, { headers: {} });
+// 发网络请求时仍用原始带签名 URL（有权限访问 COS）
+const fullResponse = await fetch(new Request(request.url, { ... }));
+```
+
+**效果：**
+- 消除时序竞态：不再依赖 postMessage，SW 从 pathname 直接判断，零延迟
+- 签名轮换不影响缓存命中：cache key 是稳定的纯路径，30 分钟签名过期后重新签名拿到的是新 URL，但 pathname 不变，SW 仍能命中同一缓存条目
+- 无需 VIDEO_ORIGINS 白名单，也无需 message 事件监听器，代码更简洁

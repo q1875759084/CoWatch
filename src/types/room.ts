@@ -20,7 +20,16 @@ export interface Member {
 
 export interface VideoItem {
   id: string;
-  videoUrl: string;
+  /**
+   * objectKey：视频在 COS 的唯一路径标识，格式为 cowatch/{roomId}/{uuid}-{fileName}
+   * 不是播放 URL，点击播放时需发送 SWITCH_VIDEO WS 消息，后端实时签名广播 videoUrl
+   */
+  objectKey: string;
+  /**
+   * videoUrl：带时效签名的播放 URL，由后端在 SWITCH_VIDEO 广播时实时生成
+   * 可能为 null（列表初始化时未签名，切换视频后才有值）
+   */
+  videoUrl: string | null;
   fileName: string;
   uploaderId: string;
   createdAt: number;
@@ -99,9 +108,20 @@ export interface RoomStateData {
   tags?: Tag[];
 }
 
-export interface VideoAddedData extends VideoItem {}
+export interface VideoAddedData {
+  id: string;
+  objectKey: string;
+  /** 带时效签名的播放 URL，上传完成后由后端实时签名生成 */
+  videoUrl: string;
+  fileName: string;
+  uploaderId: string;
+  createdAt: number;
+}
 
 export interface SwitchVideoData {
+  /** objectKey：视频在 COS 的唯一路径标识 */
+  objectKey: string;
+  /** videoUrl：后端实时签名的播放 URL */
   videoUrl: string;
   videoId?: string;
 }

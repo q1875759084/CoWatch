@@ -45,7 +45,12 @@ export interface MyRoomsResponse {
 
 export interface UploadUrlResponse {
   uploadUrl: string;
-  videoUrl: string;
+  /**
+   * objectKey：视频在 COS 的唯一路径标识，格式为 cowatch/{roomId}/{uuid}-{fileName}
+   * 上传完成后须原样回传给 confirm 接口（PUT /api/rooms/:roomId/video）
+   * 不是播放 URL，播放 URL 由后端实时签名后通过 WS VIDEO_ADDED 消息下发
+   */
+  objectKey: string;
   fileName: string;
   /**
    * 上传模式：
@@ -58,7 +63,12 @@ export interface UploadUrlResponse {
 
 export interface VideoItemResponse {
   id: string;
-  videoUrl: string;
+  /**
+   * objectKey：视频在 COS 的唯一路径标识（非播放 URL）
+   * 前端点击播放时发送 SWITCH_VIDEO WS 消息携带此 objectKey，
+   * 后端签名后通过 SWITCH_VIDEO 广播下发带时效签名的 videoUrl
+   */
+  objectKey: string;
   fileName: string;
   uploaderId: string;
   createdAt: number;

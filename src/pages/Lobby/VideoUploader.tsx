@@ -52,7 +52,7 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
       // 1. 向后端请求上传地址
       //    - OSS 模式：返回 OSS 预签名 PUT URL，mode 为空
       //    - 本地模式：返回后端本地上传接口地址，mode === 'local'
-      const { uploadUrl, videoUrl: ossVideoUrl, mode, fileName: remoteFileName } = await getUploadUrlApi(
+      const { uploadUrl, objectKey, mode, fileName: remoteFileName } = await getUploadUrlApi(
         roomId,
         file.name,
         file.type || 'video/mp4',
@@ -86,8 +86,8 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
         // 直接 PUT 到 OSS 预签名 URL（绕过后端，减少带宽消耗）
         await uploadToOss(uploadUrl, file, (pct) => setProgress(pct));
 
-        // 通知后端追加到 room_videos，后端广播 VIDEO_ADDED
-        await confirmVideoUploadApi(roomId, ossVideoUrl, remoteFileName || file.name);
+        // 通知后端：传回 objectKey，后端存库并广播带签名的 VIDEO_ADDED
+        await confirmVideoUploadApi(roomId, objectKey, remoteFileName || file.name);
       }
 
       setStatus('done');

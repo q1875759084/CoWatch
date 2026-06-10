@@ -13,26 +13,55 @@
  * 缓存时机：
  *   - 按需缓存（play-through caching）：SW fetch 拦截器在首次请求时自动缓存整个文件
  *   - 不做预缓存：播放哪个视频才缓存哪个，避免进房间就下载全部视频
+ *
+ * 视频识别策略：
+ *   - 基于路径特征判断（pathname 以 /cowatch/ 开头且以 .mp4 结尾）
+ *   - 不依赖域名白名单，因此对 COS 默认域名、CDN 自定义域名、本地 /uploads 均统一生效
+ *   - 无需 postMessage 动态注入域名，消除了时序竞态问题
+ *
+ * 时效签名兼容：
+ *   - COS 私有读模式下，videoUrl 携带时效签名 query 参数（q-sign-*）
+ *   - cache key 统一剥离签名参数，以纯路径作为 Cache Storage key
+ *   - 签名轮换后同一视频仍能命中缓存，缓存有效期不受签名过期影响
  */
 
 // @ts-nocheck — sw.ts 使用 WebWorker lib，与主应用的 dom lib 冲突，
 // 类型检查由 tsconfig.sw.json 单独负责，IDE 的主 tsconfig 跳过此文件
 /// <reference lib="webworker" />
 
-const CACHE_NAME = 'cowatch-video-v1';
+const CACHE_NAME = 'cowatch-video-v2';
 
-/** 动态注入的外部视频域名（COS / CDN），通过 postMessage 添加 */
-const VIDEO_ORIGINS: string[] = [];
-const VIDEO_PATH_PREFIX = '/uploads/';
-
+/**
+ * 判断是否为需要 SW 缓存的视频请求。
+ *
+ * 基于路径特征：pathname 以 /cowatch/ 开头且以 .mp4 结尾。
+ * objectKey 格式固定为 cowatch/{roomId}/{uuid}-{fileName}.mp4，
+ * 无论域名如何（COS 默认域名 / CDN 自定义域名 / 本地 /uploads），路径特征不变。
+ */
 function isVideoRequest(request: Request): boolean {
-  const url = new URL(request.url);
-  // 同域：本地存储模式，路径以 /uploads/ 开头
-  if (url.origin === self.location.origin && url.pathname.startsWith(VIDEO_PATH_PREFIX)) {
-    return true;
-  }
-  // 跨域：COS / CDN 域名，由前端通过 postMessage 动态注入到 VIDEO_ORIGINS
-  return VIDEO_ORIGINS.some((origin) => url.origin === origin);
+  const { pathname } = new URL(request.url);
+  return pathname.startsWith('/cowatch/') && pathname.endsWith('.mp4');
+}
+
+/**
+ * 剥离腾讯云 COS / CDN 时效签名 query 参数，返回纯路径 URL（用作 cache key）。
+ *
+ * COS 签名参数：q-sign-algorithm, q-ak, q-sign-time, q-key-time, q-header-list,
+ *               q-url-param-list, q-signature
+ * 剥离后 URL 仅保留 scheme + host + pathname，与签名无关，同一视频始终命中同一缓存条目。
+ */
+function stripCosSignature(url: string): string {
+  const u = new URL(url);
+  [
+    'q-sign-algorithm',
+    'q-ak',
+    'q-sign-time',
+    'q-key-time',
+    'q-header-list',
+    'q-url-param-list',
+    'q-signature',
+  ].forEach((p) => u.searchParams.delete(p));
+  return u.toString();
 }
 
 /** 解析 Range 请求头，返回 { start, end } 或 null */
@@ -63,29 +92,24 @@ function buildRangeResponseFromStream(
   const { start, end } = range;
   const chunkSize = end - start + 1;
 
-  // 用 TransformStream 实现字节级流式跳过
-  let bytesSkipped = 0;   // 已跳过的字节数（start 之前的部分）
-  let bytesSent = 0;      // 已发送的字节数
+  let bytesSkipped = 0;
+  let bytesSent = 0;
 
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      // 当前 chunk 在整个响应流中的起止位置
       const chunkStart = bytesSkipped + bytesSent;
       const chunkEnd = chunkStart + chunk.byteLength - 1;
 
-      // 完全在目标区间之前 → 跳过整个 chunk
       if (chunkEnd < start) {
         bytesSkipped += chunk.byteLength;
         return;
       }
 
-      // 完全在目标区间之后 → 终止流
       if (chunkStart > end) {
         controller.terminate();
         return;
       }
 
-      // 部分或全部在目标区间内 → 切片后发送
       const sliceFrom = Math.max(0, start - chunkStart);
       const sliceTo = Math.min(chunk.byteLength, end - chunkStart + 1);
       const slice = chunk.slice(sliceFrom, sliceTo);
@@ -93,14 +117,12 @@ function buildRangeResponseFromStream(
       bytesSent += slice.byteLength;
       controller.enqueue(slice);
 
-      // 已发送够了 → 终止流
       if (bytesSent >= chunkSize) {
         controller.terminate();
       }
     },
   });
 
-  // 将缓存响应的 body 管道到 TransformStream
   cachedResponse.clone().body!.pipeTo(writable).catch(() => {
     // pipeTo 在 terminate 后会抛 AbortError，属于正常情况，忽略
   });
@@ -116,19 +138,6 @@ function buildRangeResponseFromStream(
     },
   });
 }
-
-// ─── message：运行时动态注入视频域名 ─────────────────────────────────────────
-//
-// 视频存储在 COS / CDN 时，URL 的 origin 与页面域名不同，SW 无法通过编译时硬编码。
-// 前端拿到视频 URL 后提取 origin，通过 postMessage 告知 SW 动态添加到白名单。
-//
-self.addEventListener('message', (event) => {
-  const { type, origin } = event.data ?? {};
-  if (type === 'ADD_VIDEO_ORIGIN' && origin && !VIDEO_ORIGINS.includes(origin)) {
-    VIDEO_ORIGINS.push(origin);
-    console.log('[SW] 已添加视频 origin 白名单：', origin);
-  }
-});
 
 // ─── install ─────────────────────────────────────────────────────────────────
 self.addEventListener('install', () => {
@@ -163,20 +172,20 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     (async () => {
       const cache = await caches.open(CACHE_NAME);
-      // 缓存 key 统一为不带 Range 头的请求，确保所有分段请求命中同一条目
-      const cacheKey = new Request(request.url, { headers: {} });
+
+      // cache key：剥离时效签名参数，同一视频始终命中同一缓存条目
+      const cacheKeyUrl = stripCosSignature(request.url);
+      const cacheKey = new Request(cacheKeyUrl, { headers: {} });
       const cachedResponse = await cache.match(cacheKey);
 
       if (cachedResponse) {
-        console.log('[SW] 缓存命中：', request.url, rangeHeader ?? '(完整请求)');
+        console.log('[SW] 缓存命中：', cacheKeyUrl, rangeHeader ?? '(完整请求)');
         if (!rangeHeader) {
           return cachedResponse.clone();
         }
-        // 从 Content-Length 获取文件总大小
         const totalSize = parseInt(cachedResponse.headers.get('Content-Length') || '0', 10);
         const contentType = cachedResponse.headers.get('Content-Type') || 'video/mp4';
         if (!totalSize) {
-          // 没有 Content-Length，退化为直接返回完整响应
           return cachedResponse.clone();
         }
         const range = parseRange(rangeHeader, totalSize);
@@ -186,8 +195,8 @@ self.addEventListener('fetch', (event) => {
         return buildRangeResponseFromStream(cachedResponse, range, totalSize, contentType);
       }
 
-      // 未命中：发起完整请求（去掉 Range 头）
-      console.log('[SW] 缓存未命中，发起完整请求：', request.url);
+      // 未命中：用原始带签名的 URL 发完整请求（有权限访问 COS），去掉 Range 头
+      console.log('[SW] 缓存未命中，发起完整请求：', cacheKeyUrl);
       let fullResponse: Response;
       try {
         fullResponse = await fetch(new Request(request.url, {
@@ -201,14 +210,14 @@ self.addEventListener('fetch', (event) => {
       }
 
       if (!fullResponse.ok) {
-        console.warn('[SW] 响应异常，不缓存：', fullResponse.status, request.url);
+        console.warn('[SW] 响应异常，不缓存：', fullResponse.status, cacheKeyUrl);
         return fullResponse;
       }
 
-      // 存入缓存（clone 一份留给缓存，原始用于返回）
+      // 以剥离签名后的 URL 为 key 存入缓存
       event.waitUntil(
         cache.put(cacheKey, fullResponse.clone()).then(() => {
-          console.log('[SW] 已缓存：', request.url);
+          console.log('[SW] 已缓存：', cacheKeyUrl);
         }),
       );
 

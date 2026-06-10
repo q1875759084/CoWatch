@@ -212,6 +212,74 @@ if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
 
 ---
 
+## ⚠️ postMessage 方案的核心缺陷（适用场景受限）
+
+上述 postMessage 方案在 **COS 私有读写 + 时效签名 URL** 场景下存在两个根本缺陷，不推荐使用：
+
+### 缺陷 1：时序竞态（首个 Range 请求必然漏网）
+
+```
+SWITCH_VIDEO 消息到达
+  → 前端更新 activeVideoUrl（React state 更新，异步）
+    → useEffect 触发 postMessage（又是异步）
+      → SW 收到并写入 VIDEO_ORIGINS
+        → isVideoRequest 才能返回 true
+```
+
+而 `<video src=...>` 赋值后，浏览器**立即**发出第一个 Range 请求（获取文件头 / moov atom），这比 postMessage 整条链路快得多。结果：首个 Range 请求 SW 收不到，缓存完整文件的机会丢失，后续所有 seek 产生真实流量。
+
+### 缺陷 2：与时效签名 URL 不兼容
+
+COS 私有读写时，videoUrl 带签名 query 参数（`q-sign-*`），每次切换视频签名不同：
+- 如果 cache key 跟签名走 → 同一视频每次签名不同，永远缓存未命中
+- 如果 cache key 剥离签名 → 需要两套 URL（带签名的网络请求URL + 纯路径的 cache key），逻辑复杂
+
+---
+
+## 最终方案：路径特征判断 + 签名剥离（适用于 objectKey 路径固定的场景）
+
+**前提：** objectKey 格式固定，如 `cowatch/{roomId}/{uuid}-{fileName}.mp4`，路径特征不依赖域名。
+
+### isVideoRequest 改为路径判断
+
+```ts
+function isVideoRequest(request: Request): boolean {
+  const { pathname } = new URL(request.url);
+  // pathname 特征不受域名（COS/CDN/本地）影响，零延迟
+  return pathname.startsWith('/cowatch/') && pathname.endsWith('.mp4');
+}
+```
+
+### stripCosSignature 剥离签名，以纯路径为 cache key
+
+```ts
+function stripCosSignature(url: string): string {
+  const u = new URL(url);
+  // COS 签名参数列表（q-sign-* 系列）
+  ['q-sign-algorithm','q-ak','q-sign-time','q-key-time',
+   'q-header-list','q-url-param-list','q-signature'].forEach((p) => u.searchParams.delete(p));
+  return u.toString();
+}
+
+// fetch 拦截中的用法：
+const cacheKeyUrl = stripCosSignature(request.url); // 纯路径，签名轮换不影响命中
+const cacheKey = new Request(cacheKeyUrl, { headers: {} });
+// 发网络请求时仍用原始带签名 URL（有权限访问 COS）
+const fullRes = await fetch(new Request(request.url, { headers: { 'Cache-Control': 'no-cache' } }));
+await cache.put(cacheKey, fullRes.clone());
+```
+
+**效果对比：**
+
+| 场景 | postMessage 方案 | 路径判断方案 |
+|------|-----------------|------------|
+| 时序竞态 | ❌ 首个 Range 必然漏网 | ✅ 零延迟，pathname 直接判断 |
+| 时效签名 URL | ❌ cache key 跟签名变化 | ✅ stripCosSignature 剥离签名 |
+| 代码复杂度 | 中（需 message 监听器 + postMessage 调用） | 低（只需 isVideoRequest + stripCosSignature） |
+| 适用场景 | objectKey 格式不固定 / 纯公开读场景 | objectKey 路径格式固定（推荐） |
+
+---
+
 ## 工程配置
 
 ### TypeScript：sw.ts 必须独立 tsconfig
