@@ -202,6 +202,22 @@ export default function RoomPage() {
   const activeVideoUrl = roomState?.activeVideoUrl;
   useEffect(() => {
     if (!roomId || !activeVideoUrl || !roomState) return;
+
+    // 通知 SW 将视频的 origin 加入白名单（COS / CDN 域名与页面域名不同，SW 需动态感知）
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      try {
+        const videoOrigin = new URL(activeVideoUrl).origin;
+        if (videoOrigin !== window.location.origin) {
+          navigator.serviceWorker.controller.postMessage({
+            type: 'ADD_VIDEO_ORIGIN',
+            origin: videoOrigin,
+          });
+        }
+      } catch {
+        // URL 解析失败（如相对路径）时跳过，同域视频无需通知
+      }
+    }
+
     const video = roomState.videos.find((v) => v.videoUrl === activeVideoUrl);
     if (!video || video.id === activeVideoId) return;
     // 远端切换了视频，同步 activeVideoId 并拉取 tags

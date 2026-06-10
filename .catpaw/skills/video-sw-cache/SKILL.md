@@ -137,6 +137,81 @@ self.addEventListener('fetch', (event) => {
 
 ---
 
+## 跨域视频（COS / CDN）的特殊处理
+
+### 问题根因
+
+SW 的 `fetch` 事件**只能拦截与注册页面同源的请求**，COS / CDN 视频 URL 的 origin 与页面不同，SW 收不到这些请求，`isVideoRequest` 永远返回 `false`，缓存永远为空。
+
+> **误区**：修改 `isVideoRequest` 里的判断逻辑没有意义——SW 根本就收不到跨域请求，连判断的机会都没有。
+
+### 解决方案：postMessage 动态注入 origin
+
+SW 可以拦截页面向跨域 URL 发起的请求——但**前提是页面通过 `fetch` 发出的请求**，而视频播放器（`<video>`）的 Range 请求是浏览器内部行为，不经过 SW。
+
+因此正确方案是：**让页面提前告诉 SW 视频的 origin，SW 在已知白名单内主动 `fetch` 完整文件并缓存，后续播放命中缓存由 SW 切片返回。**
+
+```
+页面                              SW
+ ├─ 设置 activeVideoUrl
+ ├─ 提取 videoOrigin
+ ├─ postMessage({ type: 'ADD_VIDEO_ORIGIN', origin })  →  存入 VIDEO_ORIGINS[]
+ ├─ 播放器发出 Range 请求  ─────────────────────────────→  拦截
+                                                           ├─ isVideoRequest 用 VIDEO_ORIGINS 判断
+                                                           └─ 缓存完整文件 + 流式切片返回
+```
+
+### SW 端实现
+
+```ts
+// 跨域 origin 白名单，由前端通过 postMessage 动态注入
+const VIDEO_ORIGINS: string[] = [];
+
+self.addEventListener('message', (event) => {
+  const { type, origin } = event.data ?? {};
+  if (type === 'ADD_VIDEO_ORIGIN' && origin && !VIDEO_ORIGINS.includes(origin)) {
+    VIDEO_ORIGINS.push(origin);
+  }
+});
+
+function isVideoRequest(request: Request): boolean {
+  const url = new URL(request.url);
+  // 同域：本地存储模式（/uploads/）
+  if (url.origin === self.location.origin && url.pathname.startsWith('/uploads/')) {
+    return true;
+  }
+  // 跨域：COS / CDN，由前端 postMessage 动态注入
+  return VIDEO_ORIGINS.some((o) => url.origin === o);
+}
+```
+
+### 页面端实现
+
+```ts
+// 在 activeVideoUrl 变化时（useEffect / 事件回调中）
+if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+  try {
+    const videoOrigin = new URL(activeVideoUrl).origin;
+    if (videoOrigin !== window.location.origin) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'ADD_VIDEO_ORIGIN',
+        origin: videoOrigin,
+      });
+    }
+  } catch {
+    // URL 解析失败（相对路径）或同域时跳过
+  }
+}
+```
+
+### 注意事项
+
+- `VIDEO_ORIGINS` 存在 SW 内存中，SW 重启（页面关闭后再开）会丢失，需要页面每次激活视频时重新发送
+- `navigator.serviceWorker.controller` 在 SW 首次安装时为 `null`，需等 SW 激活后才能 `postMessage`；通常在视频激活时 SW 已就绪，可加非空判断即可
+- 不要在 SW 内直接 `fetch` 跨域完整文件时附带 `credentials`，COS 通常不需要 cookie
+
+---
+
 ## 工程配置
 
 ### TypeScript：sw.ts 必须独立 tsconfig
@@ -198,3 +273,4 @@ SW 文件必须在根路径，否则 scope 只覆盖子路径，无法拦截所�
 | 缓存命中但画面卡顿 | `arrayBuffer()` 全量读入内存 | 改用 TransformStream 流式切片 |
 | 无痕模式无法缓存大文件 | 无痕模式 Cache Storage 配额极低（通常 < 100MB） | 普通模式测试；这是浏览器限制，非 bug |
 | SW 只拦截部分页面 | SW 文件不在根路径，scope 受限 | 确保 `sw.js` 输出到 `/`，注册时用 `/sw.js` |
+| 跨域视频（COS/CDN）始终未缓存 | SW `fetch` 事件根本收不到跨域请求，`isVideoRequest` 再怎么改也无效 | 页面提取视频 `origin` 后 `postMessage({ type: 'ADD_VIDEO_ORIGIN', origin })` 给 SW；参见

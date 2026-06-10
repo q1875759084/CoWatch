@@ -95,6 +95,27 @@ UPDATE users SET is_upload_whitelist = 1 WHERE username = '目标用户名';
 
 ---
 
+### nginx 大小限制职责分层
+
+**背景：** 宿主机 nginx 默认 `client_max_body_size 1MB`，大文件上传被 413 拦截，但容器内 nginx 已设 `4096M`。由此引发对"应该在哪一层做大小限制"的讨论。
+
+**结论（三层职责分层）：**
+
+| 层级 | 配置值 | 职责说明 |
+|------|--------|---------|
+| 宿主机 nginx | `client_max_body_size 0` | 纯透传，不感知业务，避免在容器内 nginx 之前就 413 拦截 |
+| 容器内 nginx | `client_max_body_size 8192M` | 粗粒度防御上限，防异常超大请求打穿，与具体业务边界解耦 |
+| 后端各接口 | 精细业务限制（如单文件 4GB） | 唯一的业务卡点，可按接口/角色动态控制，错误返回结构化 JSON |
+
+**为什么不在两层 nginx 都配业务值：**
+- 维护点分散，nginx 和后端容易出现不一致（改了后端忘改 nginx）
+- nginx 返回 413 是 HTML，用户体验差；后端可返回结构化 JSON
+- 后端逻辑更灵活，可按接口、用户角色动态控制上限
+
+**关键认知：** 两层 nginx 各自独立检查 `client_max_body_size`，宿主机 nginx 的检查在容器内 nginx 之前，设错了直接导致容器内配置失效。
+
+---
+
 ### CDN 流量优化演进路线（转码 + Service Worker）
 
 **背景：** 游戏录屏 1080p60 H264，30 分钟约 2.6GB。8 人复盘，主控反复在多个视频片段之间切换，浏览器无法有效缓存视频，每次切换几乎等于重新下载。
@@ -575,3 +596,35 @@ sqlite3 database/cowatch.sqlite3 "ALTER TABLE rooms ADD COLUMN name TEXT NOT NUL
 **关键认知：**
 - `useRef` 的 ref 不会在组件挂载时触发回调；callback ref（`ref={fn}`）会在 React 将 handle 赋予 ref 时立即调用，适合"拿到句柄后立即执行副作用"的场景。
 - Chrome Autoplay Policy：静音视频可自动播放；`unmute` 必须有用户手势，在 Promise.then() 中直接 unmute 不满足条件，且失败时浏览器会强制 pause 视频。参考：https://goo.gl/xX8pDD
+
+---
+
+### SW 无法拦截 COS / CDN 跨域视频请求
+
+**现象：** SW 已激活，本地播放正常走 SW 缓存（Network 面板显示"来自 service worker"），线上播放不走 SW，启动器显示"其他"，Cache Storage 为空。
+
+**根因：** `isVideoRequest` 只检查同域 `/uploads/` 前缀。本地是本地存储模式，`videoUrl` 为 `/uploads/roomId/xxx.mp4`（同域）能命中；线上是 COS 直传模式，`videoUrl` 存的是 COS 完整 URL（`https://co-watch-xxx.cos.ap-chengdu.myqcloud.com/...`），origin 与页面域名不同，`isVideoRequest` 返回 false，SW 直接 `return` 不调用 `respondWith`，请求完全绕过 SW。
+
+**关键认知：** 两种模式的差异不在播放链路，而在上传时存入数据库的 `videoUrl` 格式——本地存储存相对路径，COS 直传存完整 COS URL。播放时直接用这个 URL，导致 SW 拦截条件不同。
+
+**解决：** 运行时动态注入，两处改动：
+
+1. **`sw.ts`** 新增 `message` 事件监听：
+```ts
+self.addEventListener('message', (event) => {
+  const { type, origin } = event.data ?? {};
+  if (type === 'ADD_VIDEO_ORIGIN' && origin && !VIDEO_ORIGINS.includes(origin)) {
+    VIDEO_ORIGINS.push(origin);
+  }
+});
+```
+
+2. **`Lobby/index.tsx`** 在 `activeVideoUrl` 变化的 `useEffect` 里通知 SW：
+```ts
+const videoOrigin = new URL(activeVideoUrl).origin;
+if (videoOrigin !== window.location.origin) {
+  navigator.serviceWorker.controller.postMessage({ type: 'ADD_VIDEO_ORIGIN', origin: videoOrigin });
+}
+```
+
+**设计优点：** 无需硬编码 COS 域名，CDN 接入后域名变了也自动适配；`VIDEO_ORIGINS` 是内存数组，SW 重启后自动清空，下次页面加载时前端会重新 postMessage 补充。

@@ -21,14 +21,17 @@
 
 const CACHE_NAME = 'cowatch-video-v1';
 
+/** 动态注入的外部视频域名（COS / CDN），通过 postMessage 添加 */
 const VIDEO_ORIGINS: string[] = [];
 const VIDEO_PATH_PREFIX = '/uploads/';
 
 function isVideoRequest(request: Request): boolean {
   const url = new URL(request.url);
+  // 同域：本地存储模式，路径以 /uploads/ 开头
   if (url.origin === self.location.origin && url.pathname.startsWith(VIDEO_PATH_PREFIX)) {
     return true;
   }
+  // 跨域：COS / CDN 域名，由前端通过 postMessage 动态注入到 VIDEO_ORIGINS
   return VIDEO_ORIGINS.some((origin) => url.origin === origin);
 }
 
@@ -113,6 +116,19 @@ function buildRangeResponseFromStream(
     },
   });
 }
+
+// ─── message：运行时动态注入视频域名 ─────────────────────────────────────────
+//
+// 视频存储在 COS / CDN 时，URL 的 origin 与页面域名不同，SW 无法通过编译时硬编码。
+// 前端拿到视频 URL 后提取 origin，通过 postMessage 告知 SW 动态添加到白名单。
+//
+self.addEventListener('message', (event) => {
+  const { type, origin } = event.data ?? {};
+  if (type === 'ADD_VIDEO_ORIGIN' && origin && !VIDEO_ORIGINS.includes(origin)) {
+    VIDEO_ORIGINS.push(origin);
+    console.log('[SW] 已添加视频 origin 白名单：', origin);
+  }
+});
 
 // ─── install ─────────────────────────────────────────────────────────────────
 self.addEventListener('install', () => {
