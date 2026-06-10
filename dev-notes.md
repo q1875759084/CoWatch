@@ -474,6 +474,23 @@ ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
 
 ## 踩坑记录
 
+### 宿主机 nginx 默认 1MB 限制导致大文件上传 413
+
+**现象：** 大文件 PUT 接口返回 413，容器内 nginx 已配置 `client_max_body_size 4096M` 却不生效。
+
+**根因：** 两层 nginx 都会独立检查 `client_max_body_size`。宿主机 nginx 默认值为 1MB，流量在到达容器之前就已被拦截，容器内的配置完全不会生效。
+
+**解决：** 宿主机 nginx 对 CoWatch 的 server 块设置 `client_max_body_size 0`（纯透传，不感知业务），容器内 nginx 设 `8192M` 作为粗粒度防御上限，业务精细限制由后端各接口自行负责。
+
+**架构决策（三层职责分层）：**
+- 宿主机 nginx → `client_max_body_size 0`，不感知业务，透传所有请求
+- 容器内 nginx → 粗粒度上限（8G），防异常超大请求打穿
+- 后端 → 精细业务限制（如单文件 4GB、按接口/角色区分），错误响应为结构化 JSON
+
+**为什么不在两层都配业务值：** 维护点分散，nginx 和后端容易出现不一致；nginx 的 413 返回 HTML，用户体验差；后端逻辑更灵活（可按接口、用户角色动态控制）。
+
+---
+
 ### XHR 绕过 axios 拦截器导致上传 401
 
 **现象：** 视频文件上传接口返回 401，getUploadUrl 接口却正常（200）。
