@@ -215,7 +215,10 @@ self.addEventListener('fetch', (event) => {
         fullResponse = await fetch(new Request(request.url, {
           method: 'GET',
           headers: { 'Cache-Control': 'no-cache' },
-          credentials: request.credentials,
+          // 视频资源通过签名 URL 鉴权，不需要携带 cookies
+          // 不带 credentials 可避免浏览器发 preflight（OPTIONS），
+          // CDN 鉴权不支持对 OPTIONS 请求做例外处理，preflight 会被拦截返回 403
+          credentials: 'omit',
         }));
       } catch (err) {
         console.error('[SW] 网络请求失败：', err);
