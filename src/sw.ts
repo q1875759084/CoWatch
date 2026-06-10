@@ -40,7 +40,9 @@ const CACHE_NAME = 'cowatch-video-v2';
  */
 function isVideoRequest(request: Request): boolean {
   const { pathname } = new URL(request.url);
-  return pathname.startsWith('/cowatch/') && pathname.endsWith('.mp4');
+  // startsWith('/cowatch/') 仅匹配 COS/CDN 模式（pathname 直接以 /cowatch/ 开头）。
+  // 本地模式下 pathname 为 /uploads/cowatch/...，需用 includes 统一兼容两种模式。
+  return pathname.includes('/cowatch/') && pathname.endsWith('.mp4');
 }
 
 /**
