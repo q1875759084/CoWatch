@@ -1,0 +1,158 @@
+name: CoWatch 前端 CI/CD
+
+# ==================== 触发机制说明 ====================
+#
+# push 分支     → 触发 CI（只读：lint + build 校验）
+# workflow_dispatch → 触发 CD（有副作用：构建镜像、改变服务器状态）
+# git push tag  → 不触发任何 job（零副作用，只是版本归档）
+#
+# 完整操作流程：
+#   1. push 代码 → CI 自动运行，代码质量卡点
+#   2. 准备测试：GitHub Actions → Run workflow → event=deploy-dev
+#      → 构建镜像（DEPLOY_ENV=test），部署到 3071 端口
+#   3. 测试通过：git tag v1.0.0 && git push origin v1.0.0（零副作用）
+#   4. 上线决策：GitHub Actions → Run workflow → event=deploy-prod，tag=v1.0.0
+#      → 给测试阶段的 sha 镜像追加 v1.0.0 tag（一次构建原则）
+#      → 部署到 3070 端口
+#
+# 注意：前端有编译时变量（DEPLOY_ENV）烧录进 bundle，
+# deploy-dev 构建时传 --build-arg DEPLOY_ENV=test
+# deploy-prod 遵循一次构建原则，不重新构建，使用 sha 镜像追加语义化 tag
+
+on:
+  push:
+    branches: ['**']    # 所有分支 push 触发 CI
+  workflow_dispatch:
+    inputs:
+      event:
+        description: '选择操作类型'
+        required: true
+        type: choice
+        options:
+          - deploy-dev
+          - deploy-prod
+      tag:
+        description: '生产部署时填写，对应测试验证过的 tag，如 v1.0.0'
+        required: false
+        type: string
+
+jobs:
+  # ==================== CI：代码校验 ====================
+  # push 分支 或 手动触发时都要跑，确保 deploy-dev/prod 不能绕过校验
+  ci:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node 版本
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建校验
+        run: npm run build
+
+  # ==================== CD：测试环境部署 ====================
+  # 手动触发 workflow_dispatch + 选择 deploy-dev
+  # 构建时传 --build-arg DEPLOY_ENV=test，使 monitor SDK 进入 staging 模式
+  deploy-dev:
+    needs: ci
+    if: github.event_name == 'workflow_dispatch' && inputs.event == 'deploy-dev'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 生成镜像标签（sha 格式，不可变，精确对应此次 commit）
+        id: meta
+        run: echo "IMAGE_TAG=sha-$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/cowatch:${{ steps.meta.outputs.IMAGE_TAG }}
+          # 传入构建参数：DEPLOY_ENV=test，webpack DefinePlugin 烧录进 bundle
+          build-args: DEPLOY_ENV=test
+          # 启用 GitHub Actions 缓存，加速重复构建
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 触发 infra 仓库部署
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          repository: ${{ github.repository_owner }}/infra
+          event-type: deploy-cowatch-frontend
+          client-payload: |
+            {
+              "image_tag": "${{ steps.meta.outputs.IMAGE_TAG }}",
+              "environment": "dev"
+            }
+
+  # ==================== CD：生产环境部署 ====================
+  # 手动触发 workflow_dispatch + 选择 deploy-prod + 填写 tag
+  # 不重新构建（一次构建原则）：给 deploy-dev 已验证的 sha 镜像追加语义化版本 tag
+  deploy-prod:
+    needs: ci
+    if: github.event_name == 'workflow_dispatch' && inputs.event == 'deploy-prod'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 校验 tag 参数不能为空
+        run: |
+          if [ -z "${{ inputs.tag }}" ]; then
+            echo "❌ 生产部署必须填写 tag 参数，如 v1.0.0"
+            exit 1
+          fi
+
+      - name: Checkout 代码（用于获取 tag 对应的 sha）
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}   # 检出指定 tag，github.sha 即该 tag 对应的 commit hash
+
+      - name: 获取 sha tag（与测试阶段部署的镜像完全对应）
+        id: meta
+        run: echo "SHA_TAG=sha-$(echo ${{ github.sha }} | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: 给 sha 镜像追加语义化版本 tag（纯 manifest 操作，不重新构建）
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ secrets.DOCKER_HUB_USERNAME }}/cowatch:${{ inputs.tag }} \
+            ${{ secrets.DOCKER_HUB_USERNAME }}/cowatch:${{ steps.meta.outputs.SHA_TAG }}
+
+      - name: 触发 infra 仓库部署
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.INFRA_REPO_TOKEN }}
+          repository: ${{ github.repository_owner }}/infra
+          event-type: deploy-cowatch-frontend
+          client-payload: |
+            {
+              "image_tag": "${{ inputs.tag }}",
+              "environment": "prod"
+            }
