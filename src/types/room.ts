@@ -78,6 +78,8 @@ export interface SyncProgressData {
 export interface SyncStateData {
   isPlaying: boolean;
   currentTime: number;
+  /** 后端分配的房间级单调递增序列号，非主控用于过期判断 */
+  seq: number;
 }
 
 export interface ControlChangedData {
@@ -97,6 +99,8 @@ export interface MemberLeftData {
 
 export interface RoomStateData {
   videoUrl: string | null;
+  /** 当前激活视频的 objectKey（稳定标识，不含签名），用于匹配视频列表找到 videoId */
+  activeObjectKey: string | null;
   controlMode: ControlMode;
   controllerId: string | null;
   videos: VideoItem[];

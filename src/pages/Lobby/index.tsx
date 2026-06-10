@@ -16,13 +16,17 @@ import VideoTagBar from './VideoTagBar';
 import styles from './index.module.scss';
 
 /**
- * SYNC_PROGRESS 进度同步阈值（秒）。
+ * SYNC_PROGRESS 兜底纠偏阈值（秒）。
  *
- * 收到 SYNC_PROGRESS 时，若本地进度与远端偏差在此范围内，浏览器自然追上，无需 seek。
- * 只有偏差超过阈值（真正失步）时才执行 seek，避免频繁 seek 打断缓冲。
- * 游戏复盘场景对同步精度要求高，设为 0.5s。
+ * SYNC_PROGRESS 是主控的实时进度广播，非主控收到后的处理原则：
+ *   - 偏差在阈值内：不 seek，各自自然播放即可
+ *   - 偏差超出阈值：说明发生了严重失步，才执行兜底 seek 纠偏
+ *
+ * 阈值设为 0.5s：精确对齐主控进度，网络延迟通常远小于此值。
+ * 之前临时调到 3s 是为了掩盖"非主控根本没起播、一直在 seek"的问题，
+ * 现在根本原因（sync 保护窗口吞掉 play 事件）已修复，恢复 0.5s。
  */
-const SEEK_THRESHOLD_SEC = 0.5;
+const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
 
 export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -40,6 +44,13 @@ export default function RoomPage() {
    * 用 ref 暂存，在 VideoPlayer 挂载时（callback ref 触发）立即消费。
    */
   const pendingInitRef = useRef<{ isPlaying: boolean; currentTime: number } | null>(null);
+  /**
+   * 暂存 ROOM_STATE 下发的 activeObjectKey。
+   * WS 和 HTTP 是并行路径：若 ROOM_STATE 先到而视频列表未加载，
+   * 此时 videosRef 为空，无法匹配 videoId 拉取 tags。
+   * 在 HTTP 完成、videosRef 有数据后，消费此暂存值补发 fetchTags。
+   */
+  const pendingActiveObjectKeyRef = useRef<string | null>(null);
   const videoRef = useRef<VideoPlayerHandle>(null);
   /** 始终保持最新的 videos 列表，供 useMemoizedFn 回调内查询 videoId */
   const videosRef = useRef(roomState?.videos ?? []);
@@ -100,6 +111,18 @@ export default function RoomPage() {
         controlMode: info.controlMode,
         controllerId: info.controllerId,
       });
+      // 消费 WS 比 HTTP 先到时暂存的 activeObjectKey：
+      // ROOM_STATE 到来时视频列表还未就绪，无法匹配 videoId；
+      // 现在 videosRef 已有数据，补发 fetchTags。
+      const pendingKey = pendingActiveObjectKeyRef.current;
+      if (pendingKey) {
+        pendingActiveObjectKeyRef.current = null;
+        const matched = videos.find((v) => v.objectKey === pendingKey);
+        if (matched) {
+          setActiveVideoId(matched.id);
+          fetchTags(matched.id);
+        }
+      }
     });
   }, [roomId]);
 
@@ -121,46 +144,71 @@ export default function RoomPage() {
     isPlaying: boolean,
     currentTime: number,
     roomTags?: Tag[],
-    videoUrl?: string | null,
+    _videoUrl?: string | null,
+    activeObjectKey?: string | null,
   ) => {
     if (videoRef.current) {
       videoRef.current.initPlayback(isPlaying, currentTime);
     } else {
       pendingInitRef.current = { isPlaying, currentTime };
     }
-    // 初始化 activeVideoId / activeObjectKey，防止 useEffect([activeVideoUrl]) 触发多余 tag 请求
-    // ROOM_STATE.videoUrl 是签名播放 URL，在 ROOM_STATE 下发时 videosRef 里已经有含 objectKey 的视频条目
-    if (videoUrl) {
-      const matched = videosRef.current.find((v) => v.videoUrl === videoUrl);
+    // 用 activeObjectKey（稳定标识）匹配视频列表，找到 videoId 后拉取 tags。
+    // 不用 videoUrl 匹配：videos 列表里的 videoUrl 均为 null（播放时按需签名），永远匹配不到。
+    // 后端 ROOM_STATE 的 tags 字段始终为空数组，tags 由 fetchTags 按需拉取。
+    if (activeObjectKey) {
+      setActiveObjectKey(activeObjectKey);
+      const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
       if (matched) {
         setActiveVideoId(matched.id);
-        setActiveObjectKey(matched.objectKey);
+        fetchTags(matched.id);
+      } else {
+        // 视频列表尚未通过 HTTP 加载（WS 比 HTTP 先到），暂存 objectKey，
+        // 等 HTTP 完成后在 initRoom 流程里消费。
+        pendingActiveObjectKeyRef.current = activeObjectKey;
       }
     }
-    if (roomTags) {
+    if (roomTags?.length) {
       setTags(roomTags);
     }
   });
 
   /**
-   * 收到 SYNC_PROGRESS：偏差超过阈值才 seek，避免频繁 seek 打断缓冲。
+   * 收到 SYNC_PROGRESS：仅在严重失步时才兜底 seek，正常播放不干预。
    */
   const handleSyncProgress = useMemoizedFn((currentTime: number) => {
     const handle = videoRef.current;
     if (!handle) return;
-    if (Math.abs(handle.getCurrentTime() - currentTime) >= SEEK_THRESHOLD_SEC) {
+    if (Math.abs(handle.getCurrentTime() - currentTime) >= SYNC_PROGRESS_THRESHOLD_SEC) {
       handle.syncSeek(currentTime);
     }
   });
 
   /**
    * 收到 SYNC_STATE（播放/暂停 + 时间）：全员同步执行。
+   *
+   * SYNC_STATE 触发时机：主控按下播放键、暂停键、或 Tag 跳转。
+   * 这类操作需要精确的状态对齐，阈值设 0.5s：
+   *   - isPlaying=true 且偏差 < 0.5s → 只 play，不 seek（缓冲区完整，避免打断）
+   *   - isPlaying=true 且偏差 >= 0.5s → seek + play（追上主控进度）
+   *   - isPlaying=false → 始终 seek + pause（暂停必须精确对帧）
    */
-  const handleSyncState = useMemoizedFn((isPlaying: boolean, currentTime: number) => {
+  const SYNC_STATE_SEEK_THRESHOLD_SEC = 0.5;
+  /**
+   * 收到 SYNC_STATE：seq 由后端分配，直接传给 VideoPlayer。
+   * VideoPlayer 内部用 seq 大小判断异步回调（onSeeked）是否过期。
+   */
+  const handleSyncState = useMemoizedFn((isPlaying: boolean, currentTime: number, seq: number) => {
+    const handle = videoRef.current;
+    if (!handle) return;
     if (isPlaying) {
-      videoRef.current?.syncSeekAndPlay(currentTime);
+      const diff = Math.abs(handle.getCurrentTime() - currentTime);
+      if (diff < SYNC_STATE_SEEK_THRESHOLD_SEC) {
+        handle.syncPlay(seq);
+      } else {
+        handle.syncSeekAndPlay(currentTime, seq);
+      }
     } else {
-      videoRef.current?.syncSeekAndPause(currentTime);
+      handle.syncSeekAndPause(currentTime, seq);
     }
   });
 
@@ -175,6 +223,33 @@ export default function RoomPage() {
     setTags((prev) => prev.filter((t) => t.id !== id));
   });
 
+  /**
+   * 收到远端 SWITCH_VIDEO 广播：同步 activeObjectKey / activeVideoId 并拉取 tags。
+   *
+   * 主控本地点击（handlePlayVideo）已经主动处理了 tag 拉取，
+   * 且在发送 SWITCH_VIDEO 前已设置 activeObjectKey/activeVideoId，
+   * 因此主控收到自己的广播时，objectKey 和当前状态一致，不会重复触发。
+   *
+   * 非主控则通过此回调完成状态同步。
+   */
+  const handleSwitchVideo = useMemoizedFn((objectKey: string, videoId: string | undefined) => {
+    if (objectKey === activeObjectKey) return; // 主控自身广播，忽略
+    setActiveObjectKey(objectKey);
+    setTags([]);
+    setDuration(0);
+    if (videoId) {
+      setActiveVideoId(videoId);
+      fetchTags(videoId);
+    } else {
+      // 兜底：后端未下发 videoId 时，从视频列表里用 objectKey 查找
+      const matched = videosRef.current.find((v) => v.objectKey === objectKey);
+      if (matched) {
+        setActiveVideoId(matched.id);
+        fetchTags(matched.id);
+      }
+    }
+  });
+
   const { sendMessage } = useRoomWs({
     roomId: roomId!,
     token: getAccessToken() ?? '',
@@ -183,6 +258,7 @@ export default function RoomPage() {
     onSyncState: handleSyncState,
     onTagAdded: handleTagAdded,
     onTagDeleted: handleTagDeleted,
+    onSwitchVideo: handleSwitchVideo,
   });
 
   /**
@@ -200,38 +276,6 @@ export default function RoomPage() {
     fetchTags(videoId);
   });
 
-  /**
-   * 监听远端 SWITCH_VIDEO 广播（通过 activeVideoUrl 变化感知）。
-   * 当 activeVideoUrl 变更且与当前 activeVideoId 不匹配时，说明是远端触发的切换，
-   * 需要重新拉取对应视频的 tags。
-   *
-   * 注意：本地点击 handlePlayVideo 已经主动调用 fetchTags，
-   * 且 setActiveVideoId 先于 activeVideoUrl 变化，所以 video.id === activeVideoId 成立，
-   * effect 会跳过，不会重复请求。
-   *
-   * 初始进房间时 ROOM_STATE 已经带来了 tags（handleRoomState 处理），
-   * 但 activeVideoId 为空，video.id !== '' 成立，会触发一次拉取。
-   * 为避免这次多余请求，ROOM_STATE 处理时同步设置 activeVideoId。
-   *
-   * SW 无需 postMessage 注入域名：isVideoRequest 改为路径特征判断（/cowatch/*.mp4），
-   * 对任意域名（COS / CDN / 本地）均生效，不存在时序竞态问题。
-   */
-  const activeVideoUrl = roomState?.activeVideoUrl;
-  useEffect(() => {
-    if (!roomId || !activeVideoUrl || !roomState) return;
-
-    // activeVideoUrl 是签名 URL，在 roomState.videos 里与 video.videoUrl 对比
-    const video = roomState.videos.find((v) => v.videoUrl === activeVideoUrl);
-    if (!video || video.id === activeVideoId) return;
-    // 远端切换了视频，同步 activeObjectKey / activeVideoId 并拉取 tags
-    setActiveObjectKey(video.objectKey);
-    setActiveVideoId(video.id);
-    setTags([]);
-    setDuration(0);
-    fetchTags(video.id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeVideoUrl]);
-
   // ── Tag 操作（发送 WS 消息） ─────────────────────────────────────────────────
 
   const handleTagAdd = useMemoizedFn((_videoId: string, time: number, label: string) => {
@@ -244,6 +288,11 @@ export default function RoomPage() {
   });
 
   const handleTagSeek = useMemoizedFn((time: number) => {
+    // 主控本地即时 seek+pause，不依赖 WS 回环。
+    // seq 传 0：主控本地调用只影响自己的视频状态，不参与非主控的 seq 过期判断。
+    // 非主控收到的 seq 来自后端（TAG_SEEK → 后端分配 nextSeq 广播 SYNC_STATE），
+    // 与这里的 0 完全独立。
+    videoRef.current?.syncSeekAndPause(time, 0);
     sendMessage('TAG_SEEK', { time });
   });
 
@@ -308,6 +357,7 @@ export default function RoomPage() {
             <VideoList
               videos={roomState.videos}
               activeObjectKey={activeObjectKey}
+              isController={isController}
               onPlay={handlePlayVideo}
             />
           </div>

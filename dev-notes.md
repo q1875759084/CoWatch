@@ -484,6 +484,65 @@ video.addEventListener('seeked', onSeeked);
 
 **移除自由模式（最终决策）：** 自由模式（任意成员可控）在实际使用中弊大于利——多人同时拖进度条时互相广播，造成混乱且与保护计数器产生复杂竞态。最终只保留 designated（指定控制者）模式，控制权单一来源，彻底消除多发送方引起的竞态。实现上删除了 `MODE_CHANGE` / `MODE_CHANGED` 消息处理，`canControl` 只判断 `controller_id`，前端 `isController` 简化为 `controllerId === userId`。
 
+**计数器方案的根本缺陷 → 后端全局 Seq 方案（最终）：**
+
+计数器方案的核心假设是"能精确预测每个远端操作会触发几个 play/pause 事件"，但这个假设在快速连续操作下会崩溃：
+
+**根本缺陷（名额悬空竞态）：**
+
+主控执行"Tag 跳转 → 播放 → 暂停"三连操作时，非主控侧发生如下竞态：
+
+1. 收到 `SYNC_STATE(isPlaying=false, time=T1)`：调用 `syncSeekAndPause`，提前预留 2 个计数名额（seek 期间的隐式 pause + seeked 后的显式 pause），然后注册 `onSeeked` 回调异步等待
+2. 在 `onSeeked` 触发之前（异步窗口），又收到 `SYNC_STATE(isPlaying=true)`：再次预留 1 个名额并调用 `video.play()`
+3. 步骤 1 的 `onSeeked` 终于触发，执行 `video.pause()`——这一次 pause 是为旧指令服务的，但此时计数器名额已被步骤 2 消耗，pause 事件被当作本地操作广播出去，或者名额仍在导致更新的指令被静默丢弃
+
+**本质**：计数器是对"未来事件数量"的预测，异步回调（`onSeeked`、`play().then()`）执行时，外部状态已被新指令改变，预测失效，名额对不上号。计数器无法区分"这个事件属于哪条指令"。
+
+**后端全局 Seq 方案：**
+
+后端为每个房间维护单调递增的 `roomSeq`，每次广播 `SYNC_STATE` / `TAG_SEEK` 时分配并附带 `seq`：
+
+```ts
+// wsServer.ts
+const roomSeq = new Map<string, number>();
+function nextSeq(roomId: string): number {
+  const seq = (roomSeq.get(roomId) ?? 0) + 1;
+  roomSeq.set(roomId, seq);
+  return seq;
+}
+// 广播时附带
+broadcastExcept(roomId, userId, { type: 'SYNC_STATE', data: { isPlaying, currentTime, seq } });
+```
+
+前端 `VideoPlayer` 用 `lastSyncSeqRef` 记录当前处理的最新 seq，**异步回调执行前做过期检查**：
+
+```ts
+// VideoPlayer.tsx
+const lastSyncSeqRef = useRef(0);
+
+syncSeekAndPause: (time, seq) => {
+  lastSyncSeqRef.current = seq;          // 记录最新 seq
+  if (video.paused) {
+    video.currentTime = time;
+  } else {
+    video.currentTime = time;
+    const onSeeked = () => {
+      video.removeEventListener('seeked', onSeeked);
+      if (lastSyncSeqRef.current > seq) return; // ← 过期则丢弃，不执行 pause
+      video.pause();
+    };
+    video.addEventListener('seeked', onSeeked);
+  }
+},
+```
+
+**为什么用大小比较而非相等比较：** 快速连续操作可能产生多条消息，`onSeeked` 执行时 `lastSyncSeqRef` 可能已经跳过了多个 seq 值（不是简单地 +1），大小比较可以统一处理"任何更新指令到达后，旧指令的异步回调一律丢弃"的语义，相等比较会漏掉中间跳过的情况。
+
+**方案优势：**
+- **不需要预测**：不再猜"会触发几个事件"，只关心"当前执行的是不是最新指令"
+- **防护机制前移到后端**：后端 `canControl` 拦截非主控的 `SYNC_STATE` 上报，前端完全不需要保护 `handlePlay/handlePause`
+- **非主控 `disabled` 的语义清晰化**：`pointerEvents: none` 只屏蔽用户鼠标操作；远端指令触发的 play/pause 事件上报给后端，后端 `canControl` 鉴权拦截，天然无害，无需前端额外保护
+
 ---
 
 ### 视频上传前端码率校验
@@ -630,6 +689,42 @@ sqlite3 database/cowatch.sqlite3 "ALTER TABLE rooms ADD COLUMN name TEXT NOT NUL
 **结论：** 以下两类场景允许绕过封装的 `request`，直接用原生 `axios` 或 `XHR`：
 1. **OSS 预签名直传**：OSS 通过 URL query 鉴权，带自定义 `Authorization` 头会报错，用 XHR
 2. **后端返回非 JSON 数据**（如 Blob 文件下载）：业务拦截器假定响应为 JSON 并做 code 校验，用原生 axios 绕过；需在注释中说明原因
+
+---
+
+### syncPlay 静默吞掉 Autoplay Policy 拒绝导致非主控永久暂停
+
+**现象：** 非主控进度条静止不动，每隔 0.5s 被动 seek 一次，画面始终停在暂停态，不播放。
+
+**根因：** `syncPlay` / `syncSeekAndPlay` 内部的 `video.play().catch(() => {})` 将 Autoplay Policy 的拒绝完全静默吞掉：
+
+```ts
+// 问题代码
+video.play().catch(() => {});  // Autoplay Policy 拒绝 → 吞掉 → 视频实际未起播
+```
+
+Chrome 的 Autoplay Policy 规定：用户与页面没有任何交互之前，有声视频不允许自动播放，`play()` 返回的 Promise 直接 reject。`.catch(() => {})` 让视频停留在暂停态，而主控的 `SYNC_PROGRESS` 持续广播进度（主控在播放），非主控的偏差不断超过 0.5s 阈值，触发 `syncSeek` 不断纠偏但永远不起播，形成无限 seek 循环。
+
+**与"新成员加入"场景的区别：** `initPlayback` 从建立之初就用静音起播来绕过 Autoplay Policy；但中途修复计数器竞态时，`syncPlay` / `syncSeekAndPlay` 直接写了 `.catch(() => {})`，没有沿用同样的静音重试逻辑，漏掉了这个边界场景。
+
+**解决：** 提取 `tryPlay(video)` 辅助函数，与 `initPlayback` 保持一致的静音重试逻辑：
+
+```ts
+const tryPlay = (video: HTMLVideoElement) => {
+  video.play().catch(() => {
+    // 非静音播放失败 → 静音重试（Autoplay Policy 允许静音视频自动播放）
+    video.muted = true;
+    unmutePendingRef.current = true;
+    video.play().catch(() => {
+      // 静音也失败（极少见，如网络异常），重置标志
+      unmutePendingRef.current = false;
+      video.muted = false;
+    });
+  });
+};
+```
+
+`syncPlay` / `syncSeekAndPlay` 均改为调用 `tryPlay(video)` 而非直接 `video.play().catch(() => {})`。静音起播成功后设置 `unmutePendingRef = true`，用户首次点击页面时在 `handleClick` 里执行 `muted = false` 恢复声音。
 
 ---
 

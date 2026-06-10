@@ -92,34 +92,40 @@ function buildRangeResponseFromStream(
   contentType: string,
 ): Response {
   const { start, end } = range;
-  const chunkSize = end - start + 1;
+  const chunkSize = end - start + 1; // 用于 Content-Length 响应头
 
-  let bytesSkipped = 0;
-  let bytesSent = 0;
+  /**
+   * offset 追踪当前 chunk 在整个文件中的起始字节位置。
+   *
+   * 原实现用 bytesSkipped + bytesSent 计算 chunkStart，存在 bug：
+   * 第一个与目标区间有交集的 chunk 处理后，bytesSkipped 被 Math.min 截断为 start，
+   * 后续 chunk 的 chunkStart = start + bytesSent，计算偏移错误，
+   * 导致切片范围不对，浏览器收到错误数据后反复重试（2-5ms 高频请求）。
+   */
+  let offset = 0;
 
   const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
-      const chunkStart = bytesSkipped + bytesSent;
-      const chunkEnd = chunkStart + chunk.byteLength - 1;
+      const chunkStart = offset;
+      const chunkEnd = offset + chunk.byteLength - 1;
+      offset += chunk.byteLength;
 
-      if (chunkEnd < start) {
-        bytesSkipped += chunk.byteLength;
-        return;
-      }
+      // chunk 完全在目标区间之前，跳过
+      if (chunkEnd < start) return;
 
-      if (chunkStart > end) {
-        controller.terminate();
-        return;
-      }
+      // chunk 完全在目标区间之后，直接丢弃（不 enqueue）
+      if (chunkStart > end) return;
 
+      // chunk 与目标区间有交集，切出交集部分传给播放器
       const sliceFrom = Math.max(0, start - chunkStart);
       const sliceTo = Math.min(chunk.byteLength, end - chunkStart + 1);
-      const slice = chunk.slice(sliceFrom, sliceTo);
-      bytesSkipped = Math.min(bytesSkipped + sliceFrom, start);
-      bytesSent += slice.byteLength;
-      controller.enqueue(slice);
+      controller.enqueue(chunk.slice(sliceFrom, sliceTo));
 
-      if (bytesSent >= chunkSize) {
+      // 当前 chunk 已经包含了目标区间的末尾字节，后续 chunk 不再需要
+      // 用 terminate() 提前终止写入端，避免继续流过剩余的文件数据浪费资源
+      // 注意：terminate() 会丢弃写入端未消费的数据，但此时 readable 侧已经
+      // 收到了完整的目标区间数据（上面 enqueue 已完成），不会导致数据截断
+      if (chunkEnd >= end) {
         controller.terminate();
       }
     },

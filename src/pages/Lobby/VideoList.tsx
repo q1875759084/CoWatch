@@ -8,10 +8,12 @@ interface VideoListProps {
    * 不使用 videoUrl 对比，因为签名 URL 每次不同
    */
   activeObjectKey: string | null;
+  /** 仅主控可点击播放按钮切换视频 */
+  isController: boolean;
   onPlay: (objectKey: string, videoId: string) => void;
 }
 
-export default function VideoList({ videos, activeObjectKey, onPlay }: VideoListProps) {
+export default function VideoList({ videos, activeObjectKey, isController, onPlay }: VideoListProps) {
   if (videos.length === 0) {
     return (
       <div className={styles.empty}>
@@ -43,12 +45,14 @@ export default function VideoList({ videos, activeObjectKey, onPlay }: VideoList
                   </span>
                 </div>
               </div>
-              <button
-                className={`${styles.playBtn} ${isActive ? styles.playBtnActive : ''}`}
-                onClick={() => onPlay(v.objectKey, v.id)}
-              >
-                {isActive ? '▶ 播放中' : '▶ 播放'}
-              </button>
+              {isController && (
+                <button
+                  className={`${styles.playBtn} ${isActive ? styles.playBtnActive : ''}`}
+                  onClick={() => onPlay(v.objectKey, v.id)}
+                >
+                  {isActive ? '▶ 播放中' : '▶ 播放'}
+                </button>
+              )}
             </li>
           );
         })}

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { createContext, useContext, useState, useRef, type ReactNode } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import type { Member, ControlMode, VideoItem } from '@/types/room';
 
@@ -41,12 +41,29 @@ const RoomContext = createContext<RoomContextValue>({
 export function RoomProvider({ children }: { children: ReactNode }) {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
 
+  /**
+   * WS ROOM_STATE 可能早于 HTTP initRoom 到达，此时 roomState 为 null，
+   * setActiveVideoUrl 的 setState(prev => prev ? ... : prev) 会丢弃 url。
+   * 用 ref 暂存，initRoom 完成时将其合并进初始 state。
+   */
+  const pendingActiveVideoUrlRef = useRef<string | null>(null);
+
   const initRoom = useMemoizedFn((state: RoomState) => {
-    setRoomState(state);
+    const pending = pendingActiveVideoUrlRef.current;
+    pendingActiveVideoUrlRef.current = null;
+    // 若 WS 先于 HTTP 写入了 activeVideoUrl，合并进初始 state
+    setRoomState(pending ? { ...state, activeVideoUrl: pending } : state);
   });
 
   const setActiveVideoUrl = useMemoizedFn((url: string) => {
-    setRoomState((prev) => prev ? { ...prev, activeVideoUrl: url } : prev);
+    setRoomState((prev) => {
+      if (!prev) {
+        // roomState 尚未初始化（WS 早于 HTTP 到达），暂存等 initRoom 消费
+        pendingActiveVideoUrlRef.current = url;
+        return prev;
+      }
+      return { ...prev, activeVideoUrl: url };
+    });
   });
 
   const addVideo = useMemoizedFn((video: VideoItem) => {

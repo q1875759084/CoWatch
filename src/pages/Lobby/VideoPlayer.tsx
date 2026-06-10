@@ -9,28 +9,23 @@ import styles from './VideoPlayer.module.scss';
 
 export interface VideoPlayerHandle {
   /**
-   * 远端同步：跳转 + 播放。
-   * 若当前正在播放，seek 会产生隐式 pause，提前预留名额；
-   * play() 本身也需要一个名额，一并预留，防止回环广播。
+   * 远端同步：仅播放，不 seek。
+   * 用于 SYNC_STATE(isPlaying=true) 且进度偏差在阈值内的情况。
    */
-  syncSeekAndPlay: (time: number) => void;
+  syncPlay: (seq: number) => void;
+  /** 远端同步：跳转 + 播放。 */
+  syncSeekAndPlay: (time: number, seq: number) => void;
   /**
    * 远端同步：跳转 + 暂停。
-   * 正在播放时 seek 的浏览器事件序列：
-   *   pause（seeking）→ seeking → seeked → play（自动恢复）
-   * 需在 seeked 后显式 pause 才能真正停住，中间所有事件均预留名额。
+   * 播放中 seek 需在 seeked 后显式 pause，onSeeked 执行前用 seq 判断是否已过期。
    */
-  syncSeekAndPause: (time: number) => void;
-  /**
-   * 仅跳转进度，不改变播放状态（用于 SYNC_PROGRESS）。
-   * 若正在播放，seek 会触发隐式 pause，提前预留名额。
-   */
+  syncSeekAndPause: (time: number, seq: number) => void;
+  /** 仅跳转进度，不改变播放状态（用于 SYNC_PROGRESS 兜底纠偏）。 */
   syncSeek: (time: number) => void;
   /** 读取当前视频时间（供外部做偏差阈值判断） */
   getCurrentTime: () => number;
   /**
    * 初始化播放状态（新成员加入时同步当前进度）。
-   * 若视频尚未就绪（readyState < 3），等待 canplay 后再执行。
    * isPlaying=true 时先静音播放（绕过自动播放策略），等用户首次点击后取消静音。
    */
   initPlayback: (isPlaying: boolean, currentTime: number) => void;
@@ -41,7 +36,6 @@ interface VideoPlayerProps {
   disabled: boolean;
   onProgressChange: (currentTime: number) => void;
   onPlayStateChange: (isPlaying: boolean, currentTime: number) => void;
-  /** 视频元数据加载完毕时回调，返回视频总时长（秒） */
   onDurationChange?: (duration: number) => void;
 }
 
@@ -50,57 +44,73 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     const videoRef = useRef<HTMLVideoElement>(null);
 
     /**
-     * 远端操作保护计数器。
+     * 非主控侧：记录当前处理中的最新 seq（后端分配，单调递增）。
      *
-     * 规则：
-     *   每次预期浏览器会因远端操作触发一个"不该广播"的 play/pause 事件时，提前 +1；
-     *   handlePlay / handlePause 被触发时，若计数 > 0，则 -1 并跳过广播。
+     * 用途：syncSeekAndPause 播放中分支会注册异步 onSeeked 回调。
+     * 若在 seeked 触发之前又收到了更新的指令（seq 更大），
+     * onSeeked 执行时发现 lastSyncSeqRef.current > 自己的 seq，直接丢弃，
+     * 不执行 pause，让更新的指令接管。
      *
-     * 用计数器而非 boolean 的原因：
-     *   播放中 seek 触发隐式 pause（消耗 1），随后 seeked 后浏览器自动 play（消耗 1），
-     *   再加手动 pause（消耗 1），三个事件需要独立的名额，boolean 无法区分。
+     * 注意：这里不再承担"保护 handlePlay/handlePause 不广播"的职责。
+     * 非主控的 disabled=true 导致 pointerEvents:none，用户根本触发不了
+     * play/pause 事件，handlePlay/handlePause 里的事件全部来自远端指令，
+     * 全部应该正常广播（主控会收到后发现是自己的回环，因为
+     * SYNC_STATE 用 broadcastExcept 排除了主控，所以实际上不会回环）。
      */
-    const remotePendingRef = useRef(0);
+    const lastSyncSeqRef = useRef(0);
 
     /**
      * 标记视频正处于"静音自动播放"状态，等待用户首次交互后取消静音。
-     * Chrome 不允许有声视频自动播放，但允许静音视频自动播放；
-     * unmute 本身需要用户手势，因此在用户点击页面时执行。
      */
     const unmutePendingRef = useRef(false);
 
+    /**
+     * 尝试播放，若被 Autoplay Policy 拒绝则静音后重试。
+     * 静音重试成功后设置 unmutePendingRef，等用户首次点击再取消静音。
+     */
+    const tryPlay = (video: HTMLVideoElement) => {
+      video.play().catch(() => {
+        // 非静音播放失败（Autoplay Policy），静音重试
+        video.muted = true;
+        unmutePendingRef.current = true;
+        video.play().catch(() => {
+          // 静音也失败，重置标志（不常见，网络异常等）
+          unmutePendingRef.current = false;
+          video.muted = false;
+        });
+      });
+    };
+
     useImperativeHandle(ref, () => ({
-      syncSeekAndPlay: (time: number) => {
+      syncPlay: (seq: number) => {
         const video = videoRef.current;
         if (!video) return;
-        if (!video.paused) remotePendingRef.current += 1; // 保护 seek 触发的隐式 pause
-        remotePendingRef.current += 1;                    // 保护即将触发的 play 事件
-        video.currentTime = time;
-        video.play().catch(() => {
-          // play() 被浏览器拒绝，收回多余名额
-          remotePendingRef.current = Math.max(0, remotePendingRef.current - 1);
-        });
+        lastSyncSeqRef.current = seq;
+        tryPlay(video);
       },
 
-      syncSeekAndPause: (time: number) => {
+      syncSeekAndPlay: (time: number, seq: number) => {
         const video = videoRef.current;
         if (!video) return;
+        lastSyncSeqRef.current = seq;
+        video.currentTime = time;
+        tryPlay(video);
+      },
+
+      syncSeekAndPause: (time: number, seq: number) => {
+        const video = videoRef.current;
+        if (!video) return;
+        lastSyncSeqRef.current = seq;
         if (video.paused) {
-          // 已暂停：seek 不产生隐式 pause 事件，只需为 pause() 预留一个名额
-          remotePendingRef.current += 1;
+          // 已暂停：直接 seek，不产生 play/pause 事件
           video.currentTime = time;
-          // video 已暂停，pause() 不会触发 pause 事件，此处调用只是确保语义一致
-          video.pause();
         } else {
-          // 播放中 seek 的完整浏览器事件序列：
-          //   pause（seeking 开始）→ seeking → seeked → play（浏览器自动恢复播放）
-          // 不能依赖隐式 pause 实现暂停，seeked 后视频会自动恢复，必须在 seeked 后显式 pause。
-          remotePendingRef.current += 1; // 保护 seek 触发的隐式 pause
-          remotePendingRef.current += 1; // 保护 seeked 后浏览器自动触发的 play
-          remotePendingRef.current += 1; // 保护我们手动调用的 pause()
+          // 播放中：seek 后在 seeked 里强制 pause
           video.currentTime = time;
           const onSeeked = () => {
             video.removeEventListener('seeked', onSeeked);
+            // 有更新指令覆盖了本条（seq 更大），丢弃
+            if (lastSyncSeqRef.current > seq) return;
             video.pause();
           };
           video.addEventListener('seeked', onSeeked);
@@ -110,7 +120,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       syncSeek: (time: number) => {
         const video = videoRef.current;
         if (!video) return;
-        if (!video.paused) remotePendingRef.current += 1; // 保护 seek 触发的隐式 pause
         video.currentTime = time;
       },
 
@@ -124,23 +133,18 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           video.currentTime = currentTime;
           if (!isPlaying) return;
 
-          // seeked 后再 play，确保从目标帧开始播放
           const onSeeked = () => {
             video.removeEventListener('seeked', onSeeked);
-            remotePendingRef.current += 1; // 保护即将触发的 play 事件
-            // 静音播放绕过 Chrome 自动播放策略，等用户首次点击时取消静音
             video.muted = true;
             unmutePendingRef.current = true;
             video.play().catch(() => {
               unmutePendingRef.current = false;
               video.muted = false;
-              remotePendingRef.current = Math.max(0, remotePendingRef.current - 1);
             });
           };
           video.addEventListener('seeked', onSeeked);
         };
 
-        // readyState >= 3（HAVE_FUTURE_DATA）表示已有足够数据，可直接操作
         if (video.readyState >= 3) {
           doInit();
         } else {
@@ -153,9 +157,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       },
     }));
 
-    // throttle 200ms，避免拖动进度条时消息过频。
-    // 用 useRef 固定 throttle 实例（整个组件生命周期只创建一次），
-    // 再用 useMemoizedFn 提供稳定的调用引用。
     const stableOnProgressChange = useMemoizedFn(onProgressChange);
     const throttledProgressChangeRef = useRef(throttle((time: number) => stableOnProgressChange(time), 200));
 
@@ -165,23 +166,29 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       throttledProgressChangeRef.current(video.currentTime);
     });
 
+    /**
+     * 主控：play/pause 事件 = 用户操作，直接广播。
+     * 非主控：disabled=true，pointerEvents:none，用户触发不了这两个事件；
+     *   远端指令触发的 play/pause 同样走这里广播——但因为 SYNC_STATE 用
+     *   broadcastExcept 排除了主控，非主控不是发送方，这里的广播实际上
+     *   会发给服务端，服务端再 broadcastExcept 排除非主控自己……
+     *
+     * 等等：非主控调用了 video.play()，浏览器触发 play 事件，handlePlay 里
+     * onPlayStateChange → sendMessage('SYNC_STATE') → 后端收到非主控的 SYNC_STATE
+     * → canControl 检查失败（非主控不是 controller）→ 直接 return，不广播。
+     *
+     * 所以：非主控的 handlePlay/handlePause 发出去的消息后端会拦截，完全无害。
+     * 不需要任何保护逻辑。
+     */
     const handlePlay = useMemoizedFn(() => {
       const video = videoRef.current;
       if (!video) return;
-      if (remotePendingRef.current > 0) {
-        remotePendingRef.current -= 1;
-        return;
-      }
       onPlayStateChange(true, video.currentTime);
     });
 
     const handlePause = useMemoizedFn(() => {
       const video = videoRef.current;
       if (!video) return;
-      if (remotePendingRef.current > 0) {
-        remotePendingRef.current -= 1;
-        return;
-      }
       onPlayStateChange(false, video.currentTime);
     });
 
@@ -192,7 +199,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
     });
 
     const handleClick = useMemoizedFn(() => {
-      // 用户首次点击时，若视频正处于静音自动播放状态，取消静音
       if (unmutePendingRef.current && videoRef.current) {
         unmutePendingRef.current = false;
         videoRef.current.muted = false;
@@ -209,7 +215,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           onPlay={handlePlay}
           onPause={handlePause}
           onLoadedMetadata={handleLoadedMetadata}
-          controls={!disabled}
+          controls
           style={{ pointerEvents: disabled ? 'none' : 'auto' }}
           preload="metadata"
         />
