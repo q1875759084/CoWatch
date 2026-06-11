@@ -214,11 +214,11 @@ self.addEventListener('fetch', (event) => {
       try {
         fullResponse = await fetch(new Request(request.url, {
           method: 'GET',
-          headers: { 'Cache-Control': 'no-cache' },
-          // 视频资源通过签名 URL 鉴权，不需要携带 cookies
-          // 不带 credentials 可避免浏览器发 preflight（OPTIONS），
-          // CDN 鉴权不支持对 OPTIONS 请求做例外处理，preflight 会被拦截返回 403
-          credentials: 'omit',
+          // 不加任何自定义请求头，保持"简单请求"（GET + 无自定义头），
+          // 浏览器不会发 preflight（OPTIONS）。
+          // CDN TypeA 鉴权通过 sign query 参数完成，无需额外头部。
+          // Cache-Control: no-cache 去掉：该头属于非简单头，会触发 preflight，
+          // 且 SW 缓存已由自身逻辑管理，不需要绕过 HTTP 缓存。
         }));
       } catch (err) {
         console.error('[SW] 网络请求失败：', err);
