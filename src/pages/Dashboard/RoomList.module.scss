@@ -1,6 +1,9 @@
+// 5个汉字 × 14px字号 × 1.2倍字宽系数 + icon(32px) + gap(10px) + 两侧padding(20px) ≈ 146px，取整为150px
+$sidebar-width: 150px;
+
 .sidebar {
-  width: 220px;
-  min-width: 220px;
+  width: $sidebar-width;
+  min-width: $sidebar-width;
   background: #0d1117;
   border-right: 1px solid #30363d;
   display: flex;
@@ -55,7 +58,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
+  padding: 9px 8px;
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s;
@@ -87,26 +90,23 @@
 
 .roomInfo {
   overflow: hidden;
+  display: flex;
+  align-items: center;
+  height: 32px; // 与 roomIcon 同高，使文字垂直居中
 }
 
 .roomId {
   color: #c9d1d9;
   font-size: 13px;
   font-weight: 500;
+  // 硬截断：超出5个汉字直接截掉，不显示省略号
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
+  max-width: 5em;
 }
 
-.adminBadge {
-  font-size: 10px;
-  padding: 1px 5px;
-  background: #1f6feb33;
-  color: #58a6ff;
-  border-radius: 4px;
-  margin-top: 2px;
-  display: inline-block;
-}
+// adminBadge 已从 DOM 中移除，此样式保留以防万一
 
 .empty {
   padding: 20px 12px;

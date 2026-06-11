@@ -50,6 +50,8 @@ module.exports = {
           {
             loader: 'sass-loader',
             options: {
+              // 将全局变量文件自动注入到每个 scss 文件，无需手动 @use / @import
+              additionalData: `@use "${path.resolve(__dirname, 'src/styles/_variables.scss')}" as *;`,
               sassOptions: {
                 silenceDeprecations: ['legacy-js-api'],
               },

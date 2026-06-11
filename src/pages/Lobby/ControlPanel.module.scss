@@ -6,8 +6,8 @@
 }
 
 .section {
-  padding-bottom: 20px;
-  margin-bottom: 20px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 
   &:last-child {
@@ -17,7 +17,7 @@
 }
 
 .sectionTitle {
-  font-size: 11px;
+  font-size: $block-title-font-size;
   font-weight: 600;
   color: #4a5568;
   text-transform: uppercase;
@@ -83,10 +83,6 @@
   color: #e2e8f0;
 }
 
-.youBadge {
-  color: #63b3ed;
-  font-size: 12px;
-}
 
 .modeToggle {
   display: flex;
@@ -142,7 +138,7 @@
   padding: 0;
   cursor: pointer;
   color: #4a5568;
-  font-size: 11px;
+  font-size: $block-title-font-size;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.8px;

@@ -67,16 +67,20 @@
   font-size: 40px;
 }
 
-// 视频列表区
-.videoListSection {
-  padding: 0 24px;
+// 中间可折叠区域容器
+.collapsibleArea {
   flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-// 上传区
-.uploaderSection {
-  padding: 16px 24px 24px;
-  flex-shrink: 0;
+// 上传区 inner：CollapseSection body 内的水平 padding
+.uploaderInner {
+  padding: 0 24px;
+}
+
+// 视频列表 inner：CollapseSection body 内的水平 padding
+.videoListInner {
+  padding: 0 24px;
 }
 
 // ── 右侧控制面板 ────────────────────────────────────────────────────────────

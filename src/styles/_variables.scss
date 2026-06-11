@@ -1,0 +1,5 @@
+// ── 全局 SCSS 变量 ─────────────────────────────────────────────────────────────
+// 通过 webpack sass-loader additionalData 自动注入到所有 scss 文件，无需手动 @import
+
+// 右侧控制面板分块标题字体大小
+$block-title-font-size: 16px;

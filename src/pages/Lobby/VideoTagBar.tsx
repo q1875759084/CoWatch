@@ -116,14 +116,6 @@ export default function VideoTagBar({
 
   return (
     <div className={styles.wrapper}>
-      {/* 区块标题 */}
-      <h3 className={styles.title}>
-        时间标记
-        {tags.length > 0 && (
-          <span className={styles.count}>{tags.length}</span>
-        )}
-      </h3>
-
       {/* 自定义时间轴 */}
       <div className={styles.timeline}>
         <div className={styles.timelineTrack} />

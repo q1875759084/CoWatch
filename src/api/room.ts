@@ -110,11 +110,11 @@ export async function getTagsApi(roomId: string, videoId: string): Promise<Tag[]
 
 /**
  * 下载转码脚本（.bat）
- * 按画质档位返回对应的静态脚本文件，无需鉴权。
+ * 按 CRF 数字档位返回对应的静态脚本文件，无需鉴权。
  * 使用原生 axios 而非封装的 request，避免业务拦截器对 Blob 响应做 code 校验导致误报错。
  */
 export async function downloadBatApi(
-  preset: 'high' | 'balanced' | 'small',
+  preset: '23' | '26' | '28' | '30',
 ): Promise<void> {
   const res = await axios.get<Blob>('/api/bat', {
     params: { preset },

@@ -5,13 +5,8 @@ import MemberList from '@/components/MemberList';
 import { downloadBatApi } from '@/api/room';
 import styles from './ControlPanel.module.scss';
 
-type EncodePreset = 'high' | 'balanced' | 'small';
-
-const PRESET_OPTIONS: { value: EncodePreset; label: string; desc: string }[] = [
-  { value: 'high',     label: '高画质', desc: 'CRF 23 · 原文件已压缩时可能比原文件更大' },
-  { value: 'balanced', label: '均衡',   desc: 'CRF 26 · 约原文件 60–70%' },
-  { value: 'small',    label: '小体积', desc: 'CRF 28 · 约原文件 1/8，实测 30min ≈ 320MB' },
-];
+/** 固定使用 CRF 30 档位 */
+const ENCODE_PRESET = '30' as const;
 
 interface ControlPanelProps {
   roomId: string;
@@ -19,7 +14,6 @@ interface ControlPanelProps {
   members: Member[];
   controllerId: string | null;
   isAdmin: boolean;
-  currentUserId: string;
   onTransferControl: (targetUserId: string) => void;
 }
 
@@ -29,11 +23,9 @@ export default function ControlPanel({
   members,
   controllerId,
   isAdmin,
-  currentUserId,
   onTransferControl,
 }: ControlPanelProps) {
   const controller = members.find((m) => m.userId === controllerId);
-  const isController = controllerId === currentUserId;
 
   const [copied, setCopied] = useState(false);
   const handleCopy = useMemoizedFn(() => {
@@ -45,9 +37,8 @@ export default function ControlPanel({
 
   // 编码设置折叠区状态
   const [encodeExpanded, setEncodeExpanded] = useState(false);
-  const [encodePreset, setEncodePreset] = useState<EncodePreset>('balanced');
   const { loading: downloading, run: handleDownloadBat } = useRequest(
-    () => downloadBatApi(encodePreset),
+    () => downloadBatApi(ENCODE_PRESET),
     { manual: true },
   );
 
@@ -73,26 +64,19 @@ export default function ControlPanel({
       {/* 当前控制状态 */}
       <section className={styles.section}>
         <h3 className={styles.sectionTitle}>控制权</h3>
+        {isAdmin && (
+          <p className={styles.modeHint}>点击成员名称可指定其为控制者</p>
+        )}
         <div className={styles.controllerInfo}>
           <span className={styles.designatedMode}>
-            🎮 {controller ? controller.nickname : '无'} 正在控制
-            {isController && <span className={styles.youBadge}> (你)</span>}
+            {controller ? controller.nickname : '无'} 正在控制
           </span>
         </div>
       </section>
 
-      {/* 管理员：指定控制者提示 */}
-      {isAdmin && (
-        <section className={styles.section}>
-          <p className={styles.modeHint}>点击成员名称可指定其为控制者</p>
-        </section>
-      )}
-
       {/* 成员列表 */}
       <section className={styles.section}>
-        <h3 className={styles.sectionTitle}>
-          成员 ({members.filter((m) => m.isOnline).length} 人在线)
-        </h3>
+        <h3 className={styles.sectionTitle}>成员</h3>
         <MemberList
           members={members}
           controllerId={controllerId}
@@ -114,20 +98,14 @@ export default function ControlPanel({
 
         {encodeExpanded && (
           <div className={styles.encodeContent}>
-            {/* 画质档位 */}
+            {/* 画质档位（固定 CRF 30，不可更改） */}
             <div className={styles.encodeRow}>
-              <label className={styles.encodeLabel}>画质档位</label>
-              <select
-                className={styles.encodeSelect}
-                value={encodePreset}
-                onChange={(e) => setEncodePreset(e.target.value as EncodePreset)}
-              >
-                {PRESET_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}（{opt.desc}）
-                  </option>
-                ))}
-              </select>
+              <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>
+                画质档位
+              </label>
+              <span className={styles.encodeValueDisabled}>
+                CRF 30
+              </span>
             </div>
 
             {/* 分辨率（置灰，二期开放） */}

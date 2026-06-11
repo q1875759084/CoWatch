@@ -203,10 +203,18 @@ function stripCosSignature(url: string): string {
 - 注意：SW 缓存 Range 响应需手动处理分片重组，不能直接用 `cache.match`（详见下方"SW 视频缓存：Range 请求重组与预缓存"）
 - 在转码基础上再降 66%：7.7GB / 2.1 元，月费 **17 元**
 
+**④ HLS 服务端切片 + SW cache-first .ts 片段（当前）**：
+- 后端用 `ffmpeg -c copy` 将 mp4 切成 ~15s 的 .ts 片段（无重编码，切片速度 < 5s/视频小时）
+- 前端用 hls.js 加载播放，每次只请求当前缓冲所需的片段（约 7MB/片）
+- SW 退化为极简 cache-first：拦截 .ts 片段，以纯路径（剥离签名）为 key，仅缓存已播放片段
+- **核心收益**：用户只看了几段 → 只下载那几段，彻底解决"一小时视频只看了 3 段却下载完整文件"的浪费
+- **额外收益**：SW 代码从 ~300 行降至 ~80 行，并发爆炸 bug 自然消除（hls.js 不发 Range 请求，Cache API 原生支持 200 响应）
+
 **关键洞察：**
 - **转码是单项收益最大的优化**，从 40 元 → 5 元，且实现成本极低（静态脚本分发）
 - **SW 在反复切换场景才显著**，如果复盘时每段只看一遍，转码后不加 SW 费用也在 2–3 元
 - **CRF 不控制文件大小，控制质量下限**——原文件已高度压缩时，CRF 23（高质量档）反而比原文件更大（见下方"FFmpeg CRF 反直觉"）
+- **HLS 切片是 SW 缓存的根本解法**——Range 请求是 SW 缓存视频的核心难题，HLS 切换到 GET 整片后问题自然消失
 
 ---
 
@@ -676,6 +684,33 @@ sqlite3 database/cowatch.sqlite3 "ALTER TABLE rooms ADD COLUMN name TEXT NOT NUL
 
 **规律：** 每次 schema 有字段变更，都需要对已有数据库文件单独跑迁移语句。生产环境应使用迁移工具（如 `better-sqlite3-migrate`、`flyway`）管理版本化 schema 变更，避免手动操作遗漏。
 
+**已落地改进（`runMigrations()` 幂等机制）：**
+
+`initSchema()` 末尾调用 `runMigrations()`，用 try/catch "duplicate column name" 实现幂等 ALTER TABLE：
+
+```ts
+function runMigrations(): void {
+  const migrations = [
+    { sql: 'ALTER TABLE users ADD COLUMN is_upload_whitelist INTEGER NOT NULL DEFAULT 0', desc: 'users.is_upload_whitelist' },
+    { sql: 'ALTER TABLE room_videos ADD COLUMN hls_prefix TEXT', desc: 'room_videos.hls_prefix' },
+    // 新增字段时在此处追加一条即可
+  ];
+  for (const { sql, desc } of migrations) {
+    try {
+      db.prepare(sql).run();
+    } catch (err) {
+      if ((err as Error).message?.includes('duplicate column name')) {
+        // 列已存在，跳过（幂等）
+      } else {
+        throw err; // 其他错误（语法错误等）需要暴露
+      }
+    }
+  }
+}
+```
+
+**规则：** 每次新增字段时，在 `CREATE TABLE IF NOT EXISTS` 里加好完整定义（新建库直接建全），同时在 `runMigrations()` 里追加对应的 `ALTER TABLE`（旧库自动补列）。两处保持同步，互不遗漏。
+
 ---
 
 ### Blob 下载接口被业务拦截器误判为失败
@@ -826,6 +861,34 @@ const fullResponse = await fetch(new Request(request.url, { ... }));
 
 ---
 
+### proxyUpload：先落临时文件再切片（而非流式转发 COS）
+
+**背景：** 视频上传走后端中转，原方案是 `req → putStream 到 COS → ffmpeg 用 getSignedUrl 从 COS 下载原文件 → 切片`。
+
+**问题：**
+1. **前端等待时间长**：req 必须等 COS 写完才响应前端，大文件（1GB）写入 COS 需要数分钟，前端进度条卡在 99%。
+2. **ffmpeg 从 COS/CDN URL 下载不可靠**：容器内 ffmpeg 发 HTTP 请求，可能遇到 DNS 解析失败、CDN 鉴权签名计算时机问题（getSignedUrl 生成签名到 ffmpeg 开始执行有延迟）。
+
+**决策：改为"临时文件"路线**
+
+```
+req → 写入 /tmp/cowatch-{uuid}.mp4（本地磁盘 I/O）
+     → 立即写 DB 并响应前端 200（进度条跳 100%，进入"切片中"状态）
+     → 后台异步：ffmpeg 读临时文件切片
+     → 上传 .ts 片段到 COS（串行，避免带宽爆炸）
+     → 广播 VIDEO_ADDED，通知前端切片完成
+     → 删除临时文件（isTmpFile=true）
+```
+
+**优势：**
+- 前端等待从"上传 + COS 写完"缩短为"仅上传"，体验大幅提升
+- ffmpeg 读本地文件，零网络依赖，稳定可靠
+- 临时文件在切片完成后自动清理，不占用持久存储
+
+**注意：** 本地模式（无 COS 配置）直接写 `uploads/{objectKey}`，ffmpeg 从同一本地目录读，切片后 .ts 文件 rename 到 `uploads/{hlsPrefix}/`，无临时文件开销。
+
+---
+
 ## CDN 接入与 TypeA 鉴权
 
 ### 背景
@@ -892,39 +955,72 @@ u.searchParams.delete('sign');
 
 ---
 
-## SW 缓存策略的根本缺陷（待重构）
+## SW 缓存策略演进：V4 HLS 片段 cache-first（当前）
 
-### 问题描述
+### 背景
 
-当前策略：缓存未命中时，SW 发一次**完整文件请求**（去掉 Range 头），将 200 响应存入 Cache Storage，同时流式切片返回当前 Range 区间。
+V3（TransformStream 流式切片）彻底解决了 V1/V2 的内存问题，但存在另一个根本缺陷：
 
-**问题**：197MB 视频，CDN 有缓存的情况下，客户端以 ~2.5 MB/s（约 20 Mbps 家用带宽）下载需要约 **1.3 分钟**。
+**并发请求爆炸**：缓存未命中时，SW 发一次 197MB 的完整请求（去掉 Range 头）。用户在文件下载完成前 seek，每次 seek 触发新 Range 请求 → SW cache.match 未命中（文件还没写完）→ 又发一次 197MB 完整请求。实测：5 分钟视频，seek 3 次，产生 4 条 197MB 完整请求（788MB 流量），且永远无法完成缓存。
 
-用户在文件下载完成之前拖动进度条，每次 seek 触发新的 Range 请求 → SW `cache.match` 未命中（文件还没写完）→ 又发一次 197MB 完整请求 → 并发互相竞争，永远无法完成缓存。
+`inFlight` Map 去重（方案 D）可以缓解并发爆炸，但无法解决"一小时视频只看了几个 5 分钟片段"场景下的流量浪费：用户只看了 3 个片段，SW 却下载了完整的 1.2GB。
 
-实测：5 分钟视频，seek 3 次，产生了 4 条 197MB 的完整请求（788MB 流量）。
+### V4 根本解法：HLS 服务端切片
 
-### 根因
+**后端用 ffmpeg `-c copy` 将 mp4 切成 ~15s 的 .ts 片段**（无重编码，切片速度极快，约 < 5s/视频小时），每片约 7MB（1080p60 CRF28）。
 
-**Cache API 不支持存储 206 响应**（规范硬限制，`cache.put` 直接抛异常），因此无法按 Range 分片缓存，只能缓存完整的 200 响应。
+SW 退化为极简 cache-first，只拦截 `.ts` 片段请求：
 
-而"缓存未命中 → 全量下载"和"用户 seek → Range 请求"之间存在时序竞争：全量下载完成前，所有 seek 都会触发新的全量下载。
-
-### 正确方案（待实现）
-
-**播放器 Range 请求全部透传 CDN，后台独立预缓存**：
-
-```
-用户进房间 / 切换视频
-  → 页面 postMessage 给 SW：{ type: 'PRECACHE_VIDEO', url: videoUrl }
-  → SW 后台静默发完整请求，写入 Cache Storage（不阻塞播放）
-  → 播放器的所有 Range 请求透传给 CDN（实时响应，不等缓存）
-  → 预缓存完成后，后续播放从 Cache Storage 切片返回，0 流量
+```ts
+// 拦截条件：pathname 包含 /cowatch/ 且以 .ts 结尾
+// cache key：剥离 CDN TypeA sign 参数 + COS q-sign-* 参数，以纯路径为 key
+// 命中缓存：直接返回（200 响应，无需处理 Range）
+// 未命中：fetch 网络，存入缓存，返回
 ```
 
-优势：
-- 播放体验：和直连 CDN 完全一样，seek 流畅，不等缓存
-- 第一次播放：多消耗一倍流量（后台预缓存），但不阻塞用户
-- 第二次播放：0 流量，任意 seek 全部本地响应
+**为什么彻底消除了并发 bug：** HLS .ts 片段本身就是完整的 200 响应（hls.js 不发 Range 请求），Cache API 原生支持，无需任何 TransformStream / inFlight 逻辑。代码量从 ~300 行降到 ~80 行。
 
-**与当前方案的核心区别**：缓存触发时机从"首个 Range 请求命中时" 改为"视频激活时主动预缓存"，解耦了缓存写入和播放响应。
+**流量收益：**
+- 只看 3 个 5 分钟片段 → 只下载 3×20片×7MB = 420MB，而不是完整的 1.2GB
+- 第二次播放 / seek 到已播片段 → 0 流量（从 Cache Storage 返回）
+- 跨天复盘：重新请求 m3u8 接口刷新片段签名 URL，SW 缓存的 .ts 字节不受影响
+
+**关键前提：** hls.js 播放 HLS 时不发 Range 请求，直接 GET 完整 .ts 片段，与 Cache API "只支持 200 响应"完全契合。
+
+---
+
+**CACHE_NAME 更新为 `cowatch-hls-v1`**（与旧 `cowatch-video-v1` 不同），旧缓存在 activate 时自动清理。
+
+---
+
+### hls.js + Blob URL 加载 m3u8 导致内部相对路径解析失败
+
+**现象：** hls.js 加载 Blob URL 后立刻抛 `manifestParsingError`，控制台显示 `Failed to fetch: blob:http://...`。实际上 m3u8 内容中的 .ts 片段 URL 使用的是相对路径（如 `segment0000.ts`），hls.js 会以 m3u8 URL 为 base 解析相对路径。
+
+**根因：** 将 m3u8 文本转为 Blob URL（`URL.createObjectURL(blob)`）后，base URL 变为 `blob:http://localhost:3000/xxxx`，hls.js 将 `.ts` 相对路径拼接为 `blob:http://...segment0000.ts`，这不是合法的网络 URL，fetch 直接失败。
+
+**解决：** 不使用 Blob URL，直接将 API URL（`/api/rooms/:roomId/video/:videoId/playlist.m3u8`）传给 `hls.loadSource(url)`。鉴权通过 `xhrSetup` 回调注入 Token：
+
+```ts
+const hls = new Hls({
+  xhrSetup: (xhr) => {
+    const token = getAccessToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+  },
+});
+hls.loadSource(`/api/rooms/${roomId}/video/${videoId}/playlist.m3u8`);
+```
+
+这样 hls.js 内部以 API URL 为 base 解析相对路径，.ts 片段的请求 URL 正确。
+
+---
+
+### ffmpeg -c copy 切片后 .ts 文件数量与实际播放秒数不符
+
+**现象：** 30 分钟视频切片，`-hls_time 15` 参数设置 15 秒一片，实际产出的片段时长有的 13s 有的 18s，总片数比预期多几片。
+
+**根因：** `-c copy` 不重编码，切片点只能在关键帧（I 帧）位置切。ffmpeg 遇到一个 I 帧时才能切割，如果相邻 I 帧间距大于 15s，该片段就会超过 15s；如果间距小于 15s 但跨过了目标切割时间点，就会提前切割。最终每片时长取决于源视频的 GOP（Group of Pictures）大小，不是精确的 15s。
+
+**影响：** .m3u8 `#EXTINF:` 标记的是每片实际时长，hls.js 能正确处理不均匀片长，播放不受影响。
+
+**注意：** 如果需要严格的 15s 切割（如广告插入场景），必须用 `-c:v libx264 -force_key_frames "expr:gte(t, n_forced * 15)"` 强制在切割点插入 I 帧，代价是重编码，时间更长（约 2–5 倍）。CoWatch 复盘场景不需要严格切割，`-c copy` 足够。

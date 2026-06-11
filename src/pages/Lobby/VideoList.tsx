@@ -25,7 +25,6 @@ export default function VideoList({ videos, activeObjectKey, isController, onPla
 
   return (
     <div className={styles.list}>
-      <h3 className={styles.title}>视频列表 <span className={styles.count}>{videos.length}</span></h3>
       <ul className={styles.items}>
         {videos.map((v, idx) => {
           const isActive = v.objectKey === activeObjectKey;

@@ -8,6 +8,7 @@ import { useRoomWs } from '@/hooks/useRoomWs';
 import { getRoomInfoApi, getVideosApi, getTagsApi } from '@/api/room';
 import type { Tag } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
+import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
 import ControlPanel from './ControlPanel';
 import VideoUploader from './VideoUploader';
@@ -341,36 +342,52 @@ export default function RoomPage() {
             </div>
           </div>
 
-          {/* Tag 时间轴区域（有激活视频时显示） */}
-          {roomState.activeVideoUrl && (
-            <VideoTagBar
-              tags={tags}
-              duration={duration}
-              isController={isController}
-              activeVideoId={activeVideoId}
-              onAdd={handleTagAdd}
-              onDelete={handleTagDelete}
-              onSeek={handleTagSeek}
-            />
-          )}
+          {/* 中间可折叠区域 */}
+          <div className={styles.collapsibleArea}>
+            {/* 时间标记（有激活视频时显示） */}
+            {roomState.activeVideoUrl && (
+              <CollapseSection
+                title="时间标记"
+                badge={tags.length > 0 ? tags.length : undefined}
+              >
+                <VideoTagBar
+                  tags={tags}
+                  duration={duration}
+                  isController={isController}
+                  activeVideoId={activeVideoId}
+                  onAdd={handleTagAdd}
+                  onDelete={handleTagDelete}
+                  onSeek={handleTagSeek}
+                />
+              </CollapseSection>
+            )}
 
-          {/* 上传区（仅管理员可见） */}
-          {isAdmin && (
-            <div className={styles.uploaderSection}>
-              <VideoUploader
-                roomId={roomId!}
-                lastVideoAddedName={lastVideoAddedName}
-              />
-            </div>
-          )}
-          {/* 视频列表 */}
-          <div className={styles.videoListSection}>
-            <VideoList
-              videos={roomState.videos}
-              activeObjectKey={activeObjectKey}
-              isController={isController}
-              onPlay={handlePlayVideo}
-            />
+            {/* 上传区（仅管理员可见） */}
+            {isAdmin && (
+              <CollapseSection title="上传视频" defaultOpen={true}>
+                <div className={styles.uploaderInner}>
+                  <VideoUploader
+                    roomId={roomId!}
+                    lastVideoAddedName={lastVideoAddedName}
+                  />
+                </div>
+              </CollapseSection>
+            )}
+
+            {/* 视频列表 */}
+            <CollapseSection
+              title="视频列表"
+              badge={roomState.videos.length > 0 ? roomState.videos.length : undefined}
+            >
+              <div className={styles.videoListInner}>
+                <VideoList
+                  videos={roomState.videos}
+                  activeObjectKey={activeObjectKey}
+                  isController={isController}
+                  onPlay={handlePlayVideo}
+                />
+              </div>
+            </CollapseSection>
           </div>
         </main>
 
@@ -382,7 +399,6 @@ export default function RoomPage() {
             members={roomState.members}
             controllerId={roomState.controllerId}
             isAdmin={isAdmin}
-            currentUserId={userInfo?.userId ?? ''}
             onTransferControl={(targetUserId) => {
               sendMessage('TRANSFER_CONTROL', { targetUserId });
             }}
