@@ -165,6 +165,8 @@ async function uploadToBackend(
     headers: { 'Content-Type': file.type || 'video/mp4' },
     // baseURL 设为空字符串，避免 request 实例的 /api 前缀重复拼接
     baseURL: '',
+    // 视频上传需要等待后端将文件写入 COS，时长不确定，设 0 禁用超时（全局默认 30s 不够用）
+    timeout: 0,
     onUploadProgress: (e: { loaded: number; total?: number }) => {
       if (e.total) {
         onProgress(Math.round((e.loaded / e.total) * 100));

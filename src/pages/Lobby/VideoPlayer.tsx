@@ -37,7 +37,7 @@ export interface VideoPlayerHandle {
 interface VideoPlayerProps {
   /**
    * m3u8 API 路径，如 /api/rooms/{roomId}/videos/{videoId}/m3u8。
-   * VideoPlayer 内部请求此接口（带 Bearer Token），获取 m3u8 内容后通过 hls.js 播放。
+   * hls.js 直接加载此 URL，通过 xhrSetup 钩子注入 Bearer Token。
    */
   src: string;
   disabled: boolean;
