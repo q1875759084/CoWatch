@@ -1,67 +1,45 @@
 /**
- * CoWatch Service Worker
+ * CoWatch Service Worker — HLS 片段 cache-first
  *
- * 缓存策略：完整文件缓存 + ReadableStream 流式切片
+ * 缓存策略：cache-first for HLS .ts 片段
  *
- * Cache API 只能存储 200 响应，不支持 206（Partial）响应。
- * 因此：
- *   - 首次遇到视频请求时，发起无 Range 头的完整请求，将 200 响应存入缓存
- *   - 后续的 Range 请求：从缓存响应的 ReadableStream 中流式跳过前 N 字节，
- *     只传输目标区间的数据，构造 206 响应返回给播放器
- *   - 流式切片避免了将整个文件读入 ArrayBuffer（V1 方案的性能陷阱）
+ * 背景：
+ *   原 sw.ts 实现（~300 行）为了解决 Cache API 不支持 206 Partial 的问题，
+ *   使用 TransformStream 流式切片 + inFlight 去重 Map，复杂度高且存在并发 bug。
  *
- * 缓存时机：
- *   - 按需缓存（play-through caching）：SW fetch 拦截器在首次请求时自动缓存整个文件
- *   - 不做预缓存：播放哪个视频才缓存哪个，避免进房间就下载全部视频
+ *   HLS 架构下，每个 .ts 片段本身就是一个完整的 200 响应（通常 ~7MB），
+ *   Cache API 原生支持，无需任何 Range 切片逻辑。
+ *   SW 退化为标准 cache-first，代码量从 ~300 行降到 ~80 行，所有并发 bug 自然消除。
  *
- * 视频识别策略：
- *   - 基于路径特征判断（pathname 以 /cowatch/ 开头且以 .mp4 结尾）
- *   - 不依赖域名白名单，因此对 COS 默认域名、CDN 自定义域名、本地 /uploads 均统一生效
- *   - 无需 postMessage 动态注入域名，消除了时序竞态问题
+ * 缓存范围：
+ *   - 拦截：pathname 包含 /cowatch/ 且以 .ts 结尾的 GET 请求（HLS 片段）
+ *   - 不拦截：.m3u8 请求（由后端动态生成，含实时签名，不适合缓存）
  *
- * 时效签名兼容：
- *   - COS 私有读模式下，videoUrl 携带时效签名 query 参数（q-sign-*）
- *   - cache key 统一剥离签名参数，以纯路径作为 Cache Storage key
- *   - 签名轮换后同一视频仍能命中缓存，缓存有效期不受签名过期影响
+ * cache key：
+ *   - 剥离 CDN TypeA 签名（sign 参数）和 COS 直连签名（q-sign-* 参数）
+ *   - 同一片段无论签名如何轮换，始终命中同一缓存条目
  *
- * inFlight 去重（方案 D）：
- *   - 问题：缓存未命中时发完整文件请求（~1.3 分钟），期间用户 seek 触发的每个新 Range 请求
- *     都会再次未命中并发起新的完整下载，多个请求并发竞争带宽，永远无法完成缓存。
- *   - 解法：用 inFlight Map<cacheKeyUrl, Promise<Response>> 记录正在进行的完整下载。
- *     同一视频的后续请求检测到 inFlight 条目后，等待同一 Promise 完成再切片返回，
- *     保证同一视频同时只有一个完整 GET 请求在飞行中。
+ * 缓存收益：
+ *   - 第二次播放同一视频：所有 .ts 片段均从 Cache Storage 返回，0 网络流量
+ *   - seek 到已播放区域：从缓存立即返回，无需等待网络
  */
 
 // @ts-nocheck — sw.ts 使用 WebWorker lib，与主应用的 dom lib 冲突，
 // 类型检查由 tsconfig.sw.json 单独负责，IDE 的主 tsconfig 跳过此文件
 /// <reference lib="webworker" />
 
-const CACHE_NAME = 'cowatch-video-v2';
+const CACHE_NAME = 'cowatch-hls-v1';
 
 /**
- * 飞行中的完整文件下载 Map。
+ * 判断是否为需要 SW 缓存的 HLS 片段请求。
  *
- * key：剥离签名后的纯路径 URL（与 cache key 一致）
- * value：正在进行的完整 GET 请求 Promise，resolve 时返回已存入 Cache Storage 的完整响应
- *
- * 同一视频的并发 Range 请求共享同一个 Promise，保证全局只有一个完整下载在进行，
- * 消除"seek 触发多个完整下载互相竞争"的并发爆炸问题。
- * Promise 完成（无论成功或失败）后自动从 Map 中移除。
+ * 基于路径特征：
+ *   - pathname 包含 /cowatch/（匹配 COS/CDN 和本地 /uploads/cowatch/ 两种模式）
+ *   - pathname 以 .ts 结尾（HLS 片段，非 .m3u8）
  */
-const inFlight = new Map<string, Promise<Response>>();
-
-/**
- * 判断是否为需要 SW 缓存的视频请求。
- *
- * 基于路径特征：pathname 以 /cowatch/ 开头且以 .mp4 结尾。
- * objectKey 格式固定为 cowatch/{roomId}/{uuid}-{fileName}.mp4，
- * 无论域名如何（COS 默认域名 / CDN 自定义域名 / 本地 /uploads），路径特征不变。
- */
-function isVideoRequest(request: Request): boolean {
+function isHlsSegment(request: Request): boolean {
   const { pathname } = new URL(request.url);
-  // startsWith('/cowatch/') 仅匹配 COS/CDN 模式（pathname 直接以 /cowatch/ 开头）。
-  // 本地模式下 pathname 为 /uploads/cowatch/...，需用 includes 统一兼容两种模式。
-  return pathname.includes('/cowatch/') && pathname.endsWith('.mp4');
+  return pathname.includes('/cowatch/') && pathname.endsWith('.ts');
 }
 
 /**
@@ -70,14 +48,12 @@ function isVideoRequest(request: Request): boolean {
  * 兼容两种签名模式：
  *   - CDN TypeA 鉴权：sign={timestamp}-{rand}-{uid}-{md5}，剥离 sign 参数
  *   - COS 直连签名（本地开发 / 未配置 CDN 鉴权）：q-sign-* 系列参数，一并剥离
- *
- * 剥离后 URL 仅保留 scheme + host + pathname，同一视频无论签名如何轮换始终命中同一缓存条目。
  */
-function stripCosSignature(url: string): string {
+function stripSignature(url: string): string {
   const u = new URL(url);
   // CDN TypeA 鉴权参数
   u.searchParams.delete('sign');
-  // COS 直连签名参数（本地开发回退路径）
+  // COS 直连签名参数
   [
     'q-sign-algorithm',
     'q-ak',
@@ -90,90 +66,9 @@ function stripCosSignature(url: string): string {
   return u.toString();
 }
 
-/** 解析 Range 请求头，返回 { start, end } 或 null */
-function parseRange(
-  rangeHeader: string,
-  totalSize: number,
-): { start: number; end: number } | null {
-  const match = rangeHeader.match(/^bytes=(\d+)-(\d*)$/);
-  if (!match) return null;
-  const start = parseInt(match[1], 10);
-  const end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
-  if (start > end || start >= totalSize) return null;
-  return { start, end: Math.min(end, totalSize - 1) };
-}
-
-/**
- * 从缓存的完整响应（200）中流式切出 Range 区间，返回 206 响应。
- *
- * 使用 ReadableStream + TransformStream 实现字节级流式跳过，
- * 避免将整个文件读入 ArrayBuffer（V1 的性能问题）。
- */
-function buildRangeResponseFromStream(
-  cachedResponse: Response,
-  range: { start: number; end: number },
-  totalSize: number,
-  contentType: string,
-): Response {
-  const { start, end } = range;
-  const chunkSize = end - start + 1; // 用于 Content-Length 响应头
-
-  /**
-   * offset 追踪当前 chunk 在整个文件中的起始字节位置。
-   *
-   * 原实现用 bytesSkipped + bytesSent 计算 chunkStart，存在 bug：
-   * 第一个与目标区间有交集的 chunk 处理后，bytesSkipped 被 Math.min 截断为 start，
-   * 后续 chunk 的 chunkStart = start + bytesSent，计算偏移错误，
-   * 导致切片范围不对，浏览器收到错误数据后反复重试（2-5ms 高频请求）。
-   */
-  let offset = 0;
-
-  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      const chunkStart = offset;
-      const chunkEnd = offset + chunk.byteLength - 1;
-      offset += chunk.byteLength;
-
-      // chunk 完全在目标区间之前，跳过
-      if (chunkEnd < start) return;
-
-      // chunk 完全在目标区间之后，直接丢弃（不 enqueue）
-      if (chunkStart > end) return;
-
-      // chunk 与目标区间有交集，切出交集部分传给播放器
-      const sliceFrom = Math.max(0, start - chunkStart);
-      const sliceTo = Math.min(chunk.byteLength, end - chunkStart + 1);
-      controller.enqueue(chunk.slice(sliceFrom, sliceTo));
-
-      // 当前 chunk 已经包含了目标区间的末尾字节，后续 chunk 不再需要
-      // 用 terminate() 提前终止写入端，避免继续流过剩余的文件数据浪费资源
-      // 注意：terminate() 会丢弃写入端未消费的数据，但此时 readable 侧已经
-      // 收到了完整的目标区间数据（上面 enqueue 已完成），不会导致数据截断
-      if (chunkEnd >= end) {
-        controller.terminate();
-      }
-    },
-  });
-
-  cachedResponse.clone().body!.pipeTo(writable).catch(() => {
-    // pipeTo 在 terminate 后会抛 AbortError，属于正常情况，忽略
-  });
-
-  return new Response(readable, {
-    status: 206,
-    statusText: 'Partial Content',
-    headers: {
-      'Content-Type': contentType,
-      'Content-Range': `bytes ${start}-${end}/${totalSize}`,
-      'Content-Length': String(chunkSize),
-      'Accept-Ranges': 'bytes',
-    },
-  });
-}
-
 // ─── install ─────────────────────────────────────────────────────────────────
 self.addEventListener('install', () => {
-  console.log('[SW] install');
+  console.log('[SW] install (HLS cache-first)');
   self.skipWaiting();
 });
 
@@ -186,7 +81,10 @@ self.addEventListener('activate', (event) => {
         Promise.all(
           keys
             .filter((key) => key !== CACHE_NAME)
-            .map((key) => caches.delete(key)),
+            .map((key) => {
+              console.log('[SW] 清理旧缓存:', key);
+              return caches.delete(key);
+            }),
         ),
       )
       .then(() => self.clients.claim()),
@@ -195,102 +93,37 @@ self.addEventListener('activate', (event) => {
 
 // ─── fetch ────────────────────────────────────────────────────────────────────
 self.addEventListener('fetch', (event) => {
-  const { request } = event;
-  if (request.method !== 'GET') return;
-  if (!isVideoRequest(request)) return;
+  if (event.request.method !== 'GET') return;
+  if (!isHlsSegment(event.request)) return;
 
-  const rangeHeader = request.headers.get('Range');
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
 
-  event.respondWith(
-    (async () => {
-      const cache = await caches.open(CACHE_NAME);
+    // cache key：剥离签名参数，同一片段无论签名轮换始终命中同一条目
+    const cacheKeyUrl = stripSignature(event.request.url);
+    const cacheKey = new Request(cacheKeyUrl, { headers: {} });
 
-      // cache key：剥离时效签名参数，同一视频始终命中同一缓存条目
-      const cacheKeyUrl = stripCosSignature(request.url);
-      const cacheKey = new Request(cacheKeyUrl, { headers: {} });
-      const cachedResponse = await cache.match(cacheKey);
+    // 命中缓存：直接返回
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      console.log('[SW] 缓存命中：', cacheKeyUrl);
+      return cached;
+    }
 
-      if (cachedResponse) {
-        console.log('[SW] 缓存命中：', cacheKeyUrl, rangeHeader ?? '(完整请求)');
-        if (!rangeHeader) {
-          return cachedResponse.clone();
-        }
-        const totalSize = parseInt(cachedResponse.headers.get('Content-Length') || '0', 10);
-        const contentType = cachedResponse.headers.get('Content-Type') || 'video/mp4';
-        if (!totalSize) {
-          return cachedResponse.clone();
-        }
-        const range = parseRange(rangeHeader, totalSize);
-        if (!range) {
-          return cachedResponse.clone();
-        }
-        return buildRangeResponseFromStream(cachedResponse, range, totalSize, contentType);
+    // 未命中：发起网络请求并存入缓存
+    console.log('[SW] 缓存未命中，发起请求：', cacheKeyUrl);
+    try {
+      const response = await fetch(event.request);
+      if (response.ok) {
+        // 仅缓存 200 响应（HLS 片段均为完整 200，无需处理 206）
+        await cache.put(cacheKey, response.clone());
+        console.log('[SW] 已缓存：', cacheKeyUrl);
       }
-
-      // 未命中：检查是否已有飞行中的完整下载，有则复用，无则发起新请求
-      // 保证同一视频同时只有一个完整 GET 请求在飞行中（方案 D：inFlight 去重）
-      let fetchPromise = inFlight.get(cacheKeyUrl);
-
-      if (!fetchPromise) {
-        console.log('[SW] 缓存未命中，发起完整请求：', cacheKeyUrl);
-
-        // 构造完整文件请求（去掉 Range 头）
-        // 不加任何自定义请求头，保持"简单请求"（GET + 无自定义头），
-        // 浏览器不会发 preflight（OPTIONS）。
-        // CDN TypeA 鉴权通过 sign query 参数完成，无需额外头部。
-        fetchPromise = fetch(new Request(request.url, { method: 'GET' }))
-          .then(async (res) => {
-            if (!res.ok) {
-              console.warn('[SW] 响应异常，不缓存：', res.status, cacheKeyUrl);
-              return res;
-            }
-            // 存入 Cache Storage，后续请求直接从缓存切片，不再发网络请求
-            await cache.put(cacheKey, res.clone());
-            console.log('[SW] 已缓存：', cacheKeyUrl);
-            return res;
-          })
-          .catch((err) => {
-            console.error('[SW] 网络请求失败：', err);
-            // 直接 re-throw：让每个等待方在自己的 catch 里各自 fallback 透传原始请求。
-            // 不能在此处 return fetch(request)：request 带有 Range 头，返回的 206 响应
-            // 会被其他等待方误用于 buildRangeResponseFromStream，导致 totalSize 计算错误。
-            throw err;
-          })
-          .finally(() => {
-            // 无论成功或失败，完成后从 Map 中移除，释放引用
-            inFlight.delete(cacheKeyUrl);
-          });
-
-        inFlight.set(cacheKeyUrl, fetchPromise);
-      } else {
-        console.log('[SW] 复用飞行中请求，等待完成：', cacheKeyUrl, rangeHeader ?? '(完整请求)');
-      }
-
-      let fullResponse: Response;
-      try {
-        fullResponse = await fetchPromise;
-      } catch (err) {
-        console.error('[SW] 等待飞行中请求失败：', err);
-        return fetch(request);
-      }
-
-      if (!fullResponse.ok) {
-        return fullResponse;
-      }
-
-      // 如果原始请求带了 Range，从响应里流式切片返回
-      if (rangeHeader) {
-        const totalSize = parseInt(fullResponse.headers.get('Content-Length') || '0', 10);
-        const contentType = fullResponse.headers.get('Content-Type') || 'video/mp4';
-        if (totalSize) {
-          const range = parseRange(rangeHeader, totalSize);
-          if (range) {
-            return buildRangeResponseFromStream(fullResponse, range, totalSize, contentType);
-          }
-        }
-      }
-
-      return fullResponse.clone();
-    })(),
-  );
+      return response;
+    } catch (err) {
+      console.error('[SW] 网络请求失败：', cacheKeyUrl, err);
+      // 网络失败时透传错误（不降级到旧缓存，避免使用过期片段）
+      throw err;
+    }
+  })());
 });

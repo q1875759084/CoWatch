@@ -1,22 +1,47 @@
-import { useState, useRef, type ChangeEvent } from 'react';
+import { useState, useRef, useEffect, type ChangeEvent } from 'react';
 import { Modal } from 'antd';
-import { getUploadUrlApi, confirmVideoUploadApi } from '@/api/room';
+import { getUploadUrlApi } from '@/api/room';
 import request, { ApiError } from '@/utils/request';
 import { validateVideoFile } from '@/utils/validateVideo';
 import styles from './VideoUploader.module.scss';
 
-type UploadStatus = 'idle' | 'uploading' | 'done' | 'error';
+/** 上传状态机：idle → uploading → slicing → done | error */
+type UploadStatus = 'idle' | 'uploading' | 'slicing' | 'done' | 'error';
 
 interface VideoUploaderProps {
   roomId: string;
+  /**
+   * WS VIDEO_ADDED 事件透传——由父组件（Lobby）在 useRoomWs 收到 VIDEO_ADDED 时调用，
+   * 传入广播的 fileName。VideoUploader 内部对比 pendingFileName，若匹配则切换到"已完成"。
+   */
+  lastVideoAddedName?: string;
 }
 
-export default function VideoUploader({ roomId }: VideoUploaderProps) {
+export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * 当前等待切片完成的文件名。
+   * 上传完成（200 响应）后写入，VIDEO_ADDED 到来时对比此值。
+   */
+  const pendingFileNameRef = useRef<string | null>(null);
+
+  // 监听父组件传入的 lastVideoAddedName，判断是否匹配本次上传
+  useEffect(() => {
+    if (
+      lastVideoAddedName &&
+      pendingFileNameRef.current &&
+      pendingFileNameRef.current === lastVideoAddedName
+    ) {
+      pendingFileNameRef.current = null;
+      setStatus('done');
+      setProgress(100);
+    }
+  }, [lastVideoAddedName]);
 
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -24,15 +49,12 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 
     setFileName(file.name);
     setErrorMsg('');
-
-    // 上传前校验：moov 索引位置 + 平均码率
-    // 先切换到 uploading 展示文件名，让用户知道正在处理
     setStatus('uploading');
     setProgress(0);
 
+    // 上传前校验：moov 索引位置 + 平均码率
     const validateResult = await validateVideoFile(file);
     if (!validateResult.ok) {
-      // 校验失败：回到 idle 状态，通过 antd Modal 弹窗告知用户
       setStatus('idle');
       if (inputRef.current) inputRef.current.value = '';
       Modal.error({
@@ -50,9 +72,9 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 
     try {
       // 1. 向后端请求上传地址
-      //    - OSS 模式：返回 OSS 预签名 PUT URL，mode 为空
-      //    - 本地模式：返回后端本地上传接口地址，mode === 'local'
-      const { uploadUrl, objectKey, mode, fileName: remoteFileName } = await getUploadUrlApi(
+      //    - OSS 模式：mode: 'proxy'，后端代理上传，完成后异步切片
+      //    - 本地模式：mode: 'local'，直接发给后端落盘，完成后异步切片
+      const { uploadUrl, mode } = await getUploadUrlApi(
         roomId,
         file.name,
         file.type || 'video/mp4',
@@ -60,38 +82,16 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 
       if (mode === 'local') {
         // ── 本地开发模式 ──────────────────────────────────────────────────
-        // 直接 PUT 文件到后端，后端落盘后写入 room_videos 并广播 VIDEO_ADDED
-        await uploadToBackend(
-          uploadUrl,
-          file,
-          file.name,
-          (pct) => setProgress(pct),
-        );
-        // VIDEO_ADDED WS 消息会自动将视频追加到列表，无需手动更新 Context
-      } else if (mode === 'proxy') {
-        // ── 代理上传模式（非白名单用户）────────────────────────────────────
-        // 文件经后端中转写入 OSS，后端负责写入 room_videos 并广播 VIDEO_ADDED
-        // 使用封装的 axios 实例，自动注入 Bearer Token
-        // uploadUrl 已由后端拼入 objectKey / fileType / fileName 等参数
-        await uploadToBackend(
-          uploadUrl,
-          file,
-          file.name,
-          (pct) => setProgress(pct),
-          'POST',
-        );
-        // VIDEO_ADDED WS 消息会自动将视频追加到列表
+        await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct));
       } else {
-        // ── OSS 直传模式（白名单用户）────────────────────────────────────
-        // 直接 PUT 到 OSS 预签名 URL（绕过后端，减少带宽消耗）
-        await uploadToOss(uploadUrl, file, (pct) => setProgress(pct));
-
-        // 通知后端：传回 objectKey，后端存库并广播带签名的 VIDEO_ADDED
-        await confirmVideoUploadApi(roomId, objectKey, remoteFileName || file.name);
+        // ── 代理上传模式（所有 OSS 用户统一走此路径）────────────────────
+        await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct), 'POST');
       }
 
-      setStatus('done');
-      setProgress(100);
+      // 上传成功：切换到"切片中"状态，等待后端 ffmpeg 切片完成后广播 VIDEO_ADDED
+      pendingFileNameRef.current = file.name;
+      setStatus('slicing');
+
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : '上传失败，请重试';
       setErrorMsg(msg);
@@ -127,6 +127,12 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
           </div>
           <p className={styles.progressText}>{progress}%</p>
         </div>
+      ) : status === 'slicing' ? (
+        <div className={styles.slicingBox}>
+          <span className={styles.slicingSpinner}>⏳</span>
+          <p className={styles.slicingText}>服务器切片中，请稍候...</p>
+          <p className={styles.slicingFile}>{fileName}</p>
+        </div>
       ) : (
         <div className={styles.doneBox}>
           <span className={styles.doneIcon}>✅</span>
@@ -152,11 +158,9 @@ export default function VideoUploader({ roomId }: VideoUploaderProps) {
 async function uploadToBackend(
   uploadUrl: string,
   file: File,
-  _fileName: string,
   onProgress: (pct: number) => void,
   method: 'PUT' | 'POST' = 'PUT',
 ): Promise<void> {
-  // uploadUrl 已由后端 getUploadUrl 拼入 fileName 等参数，无需重复追加
   const config = {
     headers: { 'Content-Type': file.type || 'video/mp4' },
     // baseURL 设为空字符串，避免 request 实例的 /api 前缀重复拼接
@@ -173,37 +177,4 @@ async function uploadToBackend(
   } else {
     await request.put(uploadUrl, file, config);
   }
-  // videoUrl 由后端通过 VIDEO_ADDED WS 消息广播，无需从响应中读取
-}
-
-/**
- * OSS 模式：使用 XMLHttpRequest 直传 OSS，支持上传进度回调
- */
-function uploadToOss(
-  uploadUrl: string,
-  file: File,
-  onProgress: (pct: number) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('PUT', uploadUrl, true);
-    xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        onProgress(Math.round((e.loaded / e.total) * 100));
-      }
-    };
-
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
-      } else {
-        reject(new Error(`OSS 上传失败：HTTP ${xhr.status}`));
-      }
-    };
-
-    xhr.onerror = () => reject(new Error('OSS 上传网络错误'));
-    xhr.send(file);
-  });
 }

@@ -8,8 +8,7 @@ import type {
   RoomVideosResponse,
   RoomTagsResponse,
 } from '@/types/api';
-import type { Tag } from '@/types/room';
-import type { RoomInfo } from '@/types/room';
+import type { Tag, RoomInfo } from '@/types/room';
 
 /**
  * 创建房间，传入房间名（userId 由 Bearer Token 携带，无需显式传入）
@@ -78,17 +77,24 @@ export async function getVideosApi(roomId: string): Promise<RoomVideosResponse> 
 }
 
 /**
- * 确认视频上传完成（白名单用户 COS 直传后调用）
+ * 获取视频的动态 m3u8 内容（HLS 架构，切片完成后可调用）
  *
- * 传入 objectKey（由 getUploadUrlApi 返回，原样回传）和原始文件名。
- * 后端将 objectKey 存入 room_videos，并广播带签名的 VIDEO_ADDED 消息。
+ * 后端实时签名所有 .ts 片段 URL，返回 m3u8 文本内容。
+ * 前端通过 URL.createObjectURL(new Blob([content])) 生成 Blob URL，
+ * 再传给 hls.js 的 loadSource()。
+ *
+ * 签名有效期 2 小时。跨天复盘时重新调用此接口即可刷新签名。
+ * 若切片尚未完成，后端返回 425 状态码。
  */
-export async function confirmVideoUploadApi(
+export async function getVideoM3u8Api(
   roomId: string,
-  objectKey: string,
-  fileName?: string,
-): Promise<void> {
-  await request.put(`/rooms/${roomId}/video`, { objectKey, fileName });
+  videoId: string,
+): Promise<string> {
+  const res = await request.get<string>(
+    `/rooms/${roomId}/videos/${videoId}/m3u8`,
+    { responseType: 'text' },
+  );
+  return res.data;
 }
 
 /**

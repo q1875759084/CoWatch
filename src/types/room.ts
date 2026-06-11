@@ -22,17 +22,19 @@ export interface VideoItem {
   id: string;
   /**
    * objectKey：视频在 COS 的唯一路径标识，格式为 cowatch/{roomId}/{uuid}-{fileName}
-   * 不是播放 URL，点击播放时需发送 SWITCH_VIDEO WS 消息，后端实时签名广播 videoUrl
+   * 不是播放 URL，点击播放时需发送 SWITCH_VIDEO WS 消息。
    */
   objectKey: string;
   /**
-   * videoUrl：带时效签名的播放 URL，由后端在 SWITCH_VIDEO 广播时实时生成
-   * 可能为 null（列表初始化时未签名，切换视频后才有值）
+   * videoUrl： m3u8 API 路径，如 /api/rooms/{roomId}/videos/{videoId}/m3u8
+   * 可能为 null（列表初始化时未赋值，切换视频后才有值）
    */
   videoUrl: string | null;
   fileName: string;
   uploaderId: string;
   createdAt: number;
+  /** HLS 切片状态：切片完成后才可播放 */
+  hlsStatus?: 'pending' | 'done' | 'error';
 }
 
 export interface RoomInfo {
@@ -115,7 +117,12 @@ export interface RoomStateData {
 export interface VideoAddedData {
   id: string;
   objectKey: string;
-  /** 带时效签名的播放 URL，上传完成后由后端实时签名生成 */
+  /** HLS 切片目录前缀，如 cowatch/{roomId}/{videoId}/；切片完成后必填 */
+  m3u8ObjectKey?: string;
+  /**
+   * videoUrl： m3u8 API 路径，如 /api/rooms/{roomId}/videos/{videoId}/m3u8
+   * 前端请求此路径获取实时签名的 m3u8 内容，再通过 hls.js 播放
+   */
   videoUrl: string;
   fileName: string;
   uploaderId: string;
@@ -125,7 +132,10 @@ export interface VideoAddedData {
 export interface SwitchVideoData {
   /** objectKey：视频在 COS 的唯一路径标识 */
   objectKey: string;
-  /** videoUrl：后端实时签名的播放 URL */
+  /**
+   * videoUrl： m3u8 API 路径，如 /api/rooms/{roomId}/videos/{videoId}/m3u8
+   * 前端请求此路径获取实时签名的 m3u8 内容，再通过 hls.js 播放
+   */
   videoUrl: string;
   videoId?: string;
 }

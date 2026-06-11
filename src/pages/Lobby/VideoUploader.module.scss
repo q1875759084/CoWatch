@@ -77,6 +77,45 @@
   text-align: right;
 }
 
+// slicing 态：切片中转圈提示
+.slicingBox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 20px;
+  background: rgba(246, 173, 85, 0.06);
+  border: 1px solid rgba(246, 173, 85, 0.2);
+  border-radius: 12px;
+}
+
+.slicingSpinner {
+  font-size: 20px;
+  flex-shrink: 0;
+  animation: spin 2s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.slicingText {
+  font-size: 14px;
+  color: #f6ad55;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.slicingFile {
+  flex: 1;
+  font-size: 12px;
+  color: #718096;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .doneBox {
   display: flex;
   align-items: center;

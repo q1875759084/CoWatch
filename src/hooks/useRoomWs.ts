@@ -36,6 +36,11 @@ interface UseRoomWsOptions {
    * 非主控收到广播时用此回调同步 objectKey/videoId 并拉取 tags。
    */
   onSwitchVideo?: (objectKey: string, videoId: string | undefined, videoUrl: string) => void;
+  /**
+   * 收到 VIDEO_ADDED 时通知调用方（HLS 切片完成后后端广播）。
+   * 调用方传入文件名，VideoUploader 内部对比 pendingFileName 判断是否为本次上传。
+   */
+  onVideoAdded?: (fileName: string) => void;
 }
 
 export function useRoomWs({
@@ -47,6 +52,7 @@ export function useRoomWs({
   onTagAdded,
   onTagDeleted,
   onSwitchVideo,
+  onVideoAdded,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -68,6 +74,7 @@ export function useRoomWs({
   const stableOnTagAdded     = useMemoizedFn(onTagAdded     ?? (() => {}));
   const stableOnTagDeleted   = useMemoizedFn(onTagDeleted   ?? (() => {}));
   const stableOnSwitchVideo  = useMemoizedFn(onSwitchVideo  ?? (() => {}));
+  const stableOnVideoAdded   = useMemoizedFn(onVideoAdded   ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -165,6 +172,8 @@ export function useRoomWs({
               uploaderId: d.uploaderId,
               createdAt: d.createdAt,
             });
+            // 通知 VideoUploader：切片完成，传 fileName 供其对比匹配
+            stableOnVideoAdded(d.fileName);
           }
           break;
         }

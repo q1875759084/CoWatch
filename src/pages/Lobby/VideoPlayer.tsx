@@ -1,10 +1,13 @@
 import {
   useRef,
+  useEffect,
   forwardRef,
   useImperativeHandle,
 } from 'react';
+import Hls from 'hls.js';
 import { useMemoizedFn } from 'ahooks';
 import { throttle } from '@/utils/throttle';
+import { getAccessToken } from '@/utils/token';
 import styles from './VideoPlayer.module.scss';
 
 export interface VideoPlayerHandle {
@@ -32,6 +35,10 @@ export interface VideoPlayerHandle {
 }
 
 interface VideoPlayerProps {
+  /**
+   * m3u8 API 路径，如 /api/rooms/{roomId}/videos/{videoId}/m3u8。
+   * VideoPlayer 内部请求此接口（带 Bearer Token），获取 m3u8 内容后通过 hls.js 播放。
+   */
   src: string;
   disabled: boolean;
   onProgressChange: (currentTime: number) => void;
@@ -42,20 +49,13 @@ interface VideoPlayerProps {
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
   ({ src, disabled, onProgressChange, onPlayStateChange, onDurationChange }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const hlsRef = useRef<Hls | null>(null);
 
     /**
      * 非主控侧：记录当前处理中的最新 seq（后端分配，单调递增）。
-     *
-     * 用途：syncSeekAndPause 播放中分支会注册异步 onSeeked 回调。
+     * syncSeekAndPause 播放中分支会注册异步 onSeeked 回调，
      * 若在 seeked 触发之前又收到了更新的指令（seq 更大），
-     * onSeeked 执行时发现 lastSyncSeqRef.current > 自己的 seq，直接丢弃，
-     * 不执行 pause，让更新的指令接管。
-     *
-     * 注意：这里不再承担"保护 handlePlay/handlePause 不广播"的职责。
-     * 非主控的 disabled=true 导致 pointerEvents:none，用户根本触发不了
-     * play/pause 事件，handlePlay/handlePause 里的事件全部来自远端指令，
-     * 全部应该正常广播（主控会收到后发现是自己的回环，因为
-     * SYNC_STATE 用 broadcastExcept 排除了主控，所以实际上不会回环）。
+     * onSeeked 执行时发现 lastSyncSeqRef.current > 自己的 seq，直接丢弃。
      */
     const lastSyncSeqRef = useRef(0);
 
@@ -64,17 +64,78 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
      */
     const unmutePendingRef = useRef(false);
 
+    // ── hls.js 生命周期管理 ──────────────────────────────────────────────────
+
+    useEffect(() => {
+      const videoEl = videoRef.current;
+      if (!videoEl) return;
+
+      // 销毁旧实例
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      if (!src) return;
+
+      /**
+       * 直接将 m3u8 API 路径（/api/rooms/.../m3u8）传给 hls.js，由 hls.js 自行请求。
+       *
+       * 为什么不用 Blob URL：
+       *   以前的方案是先 fetch m3u8 文本再转 Blob URL，但 hls.js 用 Blob URL 作为 base
+       *   解析 m3u8 里的相对路径（如 /uploads/...），会拼出非法的 blob:http:/uploads/...。
+       *   直接传真实 URL，hls.js 以 http://host/api/... 为 base，相对路径解析完全正确，
+       *   本地模式（/uploads/）和 COS 模式（https://...）行为一致。
+       *
+       * Bearer Token 注入：
+       *   hls.js 默认用 XMLHttpRequest 请求，通过 xhrSetup 钩子为每个请求注入 Authorization 头。
+       *   Token 在每次请求时实时读取，无感刷新后也能正确携带新 Token。
+       */
+      const hls = new Hls({
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        xhrSetup: (xhr) => {
+          const token = getAccessToken();
+          if (token) {
+            xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          }
+        },
+      });
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (!data.fatal) return;
+        console.error('[VideoPlayer] hls fatal error:', data);
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          console.warn('[VideoPlayer] 尝试恢复媒体错误...');
+          hls.recoverMediaError();
+        } else {
+          hls.destroy();
+          hlsRef.current = null;
+        }
+      });
+
+      hls.loadSource(src);
+      hls.attachMedia(videoEl);
+      hlsRef.current = hls;
+
+      console.log('[VideoPlayer] hls.js 加载完成:', src);
+
+      return () => {
+        hls.destroy();
+        hlsRef.current = null;
+      };
+    }, [src]);
+
+    // ── imperative handle ────────────────────────────────────────────────────
+
     /**
      * 尝试播放，若被 Autoplay Policy 拒绝则静音后重试。
-     * 静音重试成功后设置 unmutePendingRef，等用户首次点击再取消静音。
      */
     const tryPlay = (video: HTMLVideoElement) => {
       video.play().catch(() => {
-        // 非静音播放失败（Autoplay Policy），静音重试
         video.muted = true;
         unmutePendingRef.current = true;
         video.play().catch(() => {
-          // 静音也失败，重置标志（不常见，网络异常等）
           unmutePendingRef.current = false;
           video.muted = false;
         });
@@ -102,14 +163,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         if (!video) return;
         lastSyncSeqRef.current = seq;
         if (video.paused) {
-          // 已暂停：直接 seek，不产生 play/pause 事件
           video.currentTime = time;
         } else {
-          // 播放中：seek 后在 seeked 里强制 pause
           video.currentTime = time;
           const onSeeked = () => {
             video.removeEventListener('seeked', onSeeked);
-            // 有更新指令覆盖了本条（seq 更大），丢弃
             if (lastSyncSeqRef.current > seq) return;
             video.pause();
           };
@@ -157,6 +215,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       },
     }));
 
+    // ── 事件处理 ─────────────────────────────────────────────────────────────
+
     const stableOnProgressChange = useMemoizedFn(onProgressChange);
     const throttledProgressChangeRef = useRef(throttle((time: number) => stableOnProgressChange(time), 200));
 
@@ -166,20 +226,6 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
       throttledProgressChangeRef.current(video.currentTime);
     });
 
-    /**
-     * 主控：play/pause 事件 = 用户操作，直接广播。
-     * 非主控：disabled=true，pointerEvents:none，用户触发不了这两个事件；
-     *   远端指令触发的 play/pause 同样走这里广播——但因为 SYNC_STATE 用
-     *   broadcastExcept 排除了主控，非主控不是发送方，这里的广播实际上
-     *   会发给服务端，服务端再 broadcastExcept 排除非主控自己……
-     *
-     * 等等：非主控调用了 video.play()，浏览器触发 play 事件，handlePlay 里
-     * onPlayStateChange → sendMessage('SYNC_STATE') → 后端收到非主控的 SYNC_STATE
-     * → canControl 检查失败（非主控不是 controller）→ 直接 return，不广播。
-     *
-     * 所以：非主控的 handlePlay/handlePause 发出去的消息后端会拦截，完全无害。
-     * 不需要任何保护逻辑。
-     */
     const handlePlay = useMemoizedFn(() => {
       const video = videoRef.current;
       if (!video) return;
@@ -210,14 +256,12 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         <video
           ref={videoRef}
           className={styles.video}
-          src={src}
           onTimeUpdate={handleTimeUpdate}
           onPlay={handlePlay}
           onPause={handlePause}
           onLoadedMetadata={handleLoadedMetadata}
           controls
           style={{ pointerEvents: disabled ? 'none' : 'auto' }}
-          preload="metadata"
         />
         {disabled && (
           <div className={styles.disabledOverlay}>

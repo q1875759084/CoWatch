@@ -67,6 +67,13 @@ export default function RoomPage() {
   const [activeVideoId, setActiveVideoId] = useState<string>('');
 
   /**
+   * 最近一次收到 VIDEO_ADDED 的文件名。
+   * 传给 VideoUploader 作为 lastVideoAddedName prop，
+   * VideoUploader 内部对比 pendingFileName 判断是否为本次上传完成。
+   */
+  const [lastVideoAddedName, setLastVideoAddedName] = useState<string | undefined>(undefined);
+
+  /**
    * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
    * 比 useEffect([activeVideoUrl]) 更可靠，因为它直接响应组件挂载事件。
    */
@@ -259,6 +266,7 @@ export default function RoomPage() {
     onTagAdded: handleTagAdded,
     onTagDeleted: handleTagDeleted,
     onSwitchVideo: handleSwitchVideo,
+    onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
   });
 
   /**
@@ -349,7 +357,10 @@ export default function RoomPage() {
           {/* 上传区（仅管理员可见） */}
           {isAdmin && (
             <div className={styles.uploaderSection}>
-              <VideoUploader roomId={roomId!} />
+              <VideoUploader
+                roomId={roomId!}
+                lastVideoAddedName={lastVideoAddedName}
+              />
             </div>
           )}
           {/* 视频列表 */}

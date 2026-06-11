@@ -50,6 +50,10 @@ request.interceptors.request.use(
 request.interceptors.response.use(
   (response: AxiosResponse) => {
     const { data } = response;
+    // 非 JSON 响应（如 m3u8 纯文本）或无 code 字段时直接放行，不做业务 code 校验
+    if (typeof data !== 'object' || data === null || !('code' in data)) {
+      return response;
+    }
     if (data.code !== 200) {
       return Promise.reject(new ApiError(data.message || '请求失败', response));
     }
