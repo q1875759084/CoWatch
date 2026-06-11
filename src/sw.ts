@@ -23,6 +23,13 @@
  *   - COS 私有读模式下，videoUrl 携带时效签名 query 参数（q-sign-*）
  *   - cache key 统一剥离签名参数，以纯路径作为 Cache Storage key
  *   - 签名轮换后同一视频仍能命中缓存，缓存有效期不受签名过期影响
+ *
+ * inFlight 去重（方案 D）：
+ *   - 问题：缓存未命中时发完整文件请求（~1.3 分钟），期间用户 seek 触发的每个新 Range 请求
+ *     都会再次未命中并发起新的完整下载，多个请求并发竞争带宽，永远无法完成缓存。
+ *   - 解法：用 inFlight Map<cacheKeyUrl, Promise<Response>> 记录正在进行的完整下载。
+ *     同一视频的后续请求检测到 inFlight 条目后，等待同一 Promise 完成再切片返回，
+ *     保证同一视频同时只有一个完整 GET 请求在飞行中。
  */
 
 // @ts-nocheck — sw.ts 使用 WebWorker lib，与主应用的 dom lib 冲突，
@@ -30,6 +37,18 @@
 /// <reference lib="webworker" />
 
 const CACHE_NAME = 'cowatch-video-v2';
+
+/**
+ * 飞行中的完整文件下载 Map。
+ *
+ * key：剥离签名后的纯路径 URL（与 cache key 一致）
+ * value：正在进行的完整 GET 请求 Promise，resolve 时返回已存入 Cache Storage 的完整响应
+ *
+ * 同一视频的并发 Range 请求共享同一个 Promise，保证全局只有一个完整下载在进行，
+ * 消除"seek 触发多个完整下载互相竞争"的并发爆炸问题。
+ * Promise 完成（无论成功或失败）后自动从 Map 中移除。
+ */
+const inFlight = new Map<string, Promise<Response>>();
 
 /**
  * 判断是否为需要 SW 缓存的视频请求。
@@ -208,36 +227,58 @@ self.addEventListener('fetch', (event) => {
         return buildRangeResponseFromStream(cachedResponse, range, totalSize, contentType);
       }
 
-      // 未命中：用原始带签名的 URL 发完整请求（有权限访问 COS），去掉 Range 头
-      console.log('[SW] 缓存未命中，发起完整请求：', cacheKeyUrl);
+      // 未命中：检查是否已有飞行中的完整下载，有则复用，无则发起新请求
+      // 保证同一视频同时只有一个完整 GET 请求在飞行中（方案 D：inFlight 去重）
+      let fetchPromise = inFlight.get(cacheKeyUrl);
+
+      if (!fetchPromise) {
+        console.log('[SW] 缓存未命中，发起完整请求：', cacheKeyUrl);
+
+        // 构造完整文件请求（去掉 Range 头）
+        // 不加任何自定义请求头，保持"简单请求"（GET + 无自定义头），
+        // 浏览器不会发 preflight（OPTIONS）。
+        // CDN TypeA 鉴权通过 sign query 参数完成，无需额外头部。
+        fetchPromise = fetch(new Request(request.url, { method: 'GET' }))
+          .then(async (res) => {
+            if (!res.ok) {
+              console.warn('[SW] 响应异常，不缓存：', res.status, cacheKeyUrl);
+              return res;
+            }
+            // 存入 Cache Storage，后续请求直接从缓存切片，不再发网络请求
+            await cache.put(cacheKey, res.clone());
+            console.log('[SW] 已缓存：', cacheKeyUrl);
+            return res;
+          })
+          .catch((err) => {
+            console.error('[SW] 网络请求失败：', err);
+            // 直接 re-throw：让每个等待方在自己的 catch 里各自 fallback 透传原始请求。
+            // 不能在此处 return fetch(request)：request 带有 Range 头，返回的 206 响应
+            // 会被其他等待方误用于 buildRangeResponseFromStream，导致 totalSize 计算错误。
+            throw err;
+          })
+          .finally(() => {
+            // 无论成功或失败，完成后从 Map 中移除，释放引用
+            inFlight.delete(cacheKeyUrl);
+          });
+
+        inFlight.set(cacheKeyUrl, fetchPromise);
+      } else {
+        console.log('[SW] 复用飞行中请求，等待完成：', cacheKeyUrl, rangeHeader ?? '(完整请求)');
+      }
+
       let fullResponse: Response;
       try {
-        fullResponse = await fetch(new Request(request.url, {
-          method: 'GET',
-          // 不加任何自定义请求头，保持"简单请求"（GET + 无自定义头），
-          // 浏览器不会发 preflight（OPTIONS）。
-          // CDN TypeA 鉴权通过 sign query 参数完成，无需额外头部。
-          // Cache-Control: no-cache 去掉：该头属于非简单头，会触发 preflight，
-          // 且 SW 缓存已由自身逻辑管理，不需要绕过 HTTP 缓存。
-        }));
+        fullResponse = await fetchPromise;
       } catch (err) {
-        console.error('[SW] 网络请求失败：', err);
+        console.error('[SW] 等待飞行中请求失败：', err);
         return fetch(request);
       }
 
       if (!fullResponse.ok) {
-        console.warn('[SW] 响应异常，不缓存：', fullResponse.status, cacheKeyUrl);
         return fullResponse;
       }
 
-      // 以剥离签名后的 URL 为 key 存入缓存
-      event.waitUntil(
-        cache.put(cacheKey, fullResponse.clone()).then(() => {
-          console.log('[SW] 已缓存：', cacheKeyUrl);
-        }),
-      );
-
-      // 如果原始请求带了 Range，从刚拉到的响应里流式切片返回
+      // 如果原始请求带了 Range，从响应里流式切片返回
       if (rangeHeader) {
         const totalSize = parseInt(fullResponse.headers.get('Content-Length') || '0', 10);
         const contentType = fullResponse.headers.get('Content-Type') || 'video/mp4';

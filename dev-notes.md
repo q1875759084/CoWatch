@@ -823,3 +823,108 @@ const fullResponse = await fetch(new Request(request.url, { ... }));
 - 消除时序竞态：不再依赖 postMessage，SW 从 pathname 直接判断，零延迟
 - 签名轮换不影响缓存命中：cache key 是稳定的纯路径，30 分钟签名过期后重新签名拿到的是新 URL，但 pathname 不变，SW 仍能命中同一缓存条目
 - 无需 VIDEO_ORIGINS 白名单，也无需 message 事件监听器，代码更简洁
+
+---
+
+## CDN 接入与 TypeA 鉴权
+
+### 背景
+
+视频文件存储在腾讯云 COS 私有桶，接入 CDN 加速后需要解决两个问题：
+1. CDN 鉴权：用户拿到 CDN URL 后不能无限期访问（COS 私有读签名在 CDN 有缓存时失效）
+2. 签名格式：CDN TypeA 鉴权与 COS 私有读签名是两套完全不同的体系
+
+### CDN 鉴权 vs COS 私有读签名的区别
+
+| | COS 私有读签名 | CDN TypeA 鉴权 |
+|---|---|---|
+| 参数 | `q-sign-*` 系列 query 参数 | 单个 `sign` query 参数 |
+| 验签方 | COS 源站 | CDN 节点 |
+| 缓存命中时是否验签 | 否（CDN 直接返回缓存，不回源） | **是**（CDN 节点自行验签） |
+| URL 泄露风险 | 有（CDN 有缓存时 URL 永久有效） | 无（过期后 CDN 返回 403） |
+
+**结论：** 只有 CDN TypeA 鉴权才能在缓存命中时也阻止过期 URL 访问。
+
+### CDN TypeA 签名公式（逆向验证）
+
+腾讯云控制台文档描述不清晰，通过「鉴权计算器」逐组验证后确认：
+
+```
+sign   = {timestamp}-{rand}-{uid}-{md5}
+md5    = md5(path + "-" + timestamp + "-" + rand + "-" + uid + "-" + key)
+```
+
+- `timestamp`：当前 Unix 时间戳（**起始时间**，不是过期时间）
+- `rand`：随机字符串（任意内容，自己生成即可，CDN 验签时从 sign 参数里直接读取）
+- `uid`：固定为 `0`
+- `key`：CDN 控制台配置的鉴权密钥（主）
+- `path`：视频文件的 pathname（如 `/cowatch/ZRPERZ/xxx.mp4`）
+
+**有效时间**由 CDN 控制台「鉴权配置 → 有效时间」控制（配置为 1800s），与后端 `expireSeconds` 保持一致。
+
+### CORS 问题的根因
+
+签名错误时，CDN 返回 403，但这个 403 **不携带 `Access-Control-Allow-Origin` 响应头**（鉴权层的错误响应不经过响应头配置层）。浏览器检测到跨域请求的响应没有 CORS 头，将其屏蔽并上报 CORS 错误，而非真实的 403。
+
+> 这导致调试时看到的是 CORS 错误，而不是"签名无效"，误导排查方向。
+
+**规律**：跨域请求中，任何 4xx/5xx 响应如果没有 `Access-Control-Allow-Origin`，在浏览器侧都会表现为 CORS 错误。
+
+### SW fetch 请求不能加自定义头
+
+SW 内部向 CDN 发完整请求时，不能加任何自定义请求头（如 `Cache-Control: no-cache`）：
+- 自定义头 = 非简单请求 = 浏览器发 preflight（OPTIONS）
+- CDN TypeA 鉴权会拦截 OPTIONS 请求（OPTIONS 不带 `sign` 参数），返回 403
+- 导致真正的 GET 请求被 CORS 策略阻止
+
+**解法**：SW fetch 请求只保留 `method: 'GET'`，不加任何自定义头。CDN TypeA 鉴权通过 `sign` query 参数完成，无需头部传参。
+
+### stripCosSignature 兼容 CDN TypeA
+
+接入 CDN 后，`stripCosSignature` 需要同时剥离两种签名参数：
+
+```ts
+// CDN TypeA 鉴权参数
+u.searchParams.delete('sign');
+// COS 直连签名参数（本地开发回退路径）
+['q-sign-algorithm', 'q-ak', 'q-sign-time', ...].forEach(p => u.searchParams.delete(p));
+```
+
+---
+
+## SW 缓存策略的根本缺陷（待重构）
+
+### 问题描述
+
+当前策略：缓存未命中时，SW 发一次**完整文件请求**（去掉 Range 头），将 200 响应存入 Cache Storage，同时流式切片返回当前 Range 区间。
+
+**问题**：197MB 视频，CDN 有缓存的情况下，客户端以 ~2.5 MB/s（约 20 Mbps 家用带宽）下载需要约 **1.3 分钟**。
+
+用户在文件下载完成之前拖动进度条，每次 seek 触发新的 Range 请求 → SW `cache.match` 未命中（文件还没写完）→ 又发一次 197MB 完整请求 → 并发互相竞争，永远无法完成缓存。
+
+实测：5 分钟视频，seek 3 次，产生了 4 条 197MB 的完整请求（788MB 流量）。
+
+### 根因
+
+**Cache API 不支持存储 206 响应**（规范硬限制，`cache.put` 直接抛异常），因此无法按 Range 分片缓存，只能缓存完整的 200 响应。
+
+而"缓存未命中 → 全量下载"和"用户 seek → Range 请求"之间存在时序竞争：全量下载完成前，所有 seek 都会触发新的全量下载。
+
+### 正确方案（待实现）
+
+**播放器 Range 请求全部透传 CDN，后台独立预缓存**：
+
+```
+用户进房间 / 切换视频
+  → 页面 postMessage 给 SW：{ type: 'PRECACHE_VIDEO', url: videoUrl }
+  → SW 后台静默发完整请求，写入 Cache Storage（不阻塞播放）
+  → 播放器的所有 Range 请求透传给 CDN（实时响应，不等缓存）
+  → 预缓存完成后，后续播放从 Cache Storage 切片返回，0 流量
+```
+
+优势：
+- 播放体验：和直连 CDN 完全一样，seek 流畅，不等缓存
+- 第一次播放：多消耗一倍流量（后台预缓存），但不阻塞用户
+- 第二次播放：0 流量，任意 seek 全部本地响应
+
+**与当前方案的核心区别**：缓存触发时机从"首个 Range 请求命中时" 改为"视频激活时主动预缓存"，解耦了缓存写入和播放响应。
