@@ -7,7 +7,9 @@
 .video {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  // .playerRatio 已通过 aspect-ratio + max-height 约束保证尺寸 = 视频画面尺寸，
+  // 无需 contain 的 letterbox 处理，fill 直接铺满不留黑边。
+  object-fit: fill;
   display: block;
 }
 

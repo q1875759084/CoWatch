@@ -35,6 +35,11 @@ module.exports = {
         use: 'babel-loader',
       },
       {
+        // SVG / WebP / 图片资源 作为文件 URL 处理（import xxxUrl from '*.svg' 返回字符串路径）
+        test: /\.(svg|webp|png|jpe?g|gif)$/,
+        type: 'asset/resource',
+      },
+      {
         test: /\.(s[ac]ss|css)$/,
         use: [
           'style-loader',

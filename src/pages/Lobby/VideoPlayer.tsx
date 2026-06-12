@@ -41,13 +41,25 @@ interface VideoPlayerProps {
    */
   src: string;
   disabled: boolean;
+  /**
+   * 是否隐藏系统光标（仅对**非主控**成员在鼠标共享开启时为 true）。
+   *
+   * `<video controls>` 的原生控制栏在 Shadow DOM 内，外部 CSS（含 !important）
+   * 无法穿透覆盖其 cursor。唯一可靠的方法是将 `pointer-events` 设为 `none`，
+   * 这样整个 Shadow DOM 不接受鼠标事件，浏览器也就不会显示手型光标。
+   *
+   * 主控不应设为 true，否则无法操作播放/进度条。
+   * 非主控的 disabled=true 已经禁止交互，再加 cursorLocked 只是补充隐藏手型光标。
+   * 用独立 prop 与 `disabled` 解耦，语义清晰。
+   */
+  cursorLocked?: boolean;
   onProgressChange: (currentTime: number) => void;
   onPlayStateChange: (isPlaying: boolean, currentTime: number) => void;
   onDurationChange?: (duration: number) => void;
 }
 
 const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
-  ({ src, disabled, onProgressChange, onPlayStateChange, onDurationChange }, ref) => {
+  ({ src, disabled, cursorLocked, onProgressChange, onPlayStateChange, onDurationChange }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const hlsRef = useRef<Hls | null>(null);
 
@@ -261,7 +273,13 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
           onPause={handlePause}
           onLoadedMetadata={handleLoadedMetadata}
           controls
-          style={{ pointerEvents: disabled ? 'none' : 'auto' }}
+          style={{
+            // disabled（观看模式）或 cursorLocked（鼠标共享）时均需设 none：
+            //   - disabled: 非主控侧不允许操作控件
+            //   - cursorLocked: video 的 Shadow DOM 内的 cursor 无法被外部 CSS 覆盖，
+            //     pointer-events:none 让整个原生控件不响应鼠标，系统手型光标随之消失
+            pointerEvents: (disabled || cursorLocked) ? 'none' : 'auto',
+          }}
         />
         {disabled && (
           <div className={styles.disabledOverlay}>

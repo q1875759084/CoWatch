@@ -67,3 +67,5 @@
 ### 前端
 
 - **RoomContext 状态管理迁移**：`RoomContext` 中实时更新的业务状态（`members`、`videos`、`controllerId`、`activeVideoUrl`）迁移到 Zustand 或 Jotai，`UserContext` 保持不变，消除不必要的全树重渲染
+
+- **鼠标位置共享（全屏支持）**：一期鼠标共享仅支持非全屏模式。全屏支持需将全屏目标从 `<video>` 元素改为播放器父容器（`.playerRatio`），光标覆盖层作为容器子节点随之进入全屏层，才能在全屏画面中渲染他人光标。具体改动：隐藏原生 `<video controls>` 的全屏按钮（CSS `::-webkit-media-controls-fullscreen-button`），在 `VideoPlayer` 外层叠加自定义全屏按钮，调用容器的 `requestFullscreen()`；全屏状态通过 `document.fullscreenchange` 事件同步，光标坐标百分比逻辑不变。

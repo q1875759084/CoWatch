@@ -22,34 +22,54 @@
   min-width: 0;
 }
 
-// 播放器
-// 外层容器：撑满列宽，高度由 max-height 约束（视口 - TopBar 48px - 底部预留 180px）
-// 内层视频通过 aspect-ratio + margin: auto 在约束范围内居中缩放
+// 播放器外层容器：居中放置 .playerRatio，自身撑满列宽。
+// 双向 max 约束：宽不超过列宽，高不超过 65vh（保留下方操作区空间）。
+// 使用 flex 居中，使 .playerRatio 在两侧有黑边时能水平居中。
 .playerArea {
   width: 100%;
-  // 高度上限：防止宽屏时播放器无限拉高
-  max-height: calc(100vh - 48px - 180px);
+  // 高度随 .playerRatio 内容自然撑起（不设固定高度）
+  // 但同时限制视口最大高度，防止超宽屏视频过高
+  max-height: 65vh;
   background: #000;
   flex-shrink: 0;
-  // 内层居中
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   overflow: hidden;
 }
 
-// 真正保持 16:9 比例的元素
-// 同时受 max-width(100%) 和 max-height(100%) 双重约束
-// 浏览器会取两者中更严格的一侧，另一侧自动缩小
+// 16:9 视频容器：宽度优先撑满父容器，高度由 aspect-ratio 等比推算。
+// 当推算高度 > 父容器 max-height 时，max-height:100% 触顶：
+//   此时 height 被限制 → aspect-ratio 反推 width 变窄 → 容器 < 父宽 → 黑边。
+// 关键：.playerRatio 的尺寸始终 = 视频画面尺寸（无 letterbox）。
+// PainterLayer canvas 铺满此容器，坐标系与视频像素 1:1 对齐。
 .playerRatio {
   width: 100%;
   max-width: 100%;
-  // 高度由 aspect-ratio 按宽度推算，但不能超过父容器高度
   aspect-ratio: 16 / 9;
+  // 触顶时高度受限，宽度随之收缩（不出现宽度浪费的情况）
   max-height: 100%;
-  // 当高度触顶时，让宽度跟着收缩
   height: auto;
   position: relative;
+  background: #000;
+}
+
+// 开启鼠标共享且非绘制模式时，强制隐藏该容器内所有元素的系统光标。
+// 必须用 `& *` 覆盖子元素（button/input/video 等有自己的 cursor:pointer），
+// 单独设父元素 cursor:none 无法压制子元素自带的 cursor 声明。
+.cursorHidden {
+  &,
+  & * {
+    cursor: none !important;
+  }
+}
+
+// 绘制模式：所有元素统一显示十字准星
+.cursorCrosshair {
+  &,
+  & * {
+    cursor: crosshair !important;
+  }
 }
 
 .noVideo {

@@ -120,6 +120,124 @@
   margin: 0;
 }
 
+// ── 鼠标共享区块 ──────────────────────────────────────────────────────────────
+
+// 标题行：左侧标题 + 右侧 toggle
+.cursorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+
+  // 消除 sectionTitle 自身的 margin-bottom（由 header 统一控制）
+  .sectionTitle {
+    margin-bottom: 0;
+  }
+}
+
+// Toggle 开关（CSS only，无第三方组件）
+.cursorToggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+
+  &:hover {
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+}
+
+.cursorToggleOn {
+  background: rgba(99, 179, 237, 0.35);
+  border-color: #63b3ed;
+
+  .cursorToggleThumb {
+    transform: translateX(16px);
+    background: #63b3ed;
+  }
+}
+
+.cursorToggleThumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: #4a5568;
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+
+// 样式选择器：横向排列 6 个图标
+.cursorStylePicker {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cursorStylePickerDisabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.cursorStyleBtn {
+  width: 36px;
+  height: 36px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  &:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+  }
+}
+
+.cursorStyleBtnActive {
+  background: rgba(255, 255, 255, 0.08);
+  // border-color 和 box-shadow 由内联样式注入（与箭头同色）
+}
+
+.cursorStyleIcon {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+// 绘制模式开关行
+.drawingModeRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+
+.drawingModeRowDisabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.drawingModeLabel {
+  font-size: 12px;
+  color: #a0aec0;
+}
+
 // ── 编码设置折叠区 ────────────────────────────────────────────────────────────
 
 .encodeSection {

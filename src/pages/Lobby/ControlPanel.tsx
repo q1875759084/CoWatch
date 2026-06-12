@@ -3,6 +3,7 @@ import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
 import MemberList from '@/components/MemberList';
 import { downloadBatApi } from '@/api/room';
+import { CURSOR_STYLES } from './cursorStyles';
 import styles from './ControlPanel.module.scss';
 
 /** 固定使用 CRF 30 档位 */
@@ -15,6 +16,15 @@ interface ControlPanelProps {
   controllerId: string | null;
   isAdmin: boolean;
   onTransferControl: (targetUserId: string) => void;
+  /** 鼠标共享是否开启（控制是否发送自己的位置） */
+  cursorEnabled: boolean;
+  /** 当前选中的光标样式 ID */
+  selectedStyleId: string;
+  /** 是否处于绘制模式（仅在 cursorEnabled=true 时可用） */
+  drawingMode: boolean;
+  onCursorToggle: () => void;
+  onStyleChange: (styleId: string) => void;
+  onDrawingModeToggle: () => void;
 }
 
 export default function ControlPanel({
@@ -24,6 +34,12 @@ export default function ControlPanel({
   controllerId,
   isAdmin,
   onTransferControl,
+  cursorEnabled,
+  selectedStyleId,
+  drawingMode,
+  onCursorToggle,
+  onStyleChange,
+  onDrawingModeToggle,
 }: ControlPanelProps) {
   const controller = members.find((m) => m.userId === controllerId);
 
@@ -71,6 +87,53 @@ export default function ControlPanel({
           <span className={styles.designatedMode}>
             {controller ? controller.nickname : '无'} 正在控制
           </span>
+        </div>
+      </section>
+
+      {/* 鼠标共享 */}
+      <section className={styles.section}>
+        <div className={styles.cursorHeader}>
+          <h3 className={styles.sectionTitle}>鼠标共享</h3>
+          {/* Toggle 开关 */}
+          <button
+            type="button"
+            className={`${styles.cursorToggle} ${cursorEnabled ? styles.cursorToggleOn : ''}`}
+            onClick={onCursorToggle}
+            title={cursorEnabled ? '关闭鼠标共享' : '开启鼠标共享'}
+          >
+            <span className={styles.cursorToggleThumb} />
+          </button>
+        </div>
+
+        {/* 样式选择器 */}
+        <div className={`${styles.cursorStylePicker} ${!cursorEnabled ? styles.cursorStylePickerDisabled : ''}`}>
+          {CURSOR_STYLES.map((cs) => (
+            <button
+              key={cs.id}
+              type="button"
+              title={cs.label}
+              disabled={!cursorEnabled}
+              className={`${styles.cursorStyleBtn} ${selectedStyleId === cs.id ? styles.cursorStyleBtnActive : ''}`}
+              style={selectedStyleId === cs.id ? { borderColor: cs.color, boxShadow: `0 0 0 2px ${cs.color}40` } : {}}
+              onClick={() => onStyleChange(cs.id)}
+            >
+              <img src={cs.url} alt={cs.label} className={styles.cursorStyleIcon} draggable={false} />
+            </button>
+          ))}
+        </div>
+
+        {/* 绘制模式开关（仅在开启鼠标共享时可用） */}
+        <div className={`${styles.drawingModeRow} ${!cursorEnabled ? styles.drawingModeRowDisabled : ''}`}>
+          <span className={styles.drawingModeLabel}>✒️ 绘制模式</span>
+          <button
+            type="button"
+            className={`${styles.cursorToggle} ${drawingMode && cursorEnabled ? styles.cursorToggleOn : ''}`}
+            onClick={onDrawingModeToggle}
+            disabled={!cursorEnabled}
+            title={drawingMode ? '退出绘制模式' : '进入绘制模式'}
+          >
+            <span className={styles.cursorToggleThumb} />
+          </button>
         </div>
       </section>
 

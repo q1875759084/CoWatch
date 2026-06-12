@@ -6,7 +6,7 @@ import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
 import { getRoomInfoApi, getVideosApi, getTagsApi } from '@/api/room';
-import type { Tag } from '@/types/room';
+import type { Tag, CursorMoveDownData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
@@ -14,7 +14,36 @@ import ControlPanel from './ControlPanel';
 import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import VideoTagBar from './VideoTagBar';
+import PainterLayer, {
+  type CursorState,
+  type PainterLayerHandle,
+} from './PainterLayer';
+import { DEFAULT_STYLE_ID } from './cursorStyles';
 import styles from './index.module.scss';
+
+// localStorage 持久化 key
+const LS_CURSOR_ENABLED = 'cowatch_cursor_enabled';
+const LS_CURSOR_STYLE   = 'cowatch_cursor_style';
+
+/** 从 localStorage 读取布尔值，缺省返回 defaultVal */
+function readLsBool(key: string, defaultVal: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    if (v === null) return defaultVal;
+    return v === 'true';
+  } catch {
+    return defaultVal;
+  }
+}
+
+/** 从 localStorage 读取字符串，缺省返回 defaultVal */
+function readLsStr(key: string, defaultVal: string): string {
+  try {
+    return localStorage.getItem(key) ?? defaultVal;
+  } catch {
+    return defaultVal;
+  }
+}
 
 /**
  * SYNC_PROGRESS 兜底纠偏阈值（秒）。
@@ -28,6 +57,9 @@ import styles from './index.module.scss';
  * 现在根本原因（sync 保护窗口吞掉 play 事件）已修复，恢复 0.5s。
  */
 const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
+
+/** 淡出动画总时长（ms） */
+const FADE_OUT_DURATION = 300;
 
 export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -73,6 +105,32 @@ export default function RoomPage() {
    * VideoUploader 内部对比 pendingFileName 判断是否为本次上传完成。
    */
   const [lastVideoAddedName, setLastVideoAddedName] = useState<string | undefined>(undefined);
+
+  // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
+  /** 是否开启鼠标共享（是否发送自己的位置），从 localStorage 初始化 */
+  const [cursorEnabled, setCursorEnabled] = useState(() => readLsBool(LS_CURSOR_ENABLED, false));
+  /** 当前选中的光标样式 ID，从 localStorage 初始化 */
+  const [selectedStyleId, setSelectedStyleId] = useState(() => readLsStr(LS_CURSOR_STYLE, DEFAULT_STYLE_ID));
+  /**
+   * 是否处于绘制模式。
+   * - false（默认）：仅共享鼠标位置，视频播放器可正常操作
+   * - true：电画笔 cursor，未来支持局部绘制轨迹共享
+   * 必须在 cursorEnabled=true 时才有意义。
+   */
+  const [drawingMode, setDrawingMode] = useState(false);
+
+  /**
+   * 所有光标的状态 Map（含自己 + 远端）。
+   * key：userId（自己用 userInfo.userId）。
+   * 直接操作 Map 引用（不 setState）+ 调 painterRef.redraw() 触发 canvas 重绘，
+   * 避免每帧 mousemove 都触发 React re-render。
+   */
+  const cursorsRef = useRef<Map<string, CursorState>>(new Map());
+  /** PainterLayer 命令式句柄，用于主动触发重绘 */
+  const painterRef = useRef<PainterLayerHandle>(null);
+
+  /** 节流版 sendMessage，避免每帧都创建新函数；用 ref 包装避免闭包捕获旧引用 */
+  const sendMessageRef = useRef<ReturnType<typeof useRoomWs>['sendMessage'] | null>(null);
 
   /**
    * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
@@ -258,6 +316,146 @@ export default function RoomPage() {
     }
   });
 
+  // ── 鼠标共享 handlers ────────────────────────────────────────────────────────
+
+  const handleCursorToggle = useMemoizedFn(() => {
+    setCursorEnabled((prev) => {
+      const next = !prev;
+      try { localStorage.setItem(LS_CURSOR_ENABLED, String(next)); } catch { /* ignore */ }
+      // 关闭时清空所有光标并重绘
+      if (!next) {
+        cursorsRef.current.clear();
+        painterRef.current?.redraw();
+      }
+      return next;
+    });
+  });
+
+  const handleStyleChange = useMemoizedFn((styleId: string) => {
+    setSelectedStyleId(styleId);
+    try { localStorage.setItem(LS_CURSOR_STYLE, styleId); } catch { /* ignore */ }
+  });
+
+  const handleDrawingModeToggle = useMemoizedFn(() => {
+    setDrawingMode((prev) => !prev);
+  });
+
+  /**
+   * 收到远端 CURSOR_MOVE 广播：更新 cursors Map，触发 canvas 重绘。
+   * 不走 setState，避免 React re-render 影响帧率。
+   */
+  const handleCursorMove = useMemoizedFn((data: CursorMoveDownData) => {
+    cursorsRef.current.set(data.userId, {
+      userId: data.userId,
+      nickname: data.nickname,
+      x: data.x,
+      y: data.y,
+      styleId: data.styleId,
+      opacity: 1,
+    });
+    painterRef.current?.redraw();
+  });
+
+  /**
+   * 收到远端 CURSOR_HIDE 广播（或本地鼠标离开区域）：
+   * 启动 rAF 淡出动画，opacity 300ms 内递减到 0 后从 Map 移除。
+   */
+  const handleCursorHide = useMemoizedFn((userId: string) => {
+    const cursor = cursorsRef.current.get(userId);
+    if (!cursor) return;
+
+    const startTime = performance.now();
+    const startOpacity = cursor.opacity;
+
+    function fade() {
+      const elapsed = performance.now() - startTime;
+      const progress = Math.min(elapsed / FADE_OUT_DURATION, 1);
+      const newOpacity = startOpacity * (1 - progress);
+
+      const current = cursorsRef.current.get(userId);
+      if (!current) return; // 已被移除，停止动画
+
+      if (progress >= 1) {
+        cursorsRef.current.delete(userId);
+      } else {
+        cursorsRef.current.set(userId, { ...current, opacity: newOpacity });
+        requestAnimationFrame(fade);
+      }
+      painterRef.current?.redraw();
+    }
+
+    requestAnimationFrame(fade);
+  });
+
+  /**
+   * PainterLayer 回调：鼠标在 .main 内移动。
+   * 更新自己的光标位置（立即可见），并节流发送给他人。
+   * useMemoizedFn 始终读取最新的 cursorEnabled/selectedStyleId，无需依赖数组。
+   */
+  const handleSelfCursorMove = useMemoizedFn((x: number, y: number) => {
+    const uid = userInfo?.userId;
+    if (!uid) return;
+
+    // 更新自己的光标（不走 setState，直接写 ref，避免 re-render）
+    const existing = cursorsRef.current.get(uid);
+    if (existing) {
+      cursorsRef.current.set(uid, { ...existing, x, y, opacity: 1 });
+    }
+    painterRef.current?.redraw();
+
+    // 节流发送给他人
+    if (cursorEnabled) {
+      sendMessageRef.current?.('CURSOR_MOVE', { x, y, styleId: selectedStyleId });
+    }
+  });
+
+  /**
+   * PainterLayer 回调：鼠标进入 .main。
+   * 将自己的光标插入 Map（opacity=1），触发重绘。
+   */
+  const handleSelfCursorEnter = useMemoizedFn(() => {
+    if (!cursorEnabled) return;
+    const uid = userInfo?.userId ?? '__self__';
+    const nickname = userInfo?.nickname ?? '';
+    const existing = cursorsRef.current.get(uid);
+    if (!existing) {
+      cursorsRef.current.set(uid, {
+        userId: uid,
+        nickname,
+        x: 0,
+        y: 0,
+        styleId: selectedStyleId,
+        opacity: 1,
+      });
+    } else {
+      cursorsRef.current.set(uid, { ...existing, opacity: 1 });
+    }
+    painterRef.current?.redraw();
+  });
+
+  /**
+   * PainterLayer 回调：鼠标离开 .main。
+   * 淡出自己的光标，并通知他人隐藏。
+   */
+  const handleSelfCursorLeave = useMemoizedFn(() => {
+    const uid = userInfo?.userId ?? '__self__';
+    handleCursorHide(uid);
+    if (cursorEnabled) {
+      sendMessageRef.current?.('CURSOR_HIDE', {});
+    }
+  });
+
+  // 当 selectedStyleId 变化时，同步更新自己的光标 styleId
+  useEffect(() => {
+    const uid = userInfo?.userId;
+    if (!uid) return;
+    const existing = cursorsRef.current.get(uid);
+    if (existing) {
+      cursorsRef.current.set(uid, { ...existing, styleId: selectedStyleId });
+      painterRef.current?.redraw();
+    }
+  }, [selectedStyleId, userInfo?.userId]);
+
   const { sendMessage } = useRoomWs({
     roomId: roomId!,
     token: getAccessToken() ?? '',
@@ -268,7 +466,12 @@ export default function RoomPage() {
     onTagDeleted: handleTagDeleted,
     onSwitchVideo: handleSwitchVideo,
     onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
+    onCursorMove: handleCursorMove,
+    onCursorHide: handleCursorHide,
   });
+
+  // 将最新 sendMessage 同步到 ref，供节流函数闭包读取
+  sendMessageRef.current = sendMessage;
 
   /**
    * 本地点击"播放"：向后端发送 SWITCH_VIDEO（携带 objectKey）。
@@ -319,12 +522,31 @@ export default function RoomPage() {
         <main className={styles.main}>
           {/* 播放器区域 */}
           <div className={styles.playerArea}>
+            {/*
+             * .playerRatio 是 16:9 固定比例容器，是所有客户端视觉内容完全一致的区域。
+             * PainterLayer 锚定在此容器内：
+             * - 坐标比例 = 相对 .playerRatio 宽高，不受窗口高度/折叠区域影响
+             * - 出了视频区鼠标自动恢复默认样式，tag区/上传区不受影响
+             */}
             <div className={styles.playerRatio}>
+              <PainterLayer
+                ref={painterRef}
+                enabled={cursorEnabled}
+                drawingMode={drawingMode}
+                styleId={selectedStyleId}
+                nickname={userInfo?.nickname ?? ''}
+                userId={userInfo?.userId ?? ''}
+                cursors={cursorsRef.current}
+                onCursorMove={handleSelfCursorMove}
+                onCursorEnter={handleSelfCursorEnter}
+                onCursorLeave={handleSelfCursorLeave}
+              />
               {roomState.activeVideoUrl ? (
                 <VideoPlayer
                   ref={setVideoRef}
                   src={roomState.activeVideoUrl}
                   disabled={!isController}
+                  cursorLocked={cursorEnabled && !isController}
                   onProgressChange={(currentTime) => {
                     sendMessage('SYNC_PROGRESS', { currentTime });
                   }}
@@ -362,17 +584,16 @@ export default function RoomPage() {
               </CollapseSection>
             )}
 
-            {/* 上传区（仅管理员可见） */}
-            {isAdmin && (
-              <CollapseSection title="上传视频" defaultOpen={true}>
-                <div className={styles.uploaderInner}>
-                  <VideoUploader
-                    roomId={roomId!}
-                    lastVideoAddedName={lastVideoAddedName}
-                  />
-                </div>
-              </CollapseSection>
-            )}
+            {/* 上传区（全员可见；空闲态下仅主控可操作） */}
+            <CollapseSection title="上传视频" defaultOpen={true}>
+              <div className={styles.uploaderInner}>
+                <VideoUploader
+                  roomId={roomId!}
+                  isController={isController}
+                  lastVideoAddedName={lastVideoAddedName}
+                />
+              </div>
+            </CollapseSection>
 
             {/* 视频列表 */}
             <CollapseSection
@@ -402,6 +623,12 @@ export default function RoomPage() {
             onTransferControl={(targetUserId) => {
               sendMessage('TRANSFER_CONTROL', { targetUserId });
             }}
+            cursorEnabled={cursorEnabled}
+            selectedStyleId={selectedStyleId}
+            drawingMode={drawingMode}
+            onCursorToggle={handleCursorToggle}
+            onStyleChange={handleStyleChange}
+            onDrawingModeToggle={handleDrawingModeToggle}
           />
         </aside>
       </div>

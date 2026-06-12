@@ -63,6 +63,8 @@ export type WsMessageType =
   | 'TAG_DELETE'
   | 'TAG_DELETED'
   | 'TAG_SEEK'
+  | 'CURSOR_MOVE'
+  | 'CURSOR_HIDE'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -166,4 +168,27 @@ export interface TagDeletedData {
 /** 上行：主控 → 服务端，点击 tag 跳转 */
 export interface TagSeekData {
   time: number;
+}
+
+// ─── Cursor WS data 类型 ──────────────────────────────────────────────────────
+
+/** 上行：前端 → 服务端，鼠标移动（百分比坐标） */
+export interface CursorMoveUpData {
+  x: number;       // 0~1，相对容器宽度
+  y: number;       // 0~1，相对容器高度
+  styleId: string; // 光标样式 ID
+}
+
+/** 下行：服务端 → 前端，鼠标移动（补充 userId/nickname 后广播） */
+export interface CursorMoveDownData {
+  userId: string;
+  nickname: string;
+  x: number;
+  y: number;
+  styleId: string;
+}
+
+/** 下行：服务端 → 前端，鼠标离开区域（补充 userId 后广播） */
+export interface CursorHideDownData {
+  userId: string;
 }

@@ -2,7 +2,8 @@
  * 简单 throttle 工具
  * 在 wait ms 内最多执行一次 fn，leading 触发。
  */
-export function throttle<T extends (...args: unknown[]) => void>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function throttle<T extends (...args: any[]) => void>(
   fn: T,
   wait: number,
 ): (...args: Parameters<T>) => void {

@@ -14,6 +14,8 @@ import type {
   Tag,
   TagAddedData,
   TagDeletedData,
+  CursorMoveDownData,
+  CursorHideDownData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
@@ -41,6 +43,10 @@ interface UseRoomWsOptions {
    * 调用方传入文件名，VideoUploader 内部对比 pendingFileName 判断是否为本次上传。
    */
   onVideoAdded?: (fileName: string) => void;
+  /** 收到 CURSOR_MOVE 时通知调用方更新他人光标位置 */
+  onCursorMove?: (data: CursorMoveDownData) => void;
+  /** 收到 CURSOR_HIDE 时通知调用方隐藏对应用户的光标 */
+  onCursorHide?: (userId: string) => void;
 }
 
 export function useRoomWs({
@@ -53,6 +59,8 @@ export function useRoomWs({
   onTagDeleted,
   onSwitchVideo,
   onVideoAdded,
+  onCursorMove,
+  onCursorHide,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -75,6 +83,8 @@ export function useRoomWs({
   const stableOnTagDeleted   = useMemoizedFn(onTagDeleted   ?? (() => {}));
   const stableOnSwitchVideo  = useMemoizedFn(onSwitchVideo  ?? (() => {}));
   const stableOnVideoAdded   = useMemoizedFn(onVideoAdded   ?? (() => {}));
+  const stableOnCursorMove   = useMemoizedFn(onCursorMove   ?? (() => {}));
+  const stableOnCursorHide   = useMemoizedFn(onCursorHide   ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -197,6 +207,18 @@ export function useRoomWs({
         case 'TAG_DELETED': {
           const d = msg.data as unknown as TagDeletedData | undefined;
           if (d) stableOnTagDeleted(d.id);
+          break;
+        }
+
+        case 'CURSOR_MOVE': {
+          const d = msg.data as unknown as CursorMoveDownData | undefined;
+          if (d) stableOnCursorMove(d);
+          break;
+        }
+
+        case 'CURSOR_HIDE': {
+          const d = msg.data as unknown as CursorHideDownData | undefined;
+          if (d) stableOnCursorHide(d.userId);
           break;
         }
 

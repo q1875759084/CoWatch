@@ -5,42 +5,42 @@ import request, { ApiError } from '@/utils/request';
 import { validateVideoFile } from '@/utils/validateVideo';
 import styles from './VideoUploader.module.scss';
 
-/** 上传状态机：idle → uploading → slicing → done | error */
-type UploadStatus = 'idle' | 'uploading' | 'slicing' | 'done' | 'error';
+/** 上传状态机：idle → uploading → slicing → idle | error */
+type UploadStatus = 'idle' | 'uploading' | 'slicing' | 'error';
 
 interface VideoUploaderProps {
   roomId: string;
   /**
-   * WS VIDEO_ADDED 事件透传——由父组件（Lobby）在 useRoomWs 收到 VIDEO_ADDED 时调用，
-   * 传入广播的 fileName。VideoUploader 内部对比 pendingFileName，若匹配则切换到"已完成"。
+   * 当前用户是否为主控。
+   * - 空闲态：主控可点击上传，非主控只读展示（禁用交互）
+   * - 上传中 / 切片中 / 完成态：全员均为纯展示，无区别
+   */
+  isController: boolean;
+  /**
+   * WS VIDEO_ADDED 事件透传——由父组件（Lobby）在 useRoomWs 收到 VIDEO_ADDED 时调用。
+   * 切片完成信号，全员统一回归空闲态，不区分上传者与旁观者。
    */
   lastVideoAddedName?: string;
 }
 
-export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploaderProps) {
+export default function VideoUploader({ roomId, isController, lastVideoAddedName }: VideoUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  /**
-   * 当前等待切片完成的文件名。
-   * 上传完成（200 响应）后写入，VIDEO_ADDED 到来时对比此值。
-   */
-  const pendingFileNameRef = useRef<string | null>(null);
-
-  // 监听父组件传入的 lastVideoAddedName，判断是否匹配本次上传
+  // VIDEO_ADDED 广播到来：全员统一回归空闲态，并弹窗提示
   useEffect(() => {
-    if (
-      lastVideoAddedName &&
-      pendingFileNameRef.current &&
-      pendingFileNameRef.current === lastVideoAddedName
-    ) {
-      pendingFileNameRef.current = null;
-      setStatus('done');
-      setProgress(100);
-    }
+    if (!lastVideoAddedName) return;
+    setFileName('');
+    setProgress(0);
+    setStatus('idle');
+    Modal.success({
+      title: '视频已就绪',
+      content: `《${lastVideoAddedName}》切片完成，可在视频列表中选择播放。`,
+      okText: '知道了',
+    });
   }, [lastVideoAddedName]);
 
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -89,7 +89,6 @@ export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploa
       }
 
       // 上传成功：切换到"切片中"状态，等待后端 ffmpeg 切片完成后广播 VIDEO_ADDED
-      pendingFileNameRef.current = file.name;
       setStatus('slicing');
 
     } catch (err) {
@@ -105,17 +104,22 @@ export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploa
   return (
     <div className={styles.wrapper}>
       {status === 'idle' || status === 'error' ? (
-        <label className={styles.idleBox}>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="video/*"
-            hidden
-            onChange={handleFileChange}
-          />
+        <label className={`${styles.idleBox} ${!isController ? styles.idleBoxDisabled : ''}`}>
+          {/* 非主控：不挂 onChange，点击不触发文件选择 */}
+          {isController && (
+            <input
+              ref={inputRef}
+              type="file"
+              accept="video/*"
+              hidden
+              onChange={handleFileChange}
+            />
+          )}
           <span className={styles.idleText}>
-            点击选择录屏文件
-            <span className={styles.idleHint}>&ensp;支持 mp4、mov、avi 等常见格式</span>
+            {isController ? '点击选择录屏文件' : '等待主控上传视频...'}
+            {isController && (
+              <span className={styles.idleHint}>&ensp;支持 mp4、mov、avi 等常见格式</span>
+            )}
           </span>
           {status === 'error' && <span className={styles.errorText}>{errorMsg}</span>}
         </label>
@@ -133,18 +137,7 @@ export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploa
           <p className={styles.slicingText}>服务器切片中，请稍候...</p>
           <p className={styles.slicingFile}>{fileName}</p>
         </div>
-      ) : (
-        <div className={styles.doneBox}>
-          <span className={styles.doneIcon}>✅</span>
-          <p className={styles.doneText}>{fileName} 已上传</p>
-          <button
-            className={styles.reuploadBtn}
-            onClick={() => { setStatus('idle'); setFileName(''); }}
-          >
-            重新上传
-          </button>
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }

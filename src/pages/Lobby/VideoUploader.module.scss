@@ -20,6 +20,17 @@
   }
 }
 
+// 非主控的 idle 态：禁用交互外观
+.idleBoxDisabled {
+  cursor: default;
+  opacity: 0.5;
+
+  &:hover {
+    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.03);
+  }
+}
+
 .idleText {
   flex: 1;
   font-size: 14px;
@@ -116,43 +127,4 @@
   white-space: nowrap;
 }
 
-.doneBox {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 16px 20px;
-  background: rgba(104, 211, 145, 0.08);
-  border: 1px solid rgba(104, 211, 145, 0.2);
-  border-radius: 12px;
-}
 
-.doneIcon {
-  font-size: 20px;
-  flex-shrink: 0;
-}
-
-.doneText {
-  flex: 1;
-  font-size: 14px;
-  color: #68d391;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.reuploadBtn {
-  font-size: 12px;
-  color: #718096;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: 4px;
-  flex-shrink: 0;
-
-  &:hover {
-    color: #e2e8f0;
-    background: rgba(255, 255, 255, 0.06);
-  }
-}
