@@ -54,7 +54,7 @@ export default function AuthPage() {
       <div className={styles.card}>
         <div className={styles.logo}>
           <h1>CoWatch</h1>
-          <p>游戏复盘协作平台</p>
+          <p>游戏<span style={{ textDecoration: 'line-through', textDecorationStyle: 'double' }}>复盘</span>开庭平台</p>
         </div>
 
         <div className={styles.tabs}>
@@ -66,11 +66,12 @@ export default function AuthPage() {
             登录
           </button>
           <button
+            disabled
             type="button"
             className={`${styles.tab} ${tab === 'register' ? styles.active : ''}`}
             onClick={() => reset('register')}
           >
-            注册
+            注册（嘻嘻，还没做）
           </button>
         </div>
 

@@ -181,10 +181,9 @@ export interface CursorMoveUpData {
   styleId: string; // 光标样式 ID
 }
 
-/** 下行：服务端 → 前端，鼠标移动（补充 userId/nickname 后广播） */
+/** 下行：服务端 → 前端，鼠标移动（补充 userId 后广播） */
 export interface CursorMoveDownData {
   userId: string;
-  nickname: string;
   x: number;
   y: number;
   styleId: string;

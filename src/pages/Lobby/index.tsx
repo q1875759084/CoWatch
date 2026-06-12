@@ -379,7 +379,6 @@ export default function RoomPage() {
   const handleCursorMove = useMemoizedFn((data: CursorMoveDownData) => {
     cursorsRef.current.set(data.userId, {
       userId: data.userId,
-      nickname: data.nickname,
       x: data.x,
       y: data.y,
       styleId: data.styleId,
@@ -410,7 +409,6 @@ export default function RoomPage() {
       // enter 时没有已有条目（首次进入或淡出动画已 delete），在真实坐标处插入
       cursorsRef.current.set(uid, {
         userId: uid,
-        nickname: userInfo?.nickname ?? '',
         x,
         y,
         styleId: selectedStyleId,

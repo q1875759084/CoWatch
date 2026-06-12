@@ -119,7 +119,7 @@ export default function ControlPanel({
                 type="button"
                 title={isActive ? `${cs.label}（点击取消）` : cs.label}
                 className={`${styles.cursorStyleBtn} ${isActive ? styles.cursorStyleBtnActive : ''}`}
-                style={isActive ? { borderColor: cs.color, boxShadow: `0 0 0 2px ${cs.color}40` } : {}}
+                style={isActive ? { borderBottomColor: 'rgba(255,255,255,0.7)' } : {}}
                 onClick={() => onCursorStyleSelect(cs.id)}
               >
                 <img src={cs.url} alt={cs.label} className={styles.cursorStyleIcon} draggable={false} />

@@ -14,7 +14,6 @@ import styles from './index.module.scss';
 
 export interface CursorState {
   userId: string;
-  nickname: string;
   /** 0~1，相对 .playerRatio 容器宽度的百分比 */
   x: number;
   /** 0~1，相对 .playerRatio 容器高度的百分比 */
@@ -88,14 +87,6 @@ function getOrLoadImg(url: string): HTMLImageElement {
 
 /** 光标图标渲染尺寸（CSS px）：对齐系统鼠标视觉大小，不随分辨率变化 */
 const ICON_SIZE = 20;
-/** 昵称 label 字体 */
-const LABEL_FONT = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-/** label 内边距 */
-const LABEL_PAD_X = 6;
-const LABEL_PAD_Y = 2;
-/** label 距图标右下角的偏移 */
-const LABEL_OFFSET_X = 12;
-const LABEL_OFFSET_Y = 16;
 /** 画笔线宽（CSS px） */
 const STROKE_WIDTH = 3;
 
@@ -128,7 +119,7 @@ const PainterLayer = forwardRef<PainterLayerHandle, PainterLayerProps>(
       onCursorEnter,
       onStrokeComplete,
     },
-    // styleId / nickname / userId 由 cursors Map 携带，不在此解构
+    // styleId / userId 由 cursors Map 携带，不在此解构
     ref,
   ) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -194,7 +185,6 @@ const PainterLayer = forwardRef<PainterLayerHandle, PainterLayerProps>(
         const px = cursor.x * w;
         const py = cursor.y * h;
 
-
         // 绘制光标图标（逻辑尺寸 ICON_SIZE px）
         const cs = getCursorStyle(cursor.styleId);
         const img = getOrLoadImg(cs.url);
@@ -204,33 +194,6 @@ const PainterLayer = forwardRef<PainterLayerHandle, PainterLayerProps>(
           // 图片尚未加载完成：注册 onload 后触发重绘
           img.onload = () => scheduleRedraw();
         }
-
-        // 绘制昵称 label
-        ctx.font = LABEL_FONT;
-        const textW = ctx.measureText(cursor.nickname).width;
-        const labelW = textW + LABEL_PAD_X * 2;
-        const labelH = 11 + LABEL_PAD_Y * 2;
-        const lx = px + LABEL_OFFSET_X;
-        const ly = py + LABEL_OFFSET_Y;
-
-        // label 背景
-        ctx.fillStyle = 'rgba(0,0,0,0.65)';
-        ctx.beginPath();
-        ctx.roundRect(lx, ly, labelW, labelH, 3);
-        ctx.fill();
-
-        // label 边框
-        ctx.strokeStyle = cs.color;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.roundRect(lx, ly, labelW, labelH, 3);
-        ctx.stroke();
-
-        // label 文字
-        ctx.fillStyle = cs.color;
-        ctx.textBaseline = 'middle';
-        ctx.fillText(cursor.nickname, lx + LABEL_PAD_X, ly + labelH / 2);
-
       });
 
       ctx.restore();

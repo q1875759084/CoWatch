@@ -106,44 +106,46 @@
   transition: transform 0.2s, background 0.2s;
 }
 
-// 样式选择器：横向排列图标
+// 样式选择器：图片直接排列，无边框容器感
 .cursorStylePicker {
   display: flex;
-  gap: 8px;
+  gap: 4px;
   flex-wrap: wrap;
 }
 
 .cursorStyleBtn {
-  width: 36px;
-  height: 36px;
-  padding: 4px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
+  // 去掉所有容器样式，纯透明背景
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  // 底部彩线占位（active 时显示）
+  border-bottom: 2px solid transparent;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: transform 0.15s;
 
-  &:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.25);
-  }
-
-  &:disabled {
-    cursor: not-allowed;
+  &:hover {
+    transform: scale(1.12);
   }
 }
 
+// 选中态：图片放大 + 底部彩线（颜色由内联样式注入）
 .cursorStyleBtnActive {
-  background: rgba(255, 255, 255, 0.08);
-  // border-color 和 box-shadow 由内联样式注入（与箭头同色）
+  transform: scale(1.12);
+
+  &:hover {
+    transform: scale(1.18);
+  }
 }
 
 .cursorStyleIcon {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   display: block;
 }
 
