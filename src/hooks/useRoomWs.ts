@@ -16,6 +16,8 @@ import type {
   TagDeletedData,
   CursorMoveDownData,
   CursorHideDownData,
+  DrawStrokeData,
+  DrawClearData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
@@ -47,6 +49,10 @@ interface UseRoomWsOptions {
   onCursorMove?: (data: CursorMoveDownData) => void;
   /** 收到 CURSOR_HIDE 时通知调用方隐藏对应用户的光标 */
   onCursorHide?: (userId: string) => void;
+  /** 收到 DRAW_STROKE 时通知调用方渲染笔迹 */
+  onDrawStroke?: (data: DrawStrokeData) => void;
+  /** 收到 DRAW_CLEAR 时通知调用方清空画布 */
+  onDrawClear?: () => void;
 }
 
 export function useRoomWs({
@@ -61,6 +67,8 @@ export function useRoomWs({
   onVideoAdded,
   onCursorMove,
   onCursorHide,
+  onDrawStroke,
+  onDrawClear,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -85,6 +93,8 @@ export function useRoomWs({
   const stableOnVideoAdded   = useMemoizedFn(onVideoAdded   ?? (() => {}));
   const stableOnCursorMove   = useMemoizedFn(onCursorMove   ?? (() => {}));
   const stableOnCursorHide   = useMemoizedFn(onCursorHide   ?? (() => {}));
+  const stableOnDrawStroke   = useMemoizedFn(onDrawStroke   ?? (() => {}));
+  const stableOnDrawClear    = useMemoizedFn(onDrawClear    ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -219,6 +229,18 @@ export function useRoomWs({
         case 'CURSOR_HIDE': {
           const d = msg.data as unknown as CursorHideDownData | undefined;
           if (d) stableOnCursorHide(d.userId);
+          break;
+        }
+
+        case 'DRAW_STROKE': {
+          const d = msg.data as unknown as DrawStrokeData | undefined;
+          if (d) stableOnDrawStroke(d);
+          break;
+        }
+
+        case 'DRAW_CLEAR': {
+          const d = msg.data as unknown as DrawClearData | undefined;
+          if (d) stableOnDrawClear();
           break;
         }
 

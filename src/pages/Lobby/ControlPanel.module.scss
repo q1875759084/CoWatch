@@ -1,28 +1,8 @@
 .panel {
-  padding: 20px 16px;
+  padding-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 0;
-}
-
-.section {
-  padding-bottom: 12px;
-  margin-bottom: 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-
-  &:last-child {
-    border-bottom: none;
-    margin-bottom: 0;
-  }
-}
-
-.sectionTitle {
-  font-size: $block-title-font-size;
-  font-weight: 600;
-  color: #4a5568;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  margin: 0 0 12px;
 }
 
 .roomIdRow {
@@ -75,65 +55,17 @@
   font-size: 13px;
 }
 
-.freeMode {
-  color: #68d391;
-}
-
 .designatedMode {
   color: #e2e8f0;
-}
-
-
-.modeToggle {
-  display: flex;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  overflow: hidden;
-  margin-bottom: 8px;
-}
-
-.modeBtn {
-  flex: 1;
-  padding: 8px 0;
-  background: transparent;
-  border: none;
-  color: #718096;
-  font-size: 13px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-
-  &:hover:not(.active) {
-    background: rgba(255, 255, 255, 0.04);
-    color: #a0aec0;
-  }
-
-  &.active {
-    background: rgba(99, 179, 237, 0.15);
-    color: #63b3ed;
-    font-weight: 600;
-  }
 }
 
 .modeHint {
   font-size: 11px;
   color: #4a5568;
-  margin: 0;
+  margin: 0 0 8px;
 }
 
 // ── 鼠标共享区块 ──────────────────────────────────────────────────────────────
-
-// 标题行：左侧标题 + 右侧 toggle
-.cursorHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-
-  // 消除 sectionTitle 自身的 margin-bottom（由 header 统一控制）
-  .sectionTitle {
-    margin-bottom: 0;
-  }
-}
 
 // Toggle 开关（CSS only，无第三方组件）
 .cursorToggle {
@@ -174,16 +106,11 @@
   transition: transform 0.2s, background 0.2s;
 }
 
-// 样式选择器：横向排列 6 个图标
+// 样式选择器：横向排列图标
 .cursorStylePicker {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.cursorStylePickerDisabled {
-  opacity: 0.35;
-  pointer-events: none;
 }
 
 .cursorStyleBtn {
@@ -220,64 +147,76 @@
   display: block;
 }
 
-// 绘制模式开关行
-.drawingModeRow {
+// 开关行（鼠标共享、绘制模式等统一布局）
+.toggleRow {
   display: flex;
   align-items: center;
   justify-content: space-between;
   margin-top: 10px;
 }
 
-.drawingModeRowDisabled {
-  opacity: 0.35;
-  pointer-events: none;
-}
-
-.drawingModeLabel {
+.toggleLabel {
   font-size: 12px;
   color: #a0aec0;
 }
 
-// ── 编码设置折叠区 ────────────────────────────────────────────────────────────
-
-.encodeSection {
-  padding-bottom: 0;
-  border-bottom: none;
-  margin-bottom: 0;
+// 颜色选择器行
+.drawColorPicker {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  align-items: center;
 }
 
-.encodeToggleBtn {
-  width: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: none;
-  border: none;
-  padding: 0;
+.drawColorBtn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.15);
   cursor: pointer;
-  color: #4a5568;
-  font-size: $block-title-font-size;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
+  padding: 0;
+  flex-shrink: 0;
+  transition: border-color 0.15s, transform 0.15s;
 
   &:hover {
-    color: #718096;
+    border-color: rgba(255, 255, 255, 0.5);
+    transform: scale(1.15);
   }
 }
 
-.encodeArrow {
-  font-size: 9px;
-  transition: transform 0.2s;
-  color: #4a5568;
+.drawColorBtnActive {
+  border-color: #63b3ed !important;
+  box-shadow: 0 0 0 2px rgba(99, 179, 237, 0.4);
+  transform: scale(1.15);
 }
 
-.encodeArrowOpen {
-  transform: rotate(180deg);
+// 清空画布按钮
+.clearStrokesBtn {
+  margin-top: 10px;
+  width: 100%;
+  padding: 6px 0;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 6px;
+  color: #fc8181;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+
+  &:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.16);
+    border-color: rgba(239, 68, 68, 0.5);
+  }
+
+  &:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
 }
+
+// ── 编码设置区 ────────────────────────────────────────────────────────────────
 
 .encodeContent {
-  margin-top: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -298,27 +237,6 @@
 
 .encodeLabelDisabled {
   color: #2d3748;
-}
-
-.encodeSelect {
-  flex: 1;
-  min-width: 0;
-  background: #1a202c;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 4px;
-  color: #e2e8f0;
-  font-size: 12px;
-  padding: 4px 6px;
-  cursor: pointer;
-  outline: none;
-
-  &:hover, &:focus {
-    border-color: rgba(255, 255, 255, 0.2);
-  }
-
-  option {
-    background: #1a202c;
-  }
 }
 
 .encodeValueDisabled {

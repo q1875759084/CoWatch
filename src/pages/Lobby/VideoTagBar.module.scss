@@ -1,5 +1,5 @@
 .wrapper {
-  padding: 16px 24px 8px;
+  // padding 由外层 CollapseSection.body 统一提供
   flex-shrink: 0;
 }
 
@@ -33,6 +33,7 @@
 .timeline {
   position: relative;
   height: 24px;
+  margin-top: 4px;
   margin-bottom: 14px;
   cursor: default;
 }

@@ -65,6 +65,8 @@ export type WsMessageType =
   | 'TAG_SEEK'
   | 'CURSOR_MOVE'
   | 'CURSOR_HIDE'
+  | 'DRAW_STROKE'
+  | 'DRAW_CLEAR'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -190,5 +192,32 @@ export interface CursorMoveDownData {
 
 /** 下行：服务端 → 前端，鼠标离开区域（补充 userId 后广播） */
 export interface CursorHideDownData {
+  userId: string;
+}
+
+// ─── Draw WS data 类型 ────────────────────────────────────────────────────────
+
+/**
+ * 一段笔迹：由 mousedown 开始、mouseup 结束的一组连续坐标点。
+ * 坐标 x/y 均为 0~1，相对 .playerRatio 容器的百分比，跨分辨率一致。
+ */
+export interface DrawStrokePoint {
+  x: number;
+  y: number;
+}
+
+/** 上行 & 下行：绘制一段笔迹 */
+export interface DrawStrokeData {
+  /** 绘制者 userId（下行由服务端补充） */
+  userId: string;
+  /** 笔迹颜色，如 '#ffffff'、'#000000'、'#ef4444' */
+  color: string;
+  /** 笔迹坐标序列 */
+  points: DrawStrokePoint[];
+}
+
+/** 上行 & 下行：清空画布 */
+export interface DrawClearData {
+  /** 操作者 userId（下行由服务端补充） */
   userId: string;
 }

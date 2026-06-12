@@ -2,6 +2,39 @@
 
 ## 架构决策
 
+### Canvas PainterLayer 蒙层方案（鼠标共享 + 协同绘制）
+
+**背景：** 最初用 DOM `<img>` 元素模拟他人鼠标位置，出现系统鼠标重影、跨分辨率坐标偏移、无法扩展绘制功能等问题。
+
+**结论：** 改用 Canvas 蒙层（`PainterLayer`），锚定在 `.playerRatio`（16:9 视频容器）内，`position: absolute; inset: 0`，`z-index: 100`，`pointer-events: none`。
+
+**坐标系设计：** 所有坐标统一为相对 `.playerRatio` 容器宽高的百分比（0~1），跨分辨率、跨窗口尺寸一致。`.playerRatio` 是所有客户端视觉完全一致的区域（16:9 固定比例、无黑边），Canvas 锚定于此可保证多端位置对齐。
+
+**为什么不继续用 DOM 元素：**
+- DOM 方案每个成员一个绝对定位 `<img>`，多人时有多个 DOM 节点频繁 style 更新，性能差
+- 无法扩展绘制轨迹（无法把任意路径挂到 DOM 上）
+- Canvas 单次 `clearRect + 批量绘制` 是标准的多光标/协同绘制方案（Figma、Excalidraw 均如此）
+
+**DPR 适配（Retina 清晰）：**
+```ts
+const dpr = window.devicePixelRatio || 1;
+canvas.width  = Math.round(w * dpr);  // 物理像素
+canvas.height = Math.round(h * dpr);
+canvas.style.width  = `${w}px`;       // CSS 逻辑像素（必须显式设置，否则被拉伸）
+canvas.style.height = `${h}px`;
+// 绘制时缩放到逻辑像素空间，坐标直接用 CSS px，无需手动 × dpr
+ctx.save();
+ctx.scale(dpr, dpr);
+// ... 绘制逻辑 ...
+ctx.restore();
+```
+
+**事件架构（canvas 始终穿透）：**
+- Canvas 保持 `pointer-events: none`，所有 `mousemove / mousedown / mouseup / click` 均绑在父容器（`.playerRatio`）上
+- 绘制模式下 `mousedown` 用 `{ capture: true }` 在捕获阶段拦截，防止事件穿透到 `<video>`
+
+---
+
 ### 多人视频同步方案选型
 
 **背景：** 需要多个浏览器客户端实时同步视频播放进度。
@@ -1012,6 +1045,76 @@ hls.loadSource(`/api/rooms/${roomId}/video/${videoId}/playlist.m3u8`);
 ```
 
 这样 hls.js 内部以 API URL 为 base 解析相对路径，.ts 片段的请求 URL 正确。
+
+---
+
+### `cursor: none` 无法隐藏子元素（button/input）的系统光标
+
+**现象：** 给父容器设置 `cursor: none` 后，鼠标移到播放按钮、进度条等子元素上时，手型光标重新出现。
+
+**根因：** CSS `cursor` 属性被子元素自身的 `cursor: pointer`（浏览器默认样式）覆盖。父元素的 `cursor: none` 只作用于自身，无法强制子元素继承——子元素的 `cursor` 声明优先级更高。直接写 `parent.style.cursor = 'none'` 同样不起作用，因为内联样式无法使用 `*` 选择器覆盖后代。
+
+**解决：** 使用 CSS class + `& *` 子选择器 + `!important` 强制覆盖所有后代：
+
+```scss
+.cursorHidden {
+  &,
+  & * {
+    cursor: none !important;
+  }
+}
+```
+
+通过 JS 切换 class（`classList.add/remove`）而非直接操作 `style.cursor`。
+
+---
+
+### `<video controls>` Shadow DOM 内的系统光标无法被外部 CSS 覆盖
+
+**现象：** 已给 `.playerRatio` 加了 `.cursorHidden`（`& * { cursor: none !important }`），但鼠标移到视频控制栏（播放按钮、音量键）时，手型光标依然出现。
+
+**根因：** `<video controls>` 的播放控制栏是浏览器渲染在 **Shadow DOM** 内的原生 UI，任何外部 CSS 选择器（包括 `!important`）都无法穿透 Shadow DOM 边界，UA stylesheet 里的 `cursor` 声明对这部分天然免疫。
+
+**解决：** 给 `<video>` 设置 `pointer-events: none`，让整个原生控件不响应鼠标事件，浏览器不会为"不响应鼠标的元素"显示系统光标：
+
+```tsx
+// VideoPlayer.tsx
+// cursorLocked：鼠标共享开启且非主控时为 true
+style={{ pointerEvents: (disabled || cursorLocked) ? 'none' : 'auto' }}
+```
+
+**注意：** 主控不能设 `cursorLocked=true`，否则无法操作播放/进度条。条件为 `cursorEnabled && !isController`。
+
+---
+
+### 绘制模式下单击触发视频播放
+
+**现象：** 在绘制模式中点击视频区域时，视频会播放/暂停（而非只执行绘制）。
+
+**根因：** `mousedown` 事件绑在父容器（`.playerRatio`）上，但事件的冒泡/穿透阶段 `<video>` 也能收到。浏览器把同一元素上的 `mousedown + mouseup` 组合合成 `click`，触发了视频播放/暂停。
+
+**解决：** 两道拦截，均使用 `{ capture: true }` 在捕获阶段拦截（早于子元素接收）：
+
+```ts
+// ① mousedown 捕获阶段：阻止事件到达 <video>
+const handleMouseDown = (e: MouseEvent) => {
+  if (!drawingMode || e.button !== 0) return;
+  e.preventDefault();     // 阻止默认行为（文字选中、拖拽）
+  e.stopPropagation();    // 阻止冒泡到 <video>
+  // ... 绘制逻辑
+};
+parent.addEventListener('mousedown', handleMouseDown, { capture: true });
+
+// ② click 捕获阶段：兜底拦截（防止其他路径生成的 click）
+const handleClick = (e: MouseEvent) => {
+  if (!drawingMode) return;
+  e.preventDefault();
+  e.stopPropagation();
+};
+parent.addEventListener('click', handleClick, { capture: true });
+```
+
+两道拦截均只在 `drawingMode=true` 时生效，关闭绘制模式后视频控件恢复正常交互。
 
 ---
 

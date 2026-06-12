@@ -21,7 +21,7 @@
 |------|------|------|
 | 登录/注册 | `/auth` | 账号注册与登录 |
 | Dashboard | `/` | 我的房间列表、创建/加入房间入口 |
-| 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 + 进度条 Tag 标注（主控在时间轴打标注，点击跳转并同步给所有成员） |
+| 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 + 进度条 Tag 标注（主控在时间轴打标注，点击跳转并同步给所有成员）+ 鼠标共享（Canvas PainterLayer 蒙层，多端实时同步光标位置）+ 协同绘制（绘制模式下按住左键画笔迹，WS 广播同步，支持黑/白/红三色，清空画布） |
 
 ### 技术栈
 
@@ -48,7 +48,7 @@
   - **后端返回非 JSON 数据（如 Blob 文件下载）**：业务拦截器会对 `response.data.code` 做校验，Blob 响应无该字段会被误判失败，改用原生 `axios.get`
 - OSS 预签名直传用 XHR（不能带自定义 Authorization），后端接口上传用 `request.put` + `onUploadProgress`
 - `__dirname` 在 `tsx` 直接运行时指向源文件目录（`src/`），路径层级与编译后运行不同，写静态文件路径时需注意
-- WebSocket 消息类型定义在 `src/types/room.ts`，增加新消息类型时前后端同步更新
+- WebSocket 消息类型定义在 `src/types/room.ts`，增加新消息类型时前后端同步更新；当前已有类型含 `DRAW_STROKE`（笔迹广播，含 `userId`、`color`、`points[]`）和 `DRAW_CLEAR`（清空画布），后端纯内存转发不落库
 - SQLite schema 新增字段时，`CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，需手动执行 `ALTER TABLE ... ADD COLUMN` 迁移旧数据库文件
 - 视频上传前在前端做两层校验（`src/utils/validateVideo.ts`）：① 读文件头 32KB 扫描 moov/mdat 顺序（moov 必须在 mdat 之前）；② 用临时 `<video>` 获取时长后计算平均码率（当前上限 8 Mbps，对应 CRF 28）；失败时用 antd `Modal.error()` 弹窗告知用户
 - 视频上传链路按白名单分流：白名单用户（`users.is_upload_whitelist = 1`）走 OSS 直传（`getUploadUrl` 返回预签名 URL，`mode` 为空）；非白名单用户走后端代理中转（返回 `mode: 'proxy'`，前端 POST 到 `/upload-proxy`，后端流式 putStream 到 OSS）

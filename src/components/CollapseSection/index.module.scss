@@ -9,20 +9,24 @@
   }
 }
 
-// 标题行（点击区域）
+// 标题行（button = 可折叠模式，div = 普通容器模式）
 .header {
   width: 100%;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 14px 24px;
+  padding: 12px 12px 8px;
   background: none;
   border: none;
-  cursor: pointer;
   color: inherit;
 
-  &:hover .title {
-    color: #a0aec0;
+  // 仅可折叠模式（button）有点击交互
+  &:is(button) {
+    cursor: pointer;
+
+    &:hover .title {
+      color: #a0aec0;
+    }
   }
 }
 
@@ -33,7 +37,7 @@
 }
 
 .title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   color: #718096;
   text-transform: uppercase;
@@ -63,7 +67,7 @@
   transform: rotate(180deg);
 }
 
-// 展开内容区：padding 由子组件自身决定，这里只做底部留白
+// 展开内容区：左右与 header 对齐，底部留白
 .body {
-  padding-bottom: 16px;
+  padding: 0 12px 12px;
 }

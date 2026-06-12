@@ -2,12 +2,20 @@ import { useState } from 'react';
 import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
 import MemberList from '@/components/MemberList';
+import CollapseSection from '@/components/CollapseSection';
 import { downloadBatApi } from '@/api/room';
 import { CURSOR_STYLES } from './cursorStyles';
 import styles from './ControlPanel.module.scss';
 
 /** 固定使用 CRF 30 档位 */
 const ENCODE_PRESET = '30' as const;
+
+/** 绘制模式可选颜色 */
+const DRAW_COLORS = [
+  { color: '#ffffff', label: '白色' },
+  { color: '#000000', label: '黑色' },
+  { color: '#ef4444', label: '红色' },
+] as const;
 
 interface ControlPanelProps {
   roomId: string;
@@ -20,11 +28,19 @@ interface ControlPanelProps {
   cursorEnabled: boolean;
   /** 当前选中的光标样式 ID */
   selectedStyleId: string;
-  /** 是否处于绘制模式（仅在 cursorEnabled=true 时可用） */
+  /** 虚拟光标样式是否已激活（本地渲染 canvas 光标，与共享/绘制无关） */
+  cursorStyleActive: boolean;
+  /** 是否处于绘制模式 */
   drawingMode: boolean;
+  /** 当前画笔颜色（仅在 drawingMode=true 时有意义） */
+  drawColor: string;
   onCursorToggle: () => void;
-  onStyleChange: (styleId: string) => void;
+  /** 点击样式图标时回调：已激活且点击同一项 = 反选关闭；其他 = 激活 + 切换样式 */
+  onCursorStyleSelect: (styleId: string) => void;
   onDrawingModeToggle: () => void;
+  onDrawColorChange: (color: string) => void;
+  /** 清空画布（广播给所有人） */
+  onClearStrokes: () => void;
 }
 
 export default function ControlPanel({
@@ -36,10 +52,14 @@ export default function ControlPanel({
   onTransferControl,
   cursorEnabled,
   selectedStyleId,
+  cursorStyleActive,
   drawingMode,
+  drawColor,
   onCursorToggle,
-  onStyleChange,
+  onCursorStyleSelect,
   onDrawingModeToggle,
+  onDrawColorChange,
+  onClearStrokes,
 }: ControlPanelProps) {
   const controller = members.find((m) => m.userId === controllerId);
 
@@ -51,8 +71,6 @@ export default function ControlPanel({
     });
   });
 
-  // 编码设置折叠区状态
-  const [encodeExpanded, setEncodeExpanded] = useState(false);
   const { loading: downloading, run: handleDownloadBat } = useRequest(
     () => downloadBatApi(ENCODE_PRESET),
     { manual: true },
@@ -61,8 +79,7 @@ export default function ControlPanel({
   return (
     <div className={styles.panel}>
       {/* Room ID */}
-      <section className={styles.section}>
-        <h3 className={styles.sectionTitle}>Room ID</h3>
+      <CollapseSection title="Room ID">
         <div className={styles.roomIdRow}>
           <span className={styles.roomIdText}>{roomId}</span>
           <button
@@ -75,11 +92,10 @@ export default function ControlPanel({
           </button>
         </div>
         {roomName && <div className={styles.roomNameHint}>{roomName}</div>}
-      </section>
+      </CollapseSection>
 
-      {/* 当前控制状态 */}
-      <section className={styles.section}>
-        <h3 className={styles.sectionTitle}>控制权</h3>
+      {/* 控制权 */}
+      <CollapseSection title="控制权">
         {isAdmin && (
           <p className={styles.modeHint}>点击成员名称可指定其为控制者</p>
         )}
@@ -88,13 +104,33 @@ export default function ControlPanel({
             {controller ? controller.nickname : '无'} 正在控制
           </span>
         </div>
-      </section>
+      </CollapseSection>
 
-      {/* 鼠标共享 */}
-      <section className={styles.section}>
-        <div className={styles.cursorHeader}>
-          <h3 className={styles.sectionTitle}>鼠标共享</h3>
-          {/* Toggle 开关 */}
+      {/* 鼠标设置 */}
+      <CollapseSection title="鼠标设置" collapsible>
+        {/* 样式选择器 — 始终可点击，不依赖任何开关。
+             选中项 = cursorStyleActive=true 且 id 匹配；再点同一项则反选关闭虚拟光标 */}
+        <div className={styles.cursorStylePicker}>
+          {CURSOR_STYLES.map((cs) => {
+            const isActive = cursorStyleActive && selectedStyleId === cs.id;
+            return (
+              <button
+                key={cs.id}
+                type="button"
+                title={isActive ? `${cs.label}（点击取消）` : cs.label}
+                className={`${styles.cursorStyleBtn} ${isActive ? styles.cursorStyleBtnActive : ''}`}
+                style={isActive ? { borderColor: cs.color, boxShadow: `0 0 0 2px ${cs.color}40` } : {}}
+                onClick={() => onCursorStyleSelect(cs.id)}
+              >
+                <img src={cs.url} alt={cs.label} className={styles.cursorStyleIcon} draggable={false} />
+              </button>
+            );
+          })}
+        </div>
+
+        {/* 鼠标共享开关 */}
+        <div className={styles.toggleRow}>
+          <span className={styles.toggleLabel}>🖱️ 鼠标共享</span>
           <button
             type="button"
             className={`${styles.cursorToggle} ${cursorEnabled ? styles.cursorToggleOn : ''}`}
@@ -105,107 +141,84 @@ export default function ControlPanel({
           </button>
         </div>
 
-        {/* 样式选择器 */}
-        <div className={`${styles.cursorStylePicker} ${!cursorEnabled ? styles.cursorStylePickerDisabled : ''}`}>
-          {CURSOR_STYLES.map((cs) => (
-            <button
-              key={cs.id}
-              type="button"
-              title={cs.label}
-              disabled={!cursorEnabled}
-              className={`${styles.cursorStyleBtn} ${selectedStyleId === cs.id ? styles.cursorStyleBtnActive : ''}`}
-              style={selectedStyleId === cs.id ? { borderColor: cs.color, boxShadow: `0 0 0 2px ${cs.color}40` } : {}}
-              onClick={() => onStyleChange(cs.id)}
-            >
-              <img src={cs.url} alt={cs.label} className={styles.cursorStyleIcon} draggable={false} />
-            </button>
-          ))}
-        </div>
-
-        {/* 绘制模式开关（仅在开启鼠标共享时可用） */}
-        <div className={`${styles.drawingModeRow} ${!cursorEnabled ? styles.drawingModeRowDisabled : ''}`}>
-          <span className={styles.drawingModeLabel}>✒️ 绘制模式</span>
+        {/* 绘制模式开关 */}
+        <div className={styles.toggleRow}>
+          <span className={styles.toggleLabel}>✒️ 绘制模式</span>
           <button
             type="button"
-            className={`${styles.cursorToggle} ${drawingMode && cursorEnabled ? styles.cursorToggleOn : ''}`}
+            className={`${styles.cursorToggle} ${drawingMode ? styles.cursorToggleOn : ''}`}
             onClick={onDrawingModeToggle}
-            disabled={!cursorEnabled}
             title={drawingMode ? '退出绘制模式' : '进入绘制模式'}
           >
             <span className={styles.cursorToggleThumb} />
           </button>
         </div>
-      </section>
+
+        {/* 颜色选择器 — 仅在绘制模式开启时显示 */}
+        {drawingMode && (
+          <div className={styles.drawColorPicker}>
+            {DRAW_COLORS.map(({ color, label }) => (
+              <button
+                key={color}
+                type="button"
+                title={label}
+                className={`${styles.drawColorBtn} ${drawColor === color ? styles.drawColorBtnActive : ''}`}
+                style={{ background: color }}
+                onClick={() => onDrawColorChange(color)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* 清空画布 */}
+        <button
+          type="button"
+          className={styles.clearStrokesBtn}
+          onClick={onClearStrokes}
+          title="清空所有人的画布笔迹"
+        >
+          清空画布
+        </button>
+      </CollapseSection>
 
       {/* 成员列表 */}
-      <section className={styles.section}>
-        <h3 className={styles.sectionTitle}>成员</h3>
+      <CollapseSection title="成员" collapsible>
         <MemberList
           members={members}
           controllerId={controllerId}
           isAdmin={isAdmin}
           onSelectController={onTransferControl}
         />
-      </section>
+      </CollapseSection>
 
-      {/* 编码设置折叠区 */}
-      <section className={`${styles.section} ${styles.encodeSection}`}>
-        <button
-          type="button"
-          className={styles.encodeToggleBtn}
-          onClick={() => setEncodeExpanded((v) => !v)}
-        >
-          <span>编码设置</span>
-          <span className={`${styles.encodeArrow} ${encodeExpanded ? styles.encodeArrowOpen : ''}`}>▼</span>
-        </button>
-
-        {encodeExpanded && (
-          <div className={styles.encodeContent}>
-            {/* 画质档位（固定 CRF 30，不可更改） */}
-            <div className={styles.encodeRow}>
-              <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>
-                画质档位
-              </label>
-              <span className={styles.encodeValueDisabled}>
-                CRF 30
-              </span>
-            </div>
-
-            {/* 分辨率（置灰，二期开放） */}
-            <div className={styles.encodeRow}>
-              <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>
-                分辨率
-              </label>
-              <span className={styles.encodeValueDisabled} title="二期开放">
-                1080p
-              </span>
-            </div>
-
-            {/* 帧率（置灰，二期开放） */}
-            <div className={styles.encodeRow}>
-              <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>
-                帧率
-              </label>
-              <span className={styles.encodeValueDisabled} title="二期开放">
-                60fps
-              </span>
-            </div>
-
-            {/* 下载按钮 */}
-            <button
-              type="button"
-              className={styles.downloadBatBtn}
-              onClick={() => void handleDownloadBat()}
-              disabled={downloading}
-            >
-              {downloading ? '下载中...' : '⬇ 下载转码脚本'}
-            </button>
-            <p className={styles.encodeHint}>
-              将录屏拖拽到脚本上即可完成转码，需提前安装 ffmpeg
-            </p>
+      {/* 编码设置 — 可折叠，默认收起 */}
+      <CollapseSection title="编码设置" collapsible defaultOpen={false}>
+        <div className={styles.encodeContent}>
+          <div className={styles.encodeRow}>
+            <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>画质档位</label>
+            <span className={styles.encodeValueDisabled}>CRF 30</span>
           </div>
-        )}
-      </section>
+          <div className={styles.encodeRow}>
+            <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>分辨率</label>
+            <span className={styles.encodeValueDisabled} title="二期开放">1080p</span>
+          </div>
+          <div className={styles.encodeRow}>
+            <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>帧率</label>
+            <span className={styles.encodeValueDisabled} title="二期开放">60fps</span>
+          </div>
+          <button
+            type="button"
+            className={styles.downloadBatBtn}
+            onClick={() => void handleDownloadBat()}
+            disabled={downloading}
+          >
+            {downloading ? '下载中...' : '⬇ 下载转码脚本'}
+          </button>
+          <p className={styles.encodeHint}>
+            将录屏拖拽到脚本上即可完成转码，需提前安装 ffmpeg
+          </p>
+        </div>
+      </CollapseSection>
     </div>
   );
 }

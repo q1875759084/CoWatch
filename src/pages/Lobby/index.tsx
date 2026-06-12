@@ -6,7 +6,7 @@ import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
 import { getRoomInfoApi, getVideosApi, getTagsApi } from '@/api/room';
-import type { Tag, CursorMoveDownData } from '@/types/room';
+import type { Tag, CursorMoveDownData, DrawStrokeData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
@@ -17,33 +17,13 @@ import VideoTagBar from './VideoTagBar';
 import PainterLayer, {
   type CursorState,
   type PainterLayerHandle,
+  type StrokeRecord,
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './cursorStyles';
 import styles from './index.module.scss';
 
-// localStorage 持久化 key
-const LS_CURSOR_ENABLED = 'cowatch_cursor_enabled';
-const LS_CURSOR_STYLE   = 'cowatch_cursor_style';
-
-/** 从 localStorage 读取布尔值，缺省返回 defaultVal */
-function readLsBool(key: string, defaultVal: boolean): boolean {
-  try {
-    const v = localStorage.getItem(key);
-    if (v === null) return defaultVal;
-    return v === 'true';
-  } catch {
-    return defaultVal;
-  }
-}
-
-/** 从 localStorage 读取字符串，缺省返回 defaultVal */
-function readLsStr(key: string, defaultVal: string): string {
-  try {
-    return localStorage.getItem(key) ?? defaultVal;
-  } catch {
-    return defaultVal;
-  }
-}
+/** 默认画笔颜色 */
+const DEFAULT_DRAW_COLOR = '#ffffff';
 
 /**
  * SYNC_PROGRESS 兜底纠偏阈值（秒）。
@@ -58,8 +38,6 @@ function readLsStr(key: string, defaultVal: string): string {
  */
 const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
 
-/** 淡出动画总时长（ms） */
-const FADE_OUT_DURATION = 300;
 
 export default function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -107,18 +85,23 @@ export default function RoomPage() {
   const [lastVideoAddedName, setLastVideoAddedName] = useState<string | undefined>(undefined);
 
   // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
-  /** 是否开启鼠标共享（是否发送自己的位置），从 localStorage 初始化 */
-  const [cursorEnabled, setCursorEnabled] = useState(() => readLsBool(LS_CURSOR_ENABLED, false));
-  /** 当前选中的光标样式 ID，从 localStorage 初始化 */
-  const [selectedStyleId, setSelectedStyleId] = useState(() => readLsStr(LS_CURSOR_STYLE, DEFAULT_STYLE_ID));
+  /** 是否开启鼠标共享（是否发送自己的位置） */
+  const [cursorEnabled, setCursorEnabled] = useState(false);
+  /** 当前选中的光标样式 ID */
+  const [selectedStyleId, setSelectedStyleId] = useState(DEFAULT_STYLE_ID);
   /**
-   * 是否处于绘制模式。
-   * - false（默认）：仅共享鼠标位置，视频播放器可正常操作
-   * - true：电画笔 cursor，未来支持局部绘制轨迹共享
-   * 必须在 cursorEnabled=true 时才有意义。
+   * 是否已激活虚拟光标样式（用户主动点击了某个样式，隐藏系统光标，本地渲染 canvas 虚拟光标）。
+   * 独立于 cursorEnabled（WS 广播）和 drawingMode（绘制）。
+   */
+  const [cursorStyleActive, setCursorStyleActive] = useState(false);
+  /**
+   * 是否处于绘制模式。独立于鼠标共享（cursorEnabled），两者互不依赖。
+   * - false（默认）：视频播放器可正常操作
+   * - true：在视频区按住左键拖动发送笔迹 WS，同时拦截 click 防止触发播放
    */
   const [drawingMode, setDrawingMode] = useState(false);
-
+  /** 当前画笔颜色 */
+  const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
   /**
    * 所有光标的状态 Map（含自己 + 远端）。
    * key：userId（自己用 userInfo.userId）。
@@ -321,7 +304,6 @@ export default function RoomPage() {
   const handleCursorToggle = useMemoizedFn(() => {
     setCursorEnabled((prev) => {
       const next = !prev;
-      try { localStorage.setItem(LS_CURSOR_ENABLED, String(next)); } catch { /* ignore */ }
       // 关闭时清空所有光标并重绘
       if (!next) {
         cursorsRef.current.clear();
@@ -331,13 +313,63 @@ export default function RoomPage() {
     });
   });
 
-  const handleStyleChange = useMemoizedFn((styleId: string) => {
-    setSelectedStyleId(styleId);
-    try { localStorage.setItem(LS_CURSOR_STYLE, styleId); } catch { /* ignore */ }
+  /**
+   * 点击光标样式时切换激活状态：
+   *   - 点击当前未激活时 → 激活，同时更换样式
+   *   - 点击已激活的样式 → 反选，取消虚拟光标（恢复系统默认光标）
+   * 即：首次点任意样式 = 切换样式 + 开起虚拟光标；再点同一个 = 关闭虚拟光标。
+   */
+  const handleCursorStyleSelect = useMemoizedFn((styleId: string) => {
+    if (cursorStyleActive && styleId === selectedStyleId) {
+      // 点击已选中项：反选，关闭虚拟光标
+      setCursorStyleActive(false);
+      // 虚拟光标关闭，从 Map 中移除自己的光标条目
+      const uid = userInfo?.userId ?? '__self__';
+      cursorsRef.current.delete(uid);
+      painterRef.current?.redraw();
+    } else {
+      // 点击新样式（或未激活时点击任意样式）：激活虚拟光标 + 更换样式
+      setSelectedStyleId(styleId);
+      setCursorStyleActive(true);
+    }
   });
 
   const handleDrawingModeToggle = useMemoizedFn(() => {
     setDrawingMode((prev) => !prev);
+  });
+
+  /**
+   * 本地绘制完一笔（mouseup）后回调：通过 WS 广播给其他成员。
+   * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
+   */
+  const handleStrokeComplete = useMemoizedFn((stroke: StrokeRecord) => {
+    sendMessageRef.current?.('DRAW_STROKE', {
+      color: stroke.color,
+      points: stroke.points,
+    });
+  });
+
+  /**
+   * 用户点击「清空画布」时回调：本地清空 + WS 广播。
+   * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
+   */
+  const handleClearStrokes = useMemoizedFn(() => {
+    painterRef.current?.clearStrokes();
+    sendMessageRef.current?.('DRAW_CLEAR', {});
+  });
+
+  /**
+   * 收到远端 DRAW_STROKE：将笔迹添加到 PainterLayer。
+   */
+  const handleDrawStroke = useMemoizedFn((data: DrawStrokeData) => {
+    painterRef.current?.addStroke({ color: data.color, points: data.points });
+  });
+
+  /**
+   * 收到远端 DRAW_CLEAR：清空画布。
+   */
+  const handleDrawClear = useMemoizedFn(() => {
+    painterRef.current?.clearStrokes();
   });
 
   /**
@@ -351,40 +383,14 @@ export default function RoomPage() {
       x: data.x,
       y: data.y,
       styleId: data.styleId,
-      opacity: 1,
     });
     painterRef.current?.redraw();
   });
 
-  /**
-   * 收到远端 CURSOR_HIDE 广播（或本地鼠标离开区域）：
-   * 启动 rAF 淡出动画，opacity 300ms 内递减到 0 后从 Map 移除。
-   */
+  /** 收到远端 CURSOR_HIDE 广播（或本地鼠标离开区域）：立即从 Map 移除并重绘。 */
   const handleCursorHide = useMemoizedFn((userId: string) => {
-    const cursor = cursorsRef.current.get(userId);
-    if (!cursor) return;
-
-    const startTime = performance.now();
-    const startOpacity = cursor.opacity;
-
-    function fade() {
-      const elapsed = performance.now() - startTime;
-      const progress = Math.min(elapsed / FADE_OUT_DURATION, 1);
-      const newOpacity = startOpacity * (1 - progress);
-
-      const current = cursorsRef.current.get(userId);
-      if (!current) return; // 已被移除，停止动画
-
-      if (progress >= 1) {
-        cursorsRef.current.delete(userId);
-      } else {
-        cursorsRef.current.set(userId, { ...current, opacity: newOpacity });
-        requestAnimationFrame(fade);
-      }
-      painterRef.current?.redraw();
-    }
-
-    requestAnimationFrame(fade);
+    cursorsRef.current.delete(userId);
+    painterRef.current?.redraw();
   });
 
   /**
@@ -399,7 +405,16 @@ export default function RoomPage() {
     // 更新自己的光标（不走 setState，直接写 ref，避免 re-render）
     const existing = cursorsRef.current.get(uid);
     if (existing) {
-      cursorsRef.current.set(uid, { ...existing, x, y, opacity: 1 });
+      cursorsRef.current.set(uid, { ...existing, x, y });
+    } else if (cursorStyleActive) {
+      // enter 时没有已有条目（首次进入或淡出动画已 delete），在真实坐标处插入
+      cursorsRef.current.set(uid, {
+        userId: uid,
+        nickname: userInfo?.nickname ?? '',
+        x,
+        y,
+        styleId: selectedStyleId,
+      });
     }
     painterRef.current?.redraw();
 
@@ -407,30 +422,6 @@ export default function RoomPage() {
     if (cursorEnabled) {
       sendMessageRef.current?.('CURSOR_MOVE', { x, y, styleId: selectedStyleId });
     }
-  });
-
-  /**
-   * PainterLayer 回调：鼠标进入 .main。
-   * 将自己的光标插入 Map（opacity=1），触发重绘。
-   */
-  const handleSelfCursorEnter = useMemoizedFn(() => {
-    if (!cursorEnabled) return;
-    const uid = userInfo?.userId ?? '__self__';
-    const nickname = userInfo?.nickname ?? '';
-    const existing = cursorsRef.current.get(uid);
-    if (!existing) {
-      cursorsRef.current.set(uid, {
-        userId: uid,
-        nickname,
-        x: 0,
-        y: 0,
-        styleId: selectedStyleId,
-        opacity: 1,
-      });
-    } else {
-      cursorsRef.current.set(uid, { ...existing, opacity: 1 });
-    }
-    painterRef.current?.redraw();
   });
 
   /**
@@ -468,6 +459,8 @@ export default function RoomPage() {
     onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
     onCursorMove: handleCursorMove,
     onCursorHide: handleCursorHide,
+    onDrawStroke: handleDrawStroke,
+    onDrawClear: handleDrawClear,
   });
 
   // 将最新 sendMessage 同步到 ref，供节流函数闭包读取
@@ -520,96 +513,89 @@ export default function RoomPage() {
       <div className={styles.content}>
         {/* 左侧主内容区 */}
         <main className={styles.main}>
-          {/* 播放器区域 */}
-          <div className={styles.playerArea}>
-            {/*
-             * .playerRatio 是 16:9 固定比例容器，是所有客户端视觉内容完全一致的区域。
-             * PainterLayer 锚定在此容器内：
-             * - 坐标比例 = 相对 .playerRatio 宽高，不受窗口高度/折叠区域影响
-             * - 出了视频区鼠标自动恢复默认样式，tag区/上传区不受影响
-             */}
-            <div className={styles.playerRatio}>
-              <PainterLayer
-                ref={painterRef}
-                enabled={cursorEnabled}
-                drawingMode={drawingMode}
-                styleId={selectedStyleId}
-                nickname={userInfo?.nickname ?? ''}
-                userId={userInfo?.userId ?? ''}
-                cursors={cursorsRef.current}
-                onCursorMove={handleSelfCursorMove}
-                onCursorEnter={handleSelfCursorEnter}
-                onCursorLeave={handleSelfCursorLeave}
+                        {/* 视频列表 */}
+          <CollapseSection
+            title="视频列表"
+            badge={roomState.videos.length > 0 ? roomState.videos.length : undefined}
+            collapsible
+            defaultOpen={true}
+          >
+            <VideoList
+              videos={roomState.videos}
+              activeObjectKey={activeObjectKey}
+              isController={isController}
+              onPlay={handlePlayVideo}
+            />
+          </CollapseSection>
+          {/*
+           * .playerRatio 是 16:9 固定比例容器，是所有客户端视觉内容完全一致的区域。
+           * PainterLayer 锚定在此容器内：
+           * - 坐标比例 = 相对 .playerRatio 宽高，不受窗口高度/折叠区域影响
+           * - 出了视频区鼠标自动恢复默认样式，tag区/上传区不受影响
+           */}
+          <div className={styles.playerRatio}>
+            <PainterLayer
+              ref={painterRef}
+              cursorStyleActive={cursorStyleActive}
+              enabled={cursorEnabled}
+              drawingMode={drawingMode}
+              cursors={cursorsRef.current}
+              drawColor={drawColor}
+              onCursorMove={handleSelfCursorMove}
+              // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
+              onCursorEnter={() => { /* no-op */ }}
+              onCursorLeave={handleSelfCursorLeave}
+              onStrokeComplete={handleStrokeComplete}
+            />
+            {roomState.activeVideoUrl ? (
+              <VideoPlayer
+                ref={setVideoRef}
+                src={roomState.activeVideoUrl}
+                disabled={!isController}
+                cursorLocked={cursorEnabled && !isController}
+                onProgressChange={(currentTime) => {
+                  sendMessage('SYNC_PROGRESS', { currentTime });
+                }}
+                onPlayStateChange={(isPlaying, currentTime) => {
+                  sendMessage('SYNC_STATE', { isPlaying, currentTime });
+                }}
+                onDurationChange={setDuration}
               />
-              {roomState.activeVideoUrl ? (
-                <VideoPlayer
-                  ref={setVideoRef}
-                  src={roomState.activeVideoUrl}
-                  disabled={!isController}
-                  cursorLocked={cursorEnabled && !isController}
-                  onProgressChange={(currentTime) => {
-                    sendMessage('SYNC_PROGRESS', { currentTime });
-                  }}
-                  onPlayStateChange={(isPlaying, currentTime) => {
-                    sendMessage('SYNC_STATE', { isPlaying, currentTime });
-                  }}
-                  onDurationChange={setDuration}
-                />
-              ) : (
-                <div className={styles.noVideo}>
-                  <span className={styles.noVideoIcon}>🎬</span>
-                  <p>从下方选择或上传视频开始复盘</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 中间可折叠区域 */}
-          <div className={styles.collapsibleArea}>
-            {/* 时间标记（有激活视频时显示） */}
-            {roomState.activeVideoUrl && (
-              <CollapseSection
-                title="时间标记"
-                badge={tags.length > 0 ? tags.length : undefined}
-              >
-                <VideoTagBar
-                  tags={tags}
-                  duration={duration}
-                  isController={isController}
-                  activeVideoId={activeVideoId}
-                  onAdd={handleTagAdd}
-                  onDelete={handleTagDelete}
-                  onSeek={handleTagSeek}
-                />
-              </CollapseSection>
+            ) : (
+              <div className={styles.noVideo}>
+                <span className={styles.noVideoIcon}>🎬</span>
+                <p>从下方选择或上传视频开始复盘</p>
+              </div>
             )}
-
-            {/* 上传区（全员可见；空闲态下仅主控可操作） */}
-            <CollapseSection title="上传视频" defaultOpen={true}>
-              <div className={styles.uploaderInner}>
-                <VideoUploader
-                  roomId={roomId!}
-                  isController={isController}
-                  lastVideoAddedName={lastVideoAddedName}
-                />
-              </div>
-            </CollapseSection>
-
-            {/* 视频列表 */}
-            <CollapseSection
-              title="视频列表"
-              badge={roomState.videos.length > 0 ? roomState.videos.length : undefined}
-            >
-              <div className={styles.videoListInner}>
-                <VideoList
-                  videos={roomState.videos}
-                  activeObjectKey={activeObjectKey}
-                  isController={isController}
-                  onPlay={handlePlayVideo}
-                />
-              </div>
-            </CollapseSection>
           </div>
+
+          {/* 时间标记（有激活视频时显示） */}
+          {roomState.activeVideoUrl && (
+            <CollapseSection
+              title="时间标记"
+              badge={tags.length > 0 ? tags.length : undefined}
+              collapsible
+            >
+              <VideoTagBar
+                tags={tags}
+                duration={duration}
+                isController={isController}
+                activeVideoId={activeVideoId}
+                onAdd={handleTagAdd}
+                onDelete={handleTagDelete}
+                onSeek={handleTagSeek}
+              />
+            </CollapseSection>
+          )}
+
+          {/* 上传区（全员可见；空闲态下仅主控可操作） */}
+          <CollapseSection title="上传视频">
+            <VideoUploader
+              roomId={roomId!}
+              isController={isController}
+              lastVideoAddedName={lastVideoAddedName}
+            />
+          </CollapseSection>
         </main>
 
         {/* 右侧控制面板 */}
@@ -625,10 +611,14 @@ export default function RoomPage() {
             }}
             cursorEnabled={cursorEnabled}
             selectedStyleId={selectedStyleId}
+            cursorStyleActive={cursorStyleActive}
             drawingMode={drawingMode}
+            drawColor={drawColor}
             onCursorToggle={handleCursorToggle}
-            onStyleChange={handleStyleChange}
+            onCursorStyleSelect={handleCursorStyleSelect}
             onDrawingModeToggle={handleDrawingModeToggle}
+            onDrawColorChange={setDrawColor}
+            onClearStrokes={handleClearStrokes}
           />
         </aside>
       </div>
