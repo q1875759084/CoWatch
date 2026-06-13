@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Modal } from 'antd';
 import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
 import MemberList from '@/components/MemberList';
@@ -82,6 +83,29 @@ export default function ControlPanel({
     () => downloadBatApi(ENCODE_PRESET),
     { manual: true },
   );
+
+  const handleDownloadBatWithConfirm = useMemoizedFn(() => {
+    Modal.confirm({
+      title: '使用说明（我知道样式很丑，你先别急，内测阶段呢，搞不过来了！）',
+      content: (
+        <div style={{ lineHeight: 1.8 }}>
+          <p style={{ margin: '0 0 8px' }}>
+            1. 下载脚本后，将录屏文件<strong>直接拖拽到 .bat 文件上</strong>即可开始转码
+            <br />
+            <span style={{ color: '#8c8c8c', fontSize: 12 }}>（请勿直接双击打开脚本）</span>
+          </p>
+          <p style={{ margin: 0 }}>
+            2. 首次使用会自动下载转码工具（约 130 MB），耗时 10～20 秒
+            <br />
+            <span style={{ color: '#8c8c8c', fontSize: 12 }}>下载完成后无需重复安装</span>
+          </p>
+        </div>
+      ),
+      okText: '下载脚本',
+      cancelText: '取消',
+      onOk: () => void handleDownloadBat(),
+    });
+  });
 
   return (
     <div className={styles.panel}>
@@ -225,14 +249,11 @@ export default function ControlPanel({
           <button
             type="button"
             className={styles.downloadBatBtn}
-            onClick={() => void handleDownloadBat()}
+            onClick={handleDownloadBatWithConfirm}
             disabled={downloading}
           >
             {downloading ? '下载中...' : '⬇ 下载转码脚本'}
           </button>
-          <p className={styles.encodeHint}>
-            将录屏拖拽到脚本上即可完成转码，需提前安装 ffmpeg
-          </p>
         </div>
       </CollapseSection>
     </div>
