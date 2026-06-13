@@ -4,8 +4,6 @@ import styles from './index.module.scss';
 interface CollapseSectionProps {
   /** 标题文字 */
   title: ReactNode;
-  /** 标题右侧额外内容（如数量徽标） */
-  badge?: ReactNode;
   /**
    * 是否可折叠。
    * - true：标题行可点击展开/折叠，右侧显示 ▼ 箭头
@@ -28,7 +26,6 @@ interface CollapseSectionProps {
  */
 export default function CollapseSection({
   title,
-  badge,
   collapsible = false,
   defaultOpen = true,
   children,
@@ -38,7 +35,6 @@ export default function CollapseSection({
   const titleContent = (
     <span className={styles.titleRow}>
       <span className={styles.title}>{title}</span>
-      {badge != null && <span className={styles.badge}>{badge}</span>}
     </span>
   );
 

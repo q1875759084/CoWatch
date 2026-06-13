@@ -3,7 +3,7 @@ name: /spec-quick
 description: 从功能想法出发，通过追问澄清 → 生成 design.md + tasks.md → 逐文件实现代码
 ---
 
-# CarryHub Spec Quick 流程
+# CoWatch Spec Quick 流程
 
 ## 基本原则
 

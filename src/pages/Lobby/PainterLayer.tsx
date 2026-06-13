@@ -34,6 +34,8 @@ export interface PainterLayerHandle {
   addStroke: (stroke: StrokeRecord) => void;
   /** 清空所有笔迹 */
   clearStrokes: () => void;
+  /** 清除指定颜色的所有笔迹 */
+  clearStrokesByColor: (color: string) => void;
 }
 
 interface PainterLayerProps {
@@ -86,7 +88,7 @@ function getOrLoadImg(url: string): HTMLImageElement {
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
 /** 光标图标渲染尺寸（CSS px）：对齐系统鼠标视觉大小，不随分辨率变化 */
-const ICON_SIZE = 20;
+const ICON_SIZE = 28;
 /** 画笔线宽（CSS px） */
 const STROKE_WIDTH = 3;
 
@@ -214,6 +216,10 @@ const PainterLayer = forwardRef<PainterLayerHandle, PainterLayerProps>(
       clearStrokes: () => {
         strokesRef.current = [];
         currentStrokeRef.current = null;
+        scheduleRedraw();
+      },
+      clearStrokesByColor: (color: string) => {
+        strokesRef.current = strokesRef.current.filter((s) => s.color !== color);
         scheduleRedraw();
       },
     }), [scheduleRedraw]);

@@ -15,11 +15,14 @@ import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import VideoTagBar from './VideoTagBar';
 import PainterLayer, {
-  type CursorState,
-  type PainterLayerHandle,
-  type StrokeRecord,
+    type CursorState,
+    type PainterLayerHandle,
+    type StrokeRecord,
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './cursorStyles';
+import NotePanel from './NotePanel';
+import iconLeft from '@/assets/icon/dark/left.svg';
+import iconRight from '@/assets/icon/dark/right.svg';
 import styles from './index.module.scss';
 
 /** 默认画笔颜色 */
@@ -40,586 +43,674 @@ const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
 
 
 export default function RoomPage() {
-  const { roomId } = useParams<{ roomId: string }>();
-  const { userInfo } = useUser();
-  const { roomState, initRoom, setActiveVideoUrl } = useRoom();
-  /**
-   * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
-   * 用于 VideoList 高亮当前播放项，以及切换视频时发送 SWITCH_VIDEO WS 消息
-   */
-  const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
+    const { roomId } = useParams<{ roomId: string }>();
+    const { userInfo } = useUser();
+    const { roomState, initRoom, setActiveVideoUrl } = useRoom();
+    /**
+     * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
+     * 用于 VideoList 高亮当前播放项，以及切换视频时发送 SWITCH_VIDEO WS 消息
+     */
+    const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
 
-  /**
-   * 暂存 ROOM_STATE 下发的播放初始化参数。
-   * ROOM_STATE（WS）和 HTTP 初始化是并行的异步路径，VideoPlayer 挂载时机不确定；
-   * 用 ref 暂存，在 VideoPlayer 挂载时（callback ref 触发）立即消费。
-   */
-  const pendingInitRef = useRef<{ isPlaying: boolean; currentTime: number } | null>(null);
-  /**
-   * 暂存 ROOM_STATE 下发的 activeObjectKey。
-   * WS 和 HTTP 是并行路径：若 ROOM_STATE 先到而视频列表未加载，
-   * 此时 videosRef 为空，无法匹配 videoId 拉取 tags。
-   * 在 HTTP 完成、videosRef 有数据后，消费此暂存值补发 fetchTags。
-   */
-  const pendingActiveObjectKeyRef = useRef<string | null>(null);
-  const videoRef = useRef<VideoPlayerHandle>(null);
-  /** 始终保持最新的 videos 列表，供 useMemoizedFn 回调内查询 videoId */
-  const videosRef = useRef(roomState?.videos ?? []);
+    /**
+     * 暂存 ROOM_STATE 下发的播放初始化参数。
+     * ROOM_STATE（WS）和 HTTP 初始化是并行的异步路径，VideoPlayer 挂载时机不确定；
+     * 用 ref 暂存，在 VideoPlayer 挂载时（callback ref 触发）立即消费。
+     */
+    const pendingInitRef = useRef<{ isPlaying: boolean; currentTime: number } | null>(null);
+    /**
+     * 暂存 ROOM_STATE 下发的 activeObjectKey。
+     * WS 和 HTTP 是并行路径：若 ROOM_STATE 先到而视频列表未加载，
+     * 此时 videosRef 为空，无法匹配 videoId 拉取 tags。
+     * 在 HTTP 完成、videosRef 有数据后，消费此暂存值补发 fetchTags。
+     */
+    const pendingActiveObjectKeyRef = useRef<string | null>(null);
+    const videoRef = useRef<VideoPlayerHandle>(null);
+    /** 始终保持最新的 videos 列表，供 useMemoizedFn 回调内查询 videoId */
+    const videosRef = useRef(roomState?.videos ?? []);
 
-  // ── Tag 状态 ───────────────────────────────────────────────────────────────
-  const [tags, setTags] = useState<Tag[]>([]);
-  const [duration, setDuration] = useState(0);
-  /**
-   * 当前激活视频的 id（用于 tag 归属，与 activeVideoUrl 对应）。
-   * 同时作为"是否已完成本地初始化"的标志：
-   *   - 空字符串 → 初始状态，ROOM_STATE 下发时会通过 handleRoomState 初始化
-   *   - 非空 → 已由本地点击或远端广播设置
-   */
-  const [activeVideoId, setActiveVideoId] = useState<string>('');
+    // ── 右侧面板折叠状态 ──────────────────────────────────────────────────────
+    const [panelCollapsed, setPanelCollapsed] = useState(false);
 
-  /**
-   * 最近一次收到 VIDEO_ADDED 的文件名。
-   * 传给 VideoUploader 作为 lastVideoAddedName prop，
-   * VideoUploader 内部对比 pendingFileName 判断是否为本次上传完成。
-   */
-  const [lastVideoAddedName, setLastVideoAddedName] = useState<string | undefined>(undefined);
+    // ── Tag 状态 ───────────────────────────────────────────────────────────────
+    const [tags, setTags] = useState<Tag[]>([]);
+    const [duration, setDuration] = useState(0);
+    /**
+     * 当前激活视频的 id（用于 tag 归属，与 activeVideoUrl 对应）。
+     * 同时作为"是否已完成本地初始化"的标志：
+     *   - 空字符串 → 初始状态，ROOM_STATE 下发时会通过 handleRoomState 初始化
+     *   - 非空 → 已由本地点击或远端广播设置
+     */
+    const [activeVideoId, setActiveVideoId] = useState<string>('');
 
-  // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
-  /** 是否开启鼠标共享（是否发送自己的位置） */
-  const [cursorEnabled, setCursorEnabled] = useState(false);
-  /** 当前选中的光标样式 ID */
-  const [selectedStyleId, setSelectedStyleId] = useState(DEFAULT_STYLE_ID);
-  /**
-   * 是否已激活虚拟光标样式（用户主动点击了某个样式，隐藏系统光标，本地渲染 canvas 虚拟光标）。
-   * 独立于 cursorEnabled（WS 广播）和 drawingMode（绘制）。
-   */
-  const [cursorStyleActive, setCursorStyleActive] = useState(false);
-  /**
-   * 是否处于绘制模式。独立于鼠标共享（cursorEnabled），两者互不依赖。
-   * - false（默认）：视频播放器可正常操作
-   * - true：在视频区按住左键拖动发送笔迹 WS，同时拦截 click 防止触发播放
-   */
-  const [drawingMode, setDrawingMode] = useState(false);
-  /** 当前画笔颜色 */
-  const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
-  /**
-   * 所有光标的状态 Map（含自己 + 远端）。
-   * key：userId（自己用 userInfo.userId）。
-   * 直接操作 Map 引用（不 setState）+ 调 painterRef.redraw() 触发 canvas 重绘，
-   * 避免每帧 mousemove 都触发 React re-render。
-   */
-  const cursorsRef = useRef<Map<string, CursorState>>(new Map());
+    /**
+     * 最近一次收到 VIDEO_ADDED 的文件名。
+     * 传给 VideoUploader 作为 lastVideoAddedName prop，
+     * VideoUploader 内部对比 pendingFileName 判断是否为本次上传完成。
+     */
+    const [lastVideoAddedName, setLastVideoAddedName] = useState<string | undefined>(undefined);
+
+    // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
+    /** 是否开启鼠标共享（是否发送自己的位置） */
+    const [cursorEnabled, setCursorEnabled] = useState(false);
+    /** 当前选中的光标样式 ID */
+    const [selectedStyleId, setSelectedStyleId] = useState(DEFAULT_STYLE_ID);
+    /**
+     * 是否已激活虚拟光标样式（用户主动点击了某个样式，隐藏系统光标，本地渲染 canvas 虚拟光标）。
+     * 独立于 cursorEnabled（WS 广播）和 drawingMode（绘制）。
+     */
+    const [cursorStyleActive, setCursorStyleActive] = useState(false);
+    /**
+     * 是否处于绘制模式。独立于鼠标共享（cursorEnabled），两者互不依赖。
+     * - false（默认）：视频播放器可正常操作
+     * - true：在视频区按住左键拖动发送笔迹 WS，同时拦截 click 防止触发播放
+     */
+    const [drawingMode, setDrawingMode] = useState(false);
+    /** 当前画笔颜色 */
+    const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
+    /** 共享笔记内容（由 WS 同步） */
+    const [noteContent, setNoteContent] = useState('');
+    /** 节流发送 NOTE_UPDATE 的定时器 ref */
+    const noteThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /**
+     * 所有光标的状态 Map（含自己 + 远端）。
+     * key：userId（自己用 userInfo.userId）。
+     * 直接操作 Map 引用（不 setState）+ 调 painterRef.redraw() 触发 canvas 重绘，
+     * 避免每帧 mousemove 都触发 React re-render。
+     */
+    const cursorsRef = useRef<Map<string, CursorState>>(new Map());
   /** PainterLayer 命令式句柄，用于主动触发重绘 */
   const painterRef = useRef<PainterLayerHandle>(null);
-
-  /** 节流版 sendMessage，避免每帧都创建新函数；用 ref 包装避免闭包捕获旧引用 */
-  const sendMessageRef = useRef<ReturnType<typeof useRoomWs>['sendMessage'] | null>(null);
-
   /**
-   * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
-   * 比 useEffect([activeVideoUrl]) 更可靠，因为它直接响应组件挂载事件。
+   * 暂存 ROOM_STATE 下发的历史笔迹。
+   * WS 比 PainterLayer 挂载早到，painterRef.current 此时为 null，
+   * 先存入此 ref，等 PainterLayer callback ref 触发时再消费。
    */
-  const setVideoRef = useMemoizedFn((handle: VideoPlayerHandle | null) => {
-    (videoRef as MutableRefObject<VideoPlayerHandle | null>).current = handle;
-    if (handle && pendingInitRef.current) {
-      const { isPlaying, currentTime } = pendingInitRef.current;
-      pendingInitRef.current = null;
-      // rAF 确保 video 元素完成首次渲染后再操作
-      requestAnimationFrame(() => {
-        handle.initPlayback(isPlaying, currentTime);
-      });
-    }
-  });
+  const pendingStrokesRef = useRef<Array<{ color: string; points: Array<{ x: number; y: number }> }> | null>(null);
 
-  // 每次 roomState.videos 变化时同步 ref，供 useMemoizedFn 回调内读取
-  videosRef.current = roomState?.videos ?? [];
+    /** 节流版 sendMessage，避免每帧都创建新函数；用 ref 包装避免闭包捕获旧引用 */
+    const sendMessageRef = useRef<ReturnType<typeof useRoomWs>['sendMessage'] | null>(null);
 
-  // 初始化房间状态 + 视频列表
-  useEffect(() => {
-    if (!roomId) return;
-    Promise.all([
-      getRoomInfoApi(roomId),
-      getVideosApi(roomId),
-    ]).then(([info, videosData]) => {
-      // listVideos 返回 objectKey，播放 URL 由 WS ROOM_STATE / SWITCH_VIDEO 下发
-      const videos = videosData.videos.map((v) => ({
-        id: v.id,
-        objectKey: v.objectKey,
-        videoUrl: null as string | null,
-        fileName: v.fileName,
-        uploaderId: v.uploaderId,
-        createdAt: v.createdAt,
-      }));
-      videosRef.current = videos;
-      initRoom({
-        roomId: info.roomId,
-        roomName: info.roomName,
-        activeVideoUrl: info.videoUrl,
-        videos,
-        members: info.members,
-        controlMode: info.controlMode,
-        controllerId: info.controllerId,
-      });
-      // 消费 WS 比 HTTP 先到时暂存的 activeObjectKey：
-      // ROOM_STATE 到来时视频列表还未就绪，无法匹配 videoId；
-      // 现在 videosRef 已有数据，补发 fetchTags。
-      const pendingKey = pendingActiveObjectKeyRef.current;
-      if (pendingKey) {
-        pendingActiveObjectKeyRef.current = null;
-        const matched = videos.find((v) => v.objectKey === pendingKey);
-        if (matched) {
-          setActiveVideoId(matched.id);
-          fetchTags(matched.id);
+    /**
+     * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
+     * 比 useEffect([activeVideoUrl]) 更可靠，因为它直接响应组件挂载事件。
+     */
+    const setVideoRef = useMemoizedFn((handle: VideoPlayerHandle | null) => {
+        (videoRef as MutableRefObject<VideoPlayerHandle | null>).current = handle;
+        if (handle && pendingInitRef.current) {
+            const { isPlaying, currentTime } = pendingInitRef.current;
+            pendingInitRef.current = null;
+            // rAF 确保 video 元素完成首次渲染后再操作
+            requestAnimationFrame(() => {
+                handle.initPlayback(isPlaying, currentTime);
+            });
         }
-      }
     });
-  }, [roomId]);
 
-  // ── 拉取 tag 列表工具函数 ───────────────────────────────────────────────────
-  const fetchTags = useMemoizedFn((videoId: string) => {
-    if (!roomId || !videoId) return;
-    getTagsApi(roomId, videoId).then(setTags).catch((err) => {
-      console.warn('[Tag] 拉取 tag 列表失败:', err);
+    // 每次 roomState.videos 变化时同步 ref，供 useMemoizedFn 回调内读取
+    videosRef.current = roomState?.videos ?? [];
+
+    // 初始化房间状态 + 视频列表
+    useEffect(() => {
+        if (!roomId) return;
+        Promise.all([
+            getRoomInfoApi(roomId),
+            getVideosApi(roomId),
+        ]).then(([info, videosData]) => {
+            // listVideos 返回 objectKey，播放 URL 由 WS ROOM_STATE / SWITCH_VIDEO 下发
+            const videos = videosData.videos.map((v) => ({
+                id: v.id,
+                objectKey: v.objectKey,
+                videoUrl: null as string | null,
+                fileName: v.fileName,
+                uploaderId: v.uploaderId,
+                createdAt: v.createdAt,
+            }));
+            videosRef.current = videos;
+            initRoom({
+                roomId: info.roomId,
+                roomName: info.roomName,
+                activeVideoUrl: info.videoUrl,
+                videos,
+                members: info.members,
+                controlMode: info.controlMode,
+                controllerId: info.controllerId,
+            });
+            // 消费 WS 比 HTTP 先到时暂存的 activeObjectKey：
+            // ROOM_STATE 到来时视频列表还未就绪，无法匹配 videoId；
+            // 现在 videosRef 已有数据，补发 fetchTags。
+            const pendingKey = pendingActiveObjectKeyRef.current;
+            if (pendingKey) {
+                pendingActiveObjectKeyRef.current = null;
+                const matched = videos.find((v) => v.objectKey === pendingKey);
+                if (matched) {
+                    setActiveVideoId(matched.id);
+                    fetchTags(matched.id);
+                }
+            }
+        });
+    }, [roomId]);
+
+    // ── 拉取 tag 列表工具函数 ───────────────────────────────────────────────────
+    const fetchTags = useMemoizedFn((videoId: string) => {
+        if (!roomId || !videoId) return;
+        getTagsApi(roomId, videoId).then(setTags).catch((err) => {
+            console.warn('[Tag] 拉取 tag 列表失败:', err);
+        });
     });
-  });
 
-  /**
-   * 收到 ROOM_STATE：保存播放初始化参数，等 VideoPlayer 就绪后执行。
-   * 同时初始化当前激活视频的 tag 列表：
-   *   - 服务端已在 ROOM_STATE 里附带 tags → 直接 setTags，无需 HTTP 拉取
-   *   - 服务端未附带（旧数据兜底）→ 不拉取，等用户切换视频时再拉
-   */
-  const handleRoomState = useMemoizedFn((
-    isPlaying: boolean,
-    currentTime: number,
-    roomTags?: Tag[],
-    _videoUrl?: string | null,
-    activeObjectKey?: string | null,
-  ) => {
-    if (videoRef.current) {
-      videoRef.current.initPlayback(isPlaying, currentTime);
-    } else {
-      pendingInitRef.current = { isPlaying, currentTime };
-    }
-    // 用 activeObjectKey（稳定标识）匹配视频列表，找到 videoId 后拉取 tags。
-    // 不用 videoUrl 匹配：videos 列表里的 videoUrl 均为 null（播放时按需签名），永远匹配不到。
-    // 后端 ROOM_STATE 的 tags 字段始终为空数组，tags 由 fetchTags 按需拉取。
-    if (activeObjectKey) {
-      setActiveObjectKey(activeObjectKey);
-      const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
-      if (matched) {
-        setActiveVideoId(matched.id);
-        fetchTags(matched.id);
+    /**
+     * 收到 ROOM_STATE：保存播放初始化参数，等 VideoPlayer 就绪后执行。
+     * 同时初始化当前激活视频的 tag 列表：
+     *   - 服务端已在 ROOM_STATE 里附带 tags → 直接 setTags，无需 HTTP 拉取
+     *   - 服务端未附带（旧数据兜底）→ 不拉取，等用户切换视频时再拉
+     */
+    const handleRoomState = useMemoizedFn((
+        isPlaying: boolean,
+        currentTime: number,
+        roomTags?: Tag[],
+        _videoUrl?: string | null,
+        activeObjectKey?: string | null,
+        strokes?: Array<{ color: string; points: Array<{ x: number; y: number }> }>,
+        noteContentFromRoom?: string,
+    ) => {
+        if (videoRef.current) {
+            videoRef.current.initPlayback(isPlaying, currentTime);
+        } else {
+            pendingInitRef.current = { isPlaying, currentTime };
+        }
+        // 用 activeObjectKey（稳定标识）匹配视频列表，找到 videoId 后拉取 tags。
+        // 不用 videoUrl 匹配：videos 列表里的 videoUrl 均为 null（播放时按需签名），永远匹配不到。
+        // 后端 ROOM_STATE 的 tags 字段始终为空数组，tags 由 fetchTags 按需拉取。
+        if (activeObjectKey) {
+            setActiveObjectKey(activeObjectKey);
+            const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
+            if (matched) {
+                setActiveVideoId(matched.id);
+                fetchTags(matched.id);
+            } else {
+                // 视频列表尚未通过 HTTP 加载（WS 比 HTTP 先到），暂存 objectKey，
+                // 等 HTTP 完成后在 initRoom 流程里消费。
+                pendingActiveObjectKeyRef.current = activeObjectKey;
+            }
+        }
+        if (roomTags?.length) {
+            setTags(roomTags);
+        }
+    // 恢复历史笔迹：如果 PainterLayer 已挂载则直接应用，否则暂存到 ref 等待挂载
+    if (strokes?.length) {
+      if (painterRef.current) {
+        painterRef.current.clearStrokes();
+        strokes.forEach((s) => painterRef.current?.addStroke(s));
       } else {
-        // 视频列表尚未通过 HTTP 加载（WS 比 HTTP 先到），暂存 objectKey，
-        // 等 HTTP 完成后在 initRoom 流程里消费。
-        pendingActiveObjectKeyRef.current = activeObjectKey;
+        pendingStrokesRef.current = strokes;
       }
     }
-    if (roomTags?.length) {
-      setTags(roomTags);
+    // 初始化共享笔记
+    if (noteContentFromRoom !== undefined) {
+      setNoteContent(noteContentFromRoom);
     }
-  });
-
-  /**
-   * 收到 SYNC_PROGRESS：仅在严重失步时才兜底 seek，正常播放不干预。
-   */
-  const handleSyncProgress = useMemoizedFn((currentTime: number) => {
-    const handle = videoRef.current;
-    if (!handle) return;
-    if (Math.abs(handle.getCurrentTime() - currentTime) >= SYNC_PROGRESS_THRESHOLD_SEC) {
-      handle.syncSeek(currentTime);
-    }
-  });
-
-  /**
-   * 收到 SYNC_STATE（播放/暂停 + 时间）：全员同步执行。
-   *
-   * SYNC_STATE 触发时机：主控按下播放键、暂停键、或 Tag 跳转。
-   * 这类操作需要精确的状态对齐，阈值设 0.5s：
-   *   - isPlaying=true 且偏差 < 0.5s → 只 play，不 seek（缓冲区完整，避免打断）
-   *   - isPlaying=true 且偏差 >= 0.5s → seek + play（追上主控进度）
-   *   - isPlaying=false → 始终 seek + pause（暂停必须精确对帧）
-   */
-  const SYNC_STATE_SEEK_THRESHOLD_SEC = 0.5;
-  /**
-   * 收到 SYNC_STATE：seq 由后端分配，直接传给 VideoPlayer。
-   * VideoPlayer 内部用 seq 大小判断异步回调（onSeeked）是否过期。
-   */
-  const handleSyncState = useMemoizedFn((isPlaying: boolean, currentTime: number, seq: number) => {
-    const handle = videoRef.current;
-    if (!handle) return;
-    if (isPlaying) {
-      const diff = Math.abs(handle.getCurrentTime() - currentTime);
-      if (diff < SYNC_STATE_SEEK_THRESHOLD_SEC) {
-        handle.syncPlay(seq);
-      } else {
-        handle.syncSeekAndPlay(currentTime, seq);
-      }
-    } else {
-      handle.syncSeekAndPause(currentTime, seq);
-    }
-  });
-
-  const handleTagAdded = useMemoizedFn((tag: Tag) => {
-    setTags((prev) => {
-      if (prev.some((t) => t.id === tag.id)) return prev;
-      return [...prev, tag].sort((a, b) => a.time - b.time);
     });
-  });
 
-  const handleTagDeleted = useMemoizedFn((id: string) => {
-    setTags((prev) => prev.filter((t) => t.id !== id));
-  });
+    /**
+     * 收到 SYNC_PROGRESS：仅在严重失步时才兜底 seek，正常播放不干预。
+     */
+    const handleSyncProgress = useMemoizedFn((currentTime: number) => {
+        const handle = videoRef.current;
+        if (!handle) return;
+        if (Math.abs(handle.getCurrentTime() - currentTime) >= SYNC_PROGRESS_THRESHOLD_SEC) {
+            handle.syncSeek(currentTime);
+        }
+    });
 
-  /**
-   * 收到远端 SWITCH_VIDEO 广播：同步 activeObjectKey / activeVideoId 并拉取 tags。
-   *
-   * 主控本地点击（handlePlayVideo）已经主动处理了 tag 拉取，
-   * 且在发送 SWITCH_VIDEO 前已设置 activeObjectKey/activeVideoId，
-   * 因此主控收到自己的广播时，objectKey 和当前状态一致，不会重复触发。
-   *
-   * 非主控则通过此回调完成状态同步。
-   */
-  const handleSwitchVideo = useMemoizedFn((objectKey: string, videoId: string | undefined) => {
-    if (objectKey === activeObjectKey) return; // 主控自身广播，忽略
-    setActiveObjectKey(objectKey);
-    setTags([]);
-    setDuration(0);
-    if (videoId) {
-      setActiveVideoId(videoId);
-      fetchTags(videoId);
-    } else {
-      // 兜底：后端未下发 videoId 时，从视频列表里用 objectKey 查找
-      const matched = videosRef.current.find((v) => v.objectKey === objectKey);
-      if (matched) {
-        setActiveVideoId(matched.id);
-        fetchTags(matched.id);
-      }
-    }
-  });
+    /**
+     * 收到 SYNC_STATE（播放/暂停 + 时间）：全员同步执行。
+     *
+     * SYNC_STATE 触发时机：主控按下播放键、暂停键、或 Tag 跳转。
+     * 这类操作需要精确的状态对齐，阈值设 0.5s：
+     *   - isPlaying=true 且偏差 < 0.5s → 只 play，不 seek（缓冲区完整，避免打断）
+     *   - isPlaying=true 且偏差 >= 0.5s → seek + play（追上主控进度）
+     *   - isPlaying=false → 始终 seek + pause（暂停必须精确对帧）
+     */
+    const SYNC_STATE_SEEK_THRESHOLD_SEC = 0.5;
+    /**
+     * 收到 SYNC_STATE：seq 由后端分配，直接传给 VideoPlayer。
+     * VideoPlayer 内部用 seq 大小判断异步回调（onSeeked）是否过期。
+     */
+    const handleSyncState = useMemoizedFn((isPlaying: boolean, currentTime: number, seq: number) => {
+        const handle = videoRef.current;
+        if (!handle) return;
+        if (isPlaying) {
+            const diff = Math.abs(handle.getCurrentTime() - currentTime);
+            if (diff < SYNC_STATE_SEEK_THRESHOLD_SEC) {
+                handle.syncPlay(seq);
+            } else {
+                handle.syncSeekAndPlay(currentTime, seq);
+            }
+        } else {
+            handle.syncSeekAndPause(currentTime, seq);
+        }
+    });
 
-  // ── 鼠标共享 handlers ────────────────────────────────────────────────────────
+    const handleTagAdded = useMemoizedFn((tag: Tag) => {
+        setTags((prev) => {
+            if (prev.some((t) => t.id === tag.id)) return prev;
+            return [...prev, tag].sort((a, b) => a.time - b.time);
+        });
+    });
 
-  const handleCursorToggle = useMemoizedFn(() => {
-    setCursorEnabled((prev) => {
-      const next = !prev;
-      // 关闭时清空所有光标并重绘
-      if (!next) {
-        cursorsRef.current.clear();
+    const handleTagDeleted = useMemoizedFn((id: string) => {
+        setTags((prev) => prev.filter((t) => t.id !== id));
+    });
+
+    /**
+     * 收到远端 SWITCH_VIDEO 广播：同步 activeObjectKey / activeVideoId 并拉取 tags。
+     *
+     * 主控本地点击（handlePlayVideo）已经主动处理了 tag 拉取，
+     * 且在发送 SWITCH_VIDEO 前已设置 activeObjectKey/activeVideoId，
+     * 因此主控收到自己的广播时，objectKey 和当前状态一致，不会重复触发。
+     *
+     * 非主控则通过此回调完成状态同步。
+     */
+    const handleSwitchVideo = useMemoizedFn((objectKey: string, videoId: string | undefined) => {
+        if (objectKey === activeObjectKey) return; // 主控自身广播，忽略
+        setActiveObjectKey(objectKey);
+        setTags([]);
+        setDuration(0);
+        if (videoId) {
+            setActiveVideoId(videoId);
+            fetchTags(videoId);
+        } else {
+            // 兜底：后端未下发 videoId 时，从视频列表里用 objectKey 查找
+            const matched = videosRef.current.find((v) => v.objectKey === objectKey);
+            if (matched) {
+                setActiveVideoId(matched.id);
+                fetchTags(matched.id);
+            }
+        }
+    });
+
+    // ── 鼠标共享 handlers ────────────────────────────────────────────────────────
+
+    const handleCursorToggle = useMemoizedFn(() => {
+        setCursorEnabled((prev) => {
+            const next = !prev;
+            // 关闭时清空所有光标并重绘
+            if (!next) {
+                cursorsRef.current.clear();
+                painterRef.current?.redraw();
+            }
+            return next;
+        });
+    });
+
+    /**
+     * 点击光标样式时切换激活状态：
+     *   - 点击当前未激活时 → 激活，同时更换样式
+     *   - 点击已激活的样式 → 反选，取消虚拟光标（恢复系统默认光标）
+     * 即：首次点任意样式 = 切换样式 + 开起虚拟光标；再点同一个 = 关闭虚拟光标。
+     */
+    const handleCursorStyleSelect = useMemoizedFn((styleId: string) => {
+        if (styleId === 'default') {
+            // 点击「默认」项：关闭虚拟光标，恢复系统光标
+            setCursorStyleActive(false);
+            setSelectedStyleId('default');
+            const uid = userInfo?.userId ?? '__self__';
+            cursorsRef.current.delete(uid);
+            painterRef.current?.redraw();
+        } else {
+            // 点击自定义样式：激活虚拟光标 + 切换样式
+            setSelectedStyleId(styleId);
+            setCursorStyleActive(true);
+        }
+    });
+
+    const handleDrawingModeToggle = useMemoizedFn(() => {
+        setDrawingMode((prev) => !prev);
+    });
+
+    /**
+     * 本地绘制完一笔（mouseup）后回调：通过 WS 广播给其他成员。
+     * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
+     */
+    const handleStrokeComplete = useMemoizedFn((stroke: StrokeRecord) => {
+        sendMessageRef.current?.('DRAW_STROKE', {
+            color: stroke.color,
+            points: stroke.points,
+        });
+    });
+
+    /**
+     * 用户点击「清空画布」时回调：本地清空 + WS 广播。
+     * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
+     */
+    const handleClearStrokes = useMemoizedFn(() => {
+        painterRef.current?.clearStrokes();
+        sendMessageRef.current?.('DRAW_CLEAR', {});
+    });
+
+    /**
+     * 收到远端 DRAW_STROKE：将笔迹添加到 PainterLayer。
+     */
+    const handleDrawStroke = useMemoizedFn((data: DrawStrokeData) => {
+        painterRef.current?.addStroke({ color: data.color, points: data.points });
+    });
+
+    /**
+     * 收到远端 DRAW_CLEAR：清空画布。
+     */
+    const handleDrawClear = useMemoizedFn(() => {
+        painterRef.current?.clearStrokes();
+    });
+
+    /**
+     * 收到远端 DRAW_CLEAR_COLOR：清除指定颜色笔迹。
+     */
+    const handleDrawClearColor = useMemoizedFn((color: string) => {
+        painterRef.current?.clearStrokesByColor(color);
+    });
+
+    /**
+     * 用户点击「清除此色」：本地过滤 + WS 广播。
+     */
+    const handleClearStrokesByColor = useMemoizedFn((color: string) => {
+        painterRef.current?.clearStrokesByColor(color);
+        sendMessageRef.current?.('DRAW_CLEAR_COLOR', { color });
+    });
+
+    /**
+     * 收到远端 CURSOR_MOVE 广播：更新 cursors Map，触发 canvas 重绘。
+     * 不走 setState，避免 React re-render 影响帧率。
+     */
+    const handleCursorMove = useMemoizedFn((data: CursorMoveDownData) => {
+        cursorsRef.current.set(data.userId, {
+            userId: data.userId,
+            x: data.x,
+            y: data.y,
+            styleId: data.styleId,
+        });
         painterRef.current?.redraw();
-      }
-      return next;
     });
-  });
 
-  /**
-   * 点击光标样式时切换激活状态：
-   *   - 点击当前未激活时 → 激活，同时更换样式
-   *   - 点击已激活的样式 → 反选，取消虚拟光标（恢复系统默认光标）
-   * 即：首次点任意样式 = 切换样式 + 开起虚拟光标；再点同一个 = 关闭虚拟光标。
-   */
-  const handleCursorStyleSelect = useMemoizedFn((styleId: string) => {
-    if (cursorStyleActive && styleId === selectedStyleId) {
-      // 点击已选中项：反选，关闭虚拟光标
-      setCursorStyleActive(false);
-      // 虚拟光标关闭，从 Map 中移除自己的光标条目
-      const uid = userInfo?.userId ?? '__self__';
-      cursorsRef.current.delete(uid);
-      painterRef.current?.redraw();
-    } else {
-      // 点击新样式（或未激活时点击任意样式）：激活虚拟光标 + 更换样式
-      setSelectedStyleId(styleId);
-      setCursorStyleActive(true);
-    }
-  });
-
-  const handleDrawingModeToggle = useMemoizedFn(() => {
-    setDrawingMode((prev) => !prev);
-  });
-
-  /**
-   * 本地绘制完一笔（mouseup）后回调：通过 WS 广播给其他成员。
-   * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
-   */
-  const handleStrokeComplete = useMemoizedFn((stroke: StrokeRecord) => {
-    sendMessageRef.current?.('DRAW_STROKE', {
-      color: stroke.color,
-      points: stroke.points,
+    /** 收到远端 CURSOR_HIDE 广播（或本地鼠标离开区域）：立即从 Map 移除并重绘。 */
+    const handleCursorHide = useMemoizedFn((userId: string) => {
+        cursorsRef.current.delete(userId);
+        painterRef.current?.redraw();
     });
-  });
 
-  /**
-   * 用户点击「清空画布」时回调：本地清空 + WS 广播。
-   * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
-   */
-  const handleClearStrokes = useMemoizedFn(() => {
-    painterRef.current?.clearStrokes();
-    sendMessageRef.current?.('DRAW_CLEAR', {});
-  });
+    /**
+     * PainterLayer 回调：鼠标在 .main 内移动。
+     * 更新自己的光标位置（立即可见），并节流发送给他人。
+     * useMemoizedFn 始终读取最新的 cursorEnabled/selectedStyleId，无需依赖数组。
+     */
+    const handleSelfCursorMove = useMemoizedFn((x: number, y: number) => {
+        const uid = userInfo?.userId;
+        if (!uid) return;
 
-  /**
-   * 收到远端 DRAW_STROKE：将笔迹添加到 PainterLayer。
-   */
-  const handleDrawStroke = useMemoizedFn((data: DrawStrokeData) => {
-    painterRef.current?.addStroke({ color: data.color, points: data.points });
-  });
+        // 更新自己的光标（不走 setState，直接写 ref，避免 re-render）
+        const existing = cursorsRef.current.get(uid);
+        if (existing) {
+            cursorsRef.current.set(uid, { ...existing, x, y });
+        } else if (cursorStyleActive) {
+            // enter 时没有已有条目（首次进入或淡出动画已 delete），在真实坐标处插入
+            cursorsRef.current.set(uid, {
+                userId: uid,
+                x,
+                y,
+                styleId: selectedStyleId,
+            });
+        }
+        painterRef.current?.redraw();
 
-  /**
-   * 收到远端 DRAW_CLEAR：清空画布。
-   */
-  const handleDrawClear = useMemoizedFn(() => {
-    painterRef.current?.clearStrokes();
-  });
-
-  /**
-   * 收到远端 CURSOR_MOVE 广播：更新 cursors Map，触发 canvas 重绘。
-   * 不走 setState，避免 React re-render 影响帧率。
-   */
-  const handleCursorMove = useMemoizedFn((data: CursorMoveDownData) => {
-    cursorsRef.current.set(data.userId, {
-      userId: data.userId,
-      x: data.x,
-      y: data.y,
-      styleId: data.styleId,
+        // 节流发送给他人
+        if (cursorEnabled) {
+            sendMessageRef.current?.('CURSOR_MOVE', { x, y, styleId: selectedStyleId });
+        }
     });
-    painterRef.current?.redraw();
-  });
 
-  /** 收到远端 CURSOR_HIDE 广播（或本地鼠标离开区域）：立即从 Map 移除并重绘。 */
-  const handleCursorHide = useMemoizedFn((userId: string) => {
-    cursorsRef.current.delete(userId);
-    painterRef.current?.redraw();
-  });
+    /**
+     * PainterLayer 回调：鼠标离开 .main。
+     * 淡出自己的光标，并通知他人隐藏。
+     */
+    const handleSelfCursorLeave = useMemoizedFn(() => {
+        const uid = userInfo?.userId ?? '__self__';
+        handleCursorHide(uid);
+        if (cursorEnabled) {
+            sendMessageRef.current?.('CURSOR_HIDE', {});
+        }
+    });
 
-  /**
-   * PainterLayer 回调：鼠标在 .main 内移动。
-   * 更新自己的光标位置（立即可见），并节流发送给他人。
-   * useMemoizedFn 始终读取最新的 cursorEnabled/selectedStyleId，无需依赖数组。
-   */
-  const handleSelfCursorMove = useMemoizedFn((x: number, y: number) => {
-    const uid = userInfo?.userId;
-    if (!uid) return;
+    // 当 selectedStyleId 变化时，同步更新自己的光标 styleId
+    useEffect(() => {
+        const uid = userInfo?.userId;
+        if (!uid) return;
+        const existing = cursorsRef.current.get(uid);
+        if (existing) {
+            cursorsRef.current.set(uid, { ...existing, styleId: selectedStyleId });
+            painterRef.current?.redraw();
+        }
+    }, [selectedStyleId, userInfo?.userId]);
 
-    // 更新自己的光标（不走 setState，直接写 ref，避免 re-render）
-    const existing = cursorsRef.current.get(uid);
-    if (existing) {
-      cursorsRef.current.set(uid, { ...existing, x, y });
-    } else if (cursorStyleActive) {
-      // enter 时没有已有条目（首次进入或淡出动画已 delete），在真实坐标处插入
-      cursorsRef.current.set(uid, {
-        userId: uid,
-        x,
-        y,
-        styleId: selectedStyleId,
-      });
+    const { sendMessage } = useRoomWs({
+        roomId: roomId!,
+        token: getAccessToken() ?? '',
+        onRoomState: handleRoomState,
+        onSyncProgress: handleSyncProgress,
+        onSyncState: handleSyncState,
+        onTagAdded: handleTagAdded,
+        onTagDeleted: handleTagDeleted,
+        onSwitchVideo: handleSwitchVideo,
+        onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
+        onCursorMove: handleCursorMove,
+        onCursorHide: handleCursorHide,
+        onDrawStroke: handleDrawStroke,
+        onDrawClear: handleDrawClear,
+        onDrawClearColor: handleDrawClearColor,
+        onNoteUpdate: (content) => setNoteContent(content),
+    });
+
+    // 将最新 sendMessage 同步到 ref，供节流函数闭包读取
+    sendMessageRef.current = sendMessage;
+
+    /**
+     * 主控在笔记输入时触发：本地立即更新 noteContent，
+     * 然后节流 1000ms 广播给其他成员。
+     */
+    const handleNoteChange = useMemoizedFn((content: string) => {
+        setNoteContent(content);
+        if (noteThrottleRef.current) clearTimeout(noteThrottleRef.current);
+        noteThrottleRef.current = setTimeout(() => {
+            sendMessageRef.current?.('NOTE_UPDATE', { content });
+        }, 1000);
+    });
+
+    /**
+     * 本地点击"播放"：向后端发送 SWITCH_VIDEO（携带 objectKey）。
+     * 后端签名后广播带 videoUrl 的 SWITCH_VIDEO 下行消息，
+     * useRoomWs 收到后调用 setActiveVideoUrl 更新播放 URL。
+     * 本地优先设置 activeObjectKey （列表立即高亮）， activeVideoId（tag 归属）。
+     */
+    const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
+        setActiveObjectKey(objectKey);
+        setActiveVideoId(videoId);
+        setTags([]);
+        setDuration(0);
+        sendMessage('SWITCH_VIDEO', { objectKey, videoId });
+        fetchTags(videoId);
+    });
+
+    // ── Tag 操作（发送 WS 消息） ─────────────────────────────────────────────────
+
+    const handleTagAdd = useMemoizedFn((_videoId: string, time: number, label: string) => {
+        const id = crypto.randomUUID();
+        sendMessage('TAG_ADD', { id, videoId: activeVideoId, time, label });
+    });
+
+    const handleTagDelete = useMemoizedFn((id: string) => {
+        sendMessage('TAG_DELETE', { id });
+    });
+
+    const handleTagSeek = useMemoizedFn((time: number) => {
+        // 主控本地即时 seek+pause，不依赖 WS 回环。
+        // seq 传 0：主控本地调用只影响自己的视频状态，不参与非主控的 seq 过期判断。
+        // 非主控收到的 seq 来自后端（TAG_SEEK → 后端分配 nextSeq 广播 SYNC_STATE），
+        // 与这里的 0 完全独立。
+        videoRef.current?.syncSeekAndPause(time, 0);
+        sendMessage('TAG_SEEK', { time });
+    });
+
+    if (!roomState) {
+        return <LoadingSpinner fullPage text="加载房间..." />;
     }
-    painterRef.current?.redraw();
 
-    // 节流发送给他人
-    if (cursorEnabled) {
-      sendMessageRef.current?.('CURSOR_MOVE', { x, y, styleId: selectedStyleId });
-    }
-  });
+    const isAdmin = roomState.members.find((m) => m.userId === userInfo?.userId)?.isAdmin ?? false;
+    const isController = roomState.controllerId === userInfo?.userId;
 
-  /**
-   * PainterLayer 回调：鼠标离开 .main。
-   * 淡出自己的光标，并通知他人隐藏。
-   */
-  const handleSelfCursorLeave = useMemoizedFn(() => {
-    const uid = userInfo?.userId ?? '__self__';
-    handleCursorHide(uid);
-    if (cursorEnabled) {
-      sendMessageRef.current?.('CURSOR_HIDE', {});
-    }
-  });
-
-  // 当 selectedStyleId 变化时，同步更新自己的光标 styleId
-  useEffect(() => {
-    const uid = userInfo?.userId;
-    if (!uid) return;
-    const existing = cursorsRef.current.get(uid);
-    if (existing) {
-      cursorsRef.current.set(uid, { ...existing, styleId: selectedStyleId });
-      painterRef.current?.redraw();
-    }
-  }, [selectedStyleId, userInfo?.userId]);
-
-  const { sendMessage } = useRoomWs({
-    roomId: roomId!,
-    token: getAccessToken() ?? '',
-    onRoomState: handleRoomState,
-    onSyncProgress: handleSyncProgress,
-    onSyncState: handleSyncState,
-    onTagAdded: handleTagAdded,
-    onTagDeleted: handleTagDeleted,
-    onSwitchVideo: handleSwitchVideo,
-    onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
-    onCursorMove: handleCursorMove,
-    onCursorHide: handleCursorHide,
-    onDrawStroke: handleDrawStroke,
-    onDrawClear: handleDrawClear,
-  });
-
-  // 将最新 sendMessage 同步到 ref，供节流函数闭包读取
-  sendMessageRef.current = sendMessage;
-
-  /**
-   * 本地点击"播放"：向后端发送 SWITCH_VIDEO（携带 objectKey）。
-   * 后端签名后广播带 videoUrl 的 SWITCH_VIDEO 下行消息，
-   * useRoomWs 收到后调用 setActiveVideoUrl 更新播放 URL。
-   * 本地优先设置 activeObjectKey （列表立即高亮）， activeVideoId（tag 归属）。
-   */
-  const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
-    setActiveObjectKey(objectKey);
-    setActiveVideoId(videoId);
-    setTags([]);
-    setDuration(0);
-    sendMessage('SWITCH_VIDEO', { objectKey, videoId });
-    fetchTags(videoId);
-  });
-
-  // ── Tag 操作（发送 WS 消息） ─────────────────────────────────────────────────
-
-  const handleTagAdd = useMemoizedFn((_videoId: string, time: number, label: string) => {
-    const id = crypto.randomUUID();
-    sendMessage('TAG_ADD', { id, videoId: activeVideoId, time, label });
-  });
-
-  const handleTagDelete = useMemoizedFn((id: string) => {
-    sendMessage('TAG_DELETE', { id });
-  });
-
-  const handleTagSeek = useMemoizedFn((time: number) => {
-    // 主控本地即时 seek+pause，不依赖 WS 回环。
-    // seq 传 0：主控本地调用只影响自己的视频状态，不参与非主控的 seq 过期判断。
-    // 非主控收到的 seq 来自后端（TAG_SEEK → 后端分配 nextSeq 广播 SYNC_STATE），
-    // 与这里的 0 完全独立。
-    videoRef.current?.syncSeekAndPause(time, 0);
-    sendMessage('TAG_SEEK', { time });
-  });
-
-  if (!roomState) {
-    return <LoadingSpinner fullPage text="加载房间..." />;
-  }
-
-  const isAdmin = roomState.members.find((m) => m.userId === userInfo?.userId)?.isAdmin ?? false;
-  const isController = roomState.controllerId === userInfo?.userId;
-
-  return (
-    <div className={styles.page}>
-      <div className={styles.content}>
-        {/* 左侧主内容区 */}
-        <main className={styles.main}>
-                        {/* 视频列表 */}
-          <CollapseSection
-            title="视频列表"
-            badge={roomState.videos.length > 0 ? roomState.videos.length : undefined}
-            collapsible
-            defaultOpen={true}
-          >
-            <VideoList
-              videos={roomState.videos}
-              activeObjectKey={activeObjectKey}
-              isController={isController}
-              onPlay={handlePlayVideo}
-            />
-          </CollapseSection>
-          {/*
+    return (
+        <div className={styles.page}>
+            <div className={styles.content}>
+                {/* 左侧主内容区 */}
+                <main className={styles.main}>
+                    {/* 视频列表 */}
+                     <CollapseSection
+                        title="视频列表"
+                        collapsible
+                        defaultOpen={false}
+                    >
+                        <VideoList
+                            videos={roomState.videos}
+                            activeObjectKey={activeObjectKey}
+                            isController={isController}
+                            onPlay={handlePlayVideo}
+                        />
+                    </CollapseSection>
+                    {/* 上传区（全员可见；空闲态下仅主控可操作） */}
+                    <CollapseSection title="上传视频" collapsible defaultOpen={false}>
+                        <VideoUploader
+                            roomId={roomId!}
+                            isController={isController}
+                            lastVideoAddedName={lastVideoAddedName}
+                        />
+                    </CollapseSection>
+                    {/*
            * .playerRatio 是 16:9 固定比例容器，是所有客户端视觉内容完全一致的区域。
            * PainterLayer 锚定在此容器内：
            * - 坐标比例 = 相对 .playerRatio 宽高，不受窗口高度/折叠区域影响
            * - 出了视频区鼠标自动恢复默认样式，tag区/上传区不受影响
            */}
-          <div className={styles.playerRatio}>
+                    <div className={styles.playerRatio}>
             <PainterLayer
-              ref={painterRef}
-              cursorStyleActive={cursorStyleActive}
-              enabled={cursorEnabled}
-              drawingMode={drawingMode}
-              cursors={cursorsRef.current}
-              drawColor={drawColor}
-              onCursorMove={handleSelfCursorMove}
-              // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
-              onCursorEnter={() => { /* no-op */ }}
-              onCursorLeave={handleSelfCursorLeave}
-              onStrokeComplete={handleStrokeComplete}
-            />
-            {roomState.activeVideoUrl ? (
-              <VideoPlayer
-                ref={setVideoRef}
-                src={roomState.activeVideoUrl}
-                disabled={!isController}
-                cursorLocked={cursorEnabled && !isController}
-                onProgressChange={(currentTime) => {
-                  sendMessage('SYNC_PROGRESS', { currentTime });
-                }}
-                onPlayStateChange={(isPlaying, currentTime) => {
-                  sendMessage('SYNC_STATE', { isPlaying, currentTime });
-                }}
-                onDurationChange={setDuration}
-              />
-            ) : (
-              <div className={styles.noVideo}>
-                <span className={styles.noVideoIcon}>🎬</span>
-                <p>从下方选择或上传视频开始复盘</p>
-              </div>
-            )}
-          </div>
+              ref={(handle) => {
+                (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
+                if (handle && pendingStrokesRef.current) {
+                  const pending = pendingStrokesRef.current;
+                  pendingStrokesRef.current = null;
+                  handle.clearStrokes();
+                  pending.forEach((s) => handle.addStroke(s));
+                }
+              }}
+                            cursorStyleActive={cursorStyleActive}
+                            enabled={cursorEnabled}
+                            drawingMode={drawingMode}
+                            cursors={cursorsRef.current}
+                            drawColor={drawColor}
+                            onCursorMove={handleSelfCursorMove}
+                            // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
+                            onCursorEnter={() => { /* no-op */ }}
+                            onCursorLeave={handleSelfCursorLeave}
+                            onStrokeComplete={handleStrokeComplete}
+                        />
+                        {roomState.activeVideoUrl ? (
+                            <VideoPlayer
+                                ref={setVideoRef}
+                                src={roomState.activeVideoUrl}
+                                disabled={!isController}
+                                cursorLocked={cursorEnabled && !isController}
+                                onProgressChange={(currentTime) => {
+                                    sendMessage('SYNC_PROGRESS', { currentTime });
+                                }}
+                                onPlayStateChange={(isPlaying, currentTime) => {
+                                    sendMessage('SYNC_STATE', { isPlaying, currentTime });
+                                }}
+                                onDurationChange={setDuration}
+                            />
+                        ) : (
+                            <div className={styles.noVideo}>
+                                <span className={styles.noVideoIcon}>🎬</span>
+                                <p>从下方选择或上传视频开始复盘</p>
+                            </div>
+                        )}
+                    </div>
 
-          {/* 时间标记（有激活视频时显示） */}
-          {roomState.activeVideoUrl && (
-            <CollapseSection
-              title="时间标记"
-              badge={tags.length > 0 ? tags.length : undefined}
-              collapsible
-            >
-              <VideoTagBar
-                tags={tags}
-                duration={duration}
+                    {/* 时间标记（有激活视频时显示） */}
+                    {roomState.activeVideoUrl && (
+                        <CollapseSection
+                            title="时间标记"
+                            collapsible
+                        >
+                            <VideoTagBar
+                                tags={tags}
+                                duration={duration}
+                                isController={isController}
+                                activeVideoId={activeVideoId}
+                                onAdd={handleTagAdd}
+                                onDelete={handleTagDelete}
+                                onSeek={handleTagSeek}
+                            />
+                        </CollapseSection>
+                    )}
+
+                </main>
+
+                {/* 右侧控制面板 */}
+                <aside className={`${styles.panel} ${panelCollapsed ? styles.panelCollapsed : ''}`}>
+                    {/* 折叠/展开按钮：始终可见，贴在面板左侧边缘 */}
+                    <button
+                        type="button"
+                        className={styles.panelToggleBtn}
+                        onClick={() => setPanelCollapsed((v) => !v)}
+                        title={panelCollapsed ? '展开面板' : '收起面板'}
+                    >
+                        <img
+                            src={panelCollapsed ? iconLeft : iconRight}
+                            alt={panelCollapsed ? '展开' : '收起'}
+                            width={16}
+                            height={16}
+                        />
+                    </button>
+                    <div className={`${styles.panelContent} ${panelCollapsed ? styles.panelContentHidden : ''}`}>
+                    <ControlPanel
+                        roomId={roomState.roomId}
+                        roomName={roomState.roomName}
+                        members={roomState.members}
+                        controllerId={roomState.controllerId}
+                        isAdmin={isAdmin}
+                        onTransferControl={(targetUserId) => {
+                            sendMessage('TRANSFER_CONTROL', { targetUserId });
+                        }}
+                        cursorEnabled={cursorEnabled}
+                        selectedStyleId={selectedStyleId}
+                        cursorStyleActive={cursorStyleActive}
+                        drawingMode={drawingMode}
+                        drawColor={drawColor}
+                        onCursorToggle={handleCursorToggle}
+                        onCursorStyleSelect={handleCursorStyleSelect}
+                        onDrawingModeToggle={handleDrawingModeToggle}
+                        onDrawColorChange={setDrawColor}
+                        onClearStrokes={handleClearStrokes}
+                        onClearStrokesByColor={handleClearStrokesByColor}
+                    />
+                    </div>
+                </aside>
+            </div>
+
+            {/* 共享笔记浮层：绝对定位在 .page 右上角，bar 下方 12px，右侧 20px */}
+            <NotePanel
+                content={noteContent}
                 isController={isController}
-                activeVideoId={activeVideoId}
-                onAdd={handleTagAdd}
-                onDelete={handleTagDelete}
-                onSeek={handleTagSeek}
-              />
-            </CollapseSection>
-          )}
-
-          {/* 上传区（全员可见；空闲态下仅主控可操作） */}
-          <CollapseSection title="上传视频">
-            <VideoUploader
-              roomId={roomId!}
-              isController={isController}
-              lastVideoAddedName={lastVideoAddedName}
+                roomId={roomState.roomId}
+                onChange={handleNoteChange}
             />
-          </CollapseSection>
-        </main>
-
-        {/* 右侧控制面板 */}
-        <aside className={styles.panel}>
-          <ControlPanel
-            roomId={roomState.roomId}
-            roomName={roomState.roomName}
-            members={roomState.members}
-            controllerId={roomState.controllerId}
-            isAdmin={isAdmin}
-            onTransferControl={(targetUserId) => {
-              sendMessage('TRANSFER_CONTROL', { targetUserId });
-            }}
-            cursorEnabled={cursorEnabled}
-            selectedStyleId={selectedStyleId}
-            cursorStyleActive={cursorStyleActive}
-            drawingMode={drawingMode}
-            drawColor={drawColor}
-            onCursorToggle={handleCursorToggle}
-            onCursorStyleSelect={handleCursorStyleSelect}
-            onDrawingModeToggle={handleDrawingModeToggle}
-            onDrawColorChange={setDrawColor}
-            onClearStrokes={handleClearStrokes}
-          />
-        </aside>
-      </div>
-    </div>
-  );
+        </div>
+    );
 }

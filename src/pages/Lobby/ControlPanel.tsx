@@ -15,6 +15,10 @@ const DRAW_COLORS = [
   { color: '#ffffff', label: '白色' },
   { color: '#000000', label: '黑色' },
   { color: '#ef4444', label: '红色' },
+  { color: '#eab308', label: '橙色' },
+  { color: '#22c55e', label: '绿色' },
+  { color: '#2563eb', label: '蓝色' },
+  { color: '#8b5cf6', label: '紫色' }
 ] as const;
 
 interface ControlPanelProps {
@@ -35,12 +39,14 @@ interface ControlPanelProps {
   /** 当前画笔颜色（仅在 drawingMode=true 时有意义） */
   drawColor: string;
   onCursorToggle: () => void;
-  /** 点击样式图标时回调：已激活且点击同一项 = 反选关闭；其他 = 激活 + 切换样式 */
+  /** 点击样式图标时回调：点 default = 恢复系统光标；点其他项 = 激活虚拟光标 + 切换样式 */
   onCursorStyleSelect: (styleId: string) => void;
   onDrawingModeToggle: () => void;
   onDrawColorChange: (color: string) => void;
   /** 清空画布（广播给所有人） */
   onClearStrokes: () => void;
+  /** 清除指定颜色的笔迹（广播给所有人） */
+  onClearStrokesByColor: (color: string) => void;
 }
 
 export default function ControlPanel({
@@ -60,6 +66,7 @@ export default function ControlPanel({
   onDrawingModeToggle,
   onDrawColorChange,
   onClearStrokes,
+  onClearStrokesByColor,
 }: ControlPanelProps) {
   const controller = members.find((m) => m.userId === controllerId);
 
@@ -109,17 +116,18 @@ export default function ControlPanel({
       {/* 鼠标设置 */}
       <CollapseSection title="鼠标设置" collapsible>
         {/* 样式选择器 — 始终可点击，不依赖任何开关。
-             选中项 = cursorStyleActive=true 且 id 匹配；再点同一项则反选关闭虚拟光标 */}
+             default 项选中 = 系统光标（未激活虚拟光标）；其他项选中 = 激活虚拟光标 */}
         <div className={styles.cursorStylePicker}>
           {CURSOR_STYLES.map((cs) => {
-            const isActive = cursorStyleActive && selectedStyleId === cs.id;
+            const isActive = cs.id === 'default'
+              ? !cursorStyleActive
+              : cursorStyleActive && selectedStyleId === cs.id;
             return (
               <button
                 key={cs.id}
                 type="button"
-                title={isActive ? `${cs.label}（点击取消）` : cs.label}
+                title={cs.label}
                 className={`${styles.cursorStyleBtn} ${isActive ? styles.cursorStyleBtnActive : ''}`}
-                style={isActive ? { borderBottomColor: 'rgba(255,255,255,0.7)' } : {}}
                 onClick={() => onCursorStyleSelect(cs.id)}
               >
                 <img src={cs.url} alt={cs.label} className={styles.cursorStyleIcon} draggable={false} />
@@ -154,31 +162,39 @@ export default function ControlPanel({
           </button>
         </div>
 
-        {/* 颜色选择器 — 仅在绘制模式开启时显示 */}
-        {drawingMode && (
-          <div className={styles.drawColorPicker}>
-            {DRAW_COLORS.map(({ color, label }) => (
-              <button
-                key={color}
-                type="button"
-                title={label}
-                className={`${styles.drawColorBtn} ${drawColor === color ? styles.drawColorBtnActive : ''}`}
-                style={{ background: color }}
-                onClick={() => onDrawColorChange(color)}
-              />
-            ))}
-          </div>
-        )}
+        {/* 颜色选择器 — 始终显示，与绘制模式无关 */}
+        <div className={styles.drawColorPicker}>
+          {DRAW_COLORS.map(({ color, label }) => (
+            <button
+              key={color}
+              type="button"
+              title={label}
+              className={`${styles.drawColorBtn} ${drawColor === color ? styles.drawColorBtnActive : ''}`}
+              style={{ background: color }}
+              onClick={() => onDrawColorChange(color)}
+            />
+          ))}
+        </div>
 
-        {/* 清空画布 */}
-        <button
-          type="button"
-          className={styles.clearStrokesBtn}
-          onClick={onClearStrokes}
-          title="清空所有人的画布笔迹"
-        >
-          清空画布
-        </button>
+        {/* 清除此色 + 清空画布 同行排列，始终显示 */}
+        <div className={styles.clearBtnRow}>
+          <button
+            type="button"
+            className={styles.clearColorBtn}
+            title={`清除所有${DRAW_COLORS.find(c => c.color === drawColor)?.label ?? ''}色笔迹`}
+            onClick={() => onClearStrokesByColor(drawColor)}
+          >
+            清除此色
+          </button>
+          <button
+            type="button"
+            className={styles.clearStrokesBtn}
+            onClick={onClearStrokes}
+            title="清空所有人的画布笔迹"
+          >
+            清空画布
+          </button>
+        </div>
       </CollapseSection>
 
       {/* 成员列表 */}

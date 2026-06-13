@@ -67,6 +67,8 @@ export type WsMessageType =
   | 'CURSOR_HIDE'
   | 'DRAW_STROKE'
   | 'DRAW_CLEAR'
+  | 'DRAW_CLEAR_COLOR'
+  | 'NOTE_UPDATE'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -116,6 +118,10 @@ export interface RoomStateData {
   currentTime?: number;
   /** 当前激活视频的 tag 列表 */
   tags?: Tag[];
+  /** 当前房间的历史笔迹快照，供新加入成员初始化画布 */
+  strokes?: Array<{ color: string; points: DrawStrokePoint[] }>;
+  /** 当前房间的共享笔记内容，新成员加入时初始化 */
+  noteContent?: string;
 }
 
 export interface VideoAddedData {
@@ -219,4 +225,24 @@ export interface DrawStrokeData {
 export interface DrawClearData {
   /** 操作者 userId（下行由服务端补充） */
   userId: string;
+}
+
+/** 上行 & 下行：清除指定颜色的所有笔迹 */
+export interface DrawClearColorData {
+  /** 操作者 userId（下行由服务端补充） */
+  userId: string;
+  /** 要清除的笔迹颜色，如 '#ffffff' */
+  color: string;
+}
+
+// ─── Note WS data 类型 ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 上行 & 下行：同步共享笔记内容。
+ * 上行由主控发出（节流 1000ms），下行由服务端补充 fromUserId 后广播。
+ */
+export interface NoteUpdateData {
+  content: string;
+  /** 下行时由服务端补充 */
+  fromUserId?: string;
 }

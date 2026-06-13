@@ -114,33 +114,26 @@
 }
 
 .cursorStyleBtn {
-  // 去掉所有容器样式，纯透明背景
   width: 32px;
   height: 32px;
   padding: 0;
   background: none;
   border: none;
-  border-radius: 0;
+  border-radius: 4px;
   cursor: pointer;
-  // 底部彩线占位（active 时显示）
-  border-bottom: 2px solid transparent;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.15s;
+  transition: transform 0.15s, background 0.15s;
 
   &:hover {
     transform: scale(1.12);
   }
 }
 
-// 选中态：图片放大 + 底部彩线（颜色由内联样式注入）
+// 选中态：轻微背景高亮，让用户感知到已选中
 .cursorStyleBtnActive {
-  transform: scale(1.12);
-
-  &:hover {
-    transform: scale(1.18);
-  }
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .cursorStyleIcon {
@@ -192,14 +185,41 @@
   transform: scale(1.15);
 }
 
+// 清除此色 + 清空画布 同行容器
+.clearBtnRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+// 清除此色按钮
+.clearColorBtn {
+  width: calc(50% - 3px);
+  padding: 2px 8px;
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  color: #a0aec0;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s;
+
+  &:hover {
+    border-color: rgba(239, 68, 68, 0.5);
+    color: #fc8181;
+  }
+}
+
 // 清空画布按钮
 .clearStrokesBtn {
-  margin-top: 10px;
-  width: 100%;
+  width: calc(50% - 3px);
+  margin-top: 0;
   padding: 6px 0;
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.25);
-  border-radius: 6px;
+  border-radius: 4px;
   color: #fc8181;
   font-size: 12px;
   cursor: pointer;
@@ -210,10 +230,6 @@
     border-color: rgba(239, 68, 68, 0.5);
   }
 
-  &:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
 }
 
 // ── 编码设置区 ────────────────────────────────────────────────────────────────

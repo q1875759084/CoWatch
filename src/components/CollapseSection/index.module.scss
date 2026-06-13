@@ -15,7 +15,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 12px 8px;
+  padding: 12px;
   background: none;
   border: none;
   color: inherit;
@@ -25,7 +25,7 @@
     cursor: pointer;
 
     &:hover .title {
-      color: #a0aec0;
+      color: #FFFFFF;
     }
   }
 }
@@ -39,21 +39,10 @@
 .title {
   font-size: 14px;
   font-weight: 600;
-  color: #718096;
+  color: #a0aec0;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   transition: color 0.15s;
-}
-
-.badge {
-  background: rgba(99, 179, 237, 0.15);
-  color: #63b3ed;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 1px 7px;
-  border-radius: 10px;
-  letter-spacing: 0;
-  text-transform: none;
 }
 
 .arrow {

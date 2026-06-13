@@ -18,14 +18,16 @@ import type {
   CursorHideDownData,
   DrawStrokeData,
   DrawClearData,
+  DrawClearColorData,
+  NoteUpdateData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
   roomId: string;
   /** accessToken，通过 WS 连接参数传给后端鉴权 */
   token: string;
-  /** 收到 ROOM_STATE 时通知调用方初始化播放状态，附带 tags、videoUrl 和 activeObjectKey */
-  onRoomState?: (isPlaying: boolean, currentTime: number, tags?: Tag[], videoUrl?: string | null, activeObjectKey?: string | null) => void;
+  /** 收到 ROOM_STATE 时通知调用方初始化播放状态，附带 tags、videoUrl、activeObjectKey、strokes 和 noteContent */
+  onRoomState?: (isPlaying: boolean, currentTime: number, tags?: Tag[], videoUrl?: string | null, activeObjectKey?: string | null, strokes?: RoomStateData['strokes'], noteContent?: string) => void;
   /** 收到 SYNC_PROGRESS 时通知播放器同步（防回环由调用方负责） */
   onSyncProgress?: (currentTime: number) => void;
   /** 收到 SYNC_STATE 时通知播放器同步，seq 由后端分配，用于非主控过期判断 */
@@ -53,6 +55,10 @@ interface UseRoomWsOptions {
   onDrawStroke?: (data: DrawStrokeData) => void;
   /** 收到 DRAW_CLEAR 时通知调用方清空画布 */
   onDrawClear?: () => void;
+  /** 收到 DRAW_CLEAR_COLOR 时通知调用方清除指定颜色笔迹 */
+  onDrawClearColor?: (color: string) => void;
+  /** 收到 NOTE_UPDATE 时通知调用方更新笔记内容 */
+  onNoteUpdate?: (content: string) => void;
 }
 
 export function useRoomWs({
@@ -69,6 +75,8 @@ export function useRoomWs({
   onCursorHide,
   onDrawStroke,
   onDrawClear,
+  onDrawClearColor,
+  onNoteUpdate,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -94,7 +102,9 @@ export function useRoomWs({
   const stableOnCursorMove   = useMemoizedFn(onCursorMove   ?? (() => {}));
   const stableOnCursorHide   = useMemoizedFn(onCursorHide   ?? (() => {}));
   const stableOnDrawStroke   = useMemoizedFn(onDrawStroke   ?? (() => {}));
-  const stableOnDrawClear    = useMemoizedFn(onDrawClear    ?? (() => {}));
+  const stableOnDrawClear      = useMemoizedFn(onDrawClear      ?? (() => {}));
+  const stableOnDrawClearColor = useMemoizedFn(onDrawClearColor ?? (() => {}));
+  const stableOnNoteUpdate     = useMemoizedFn(onNoteUpdate     ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -144,7 +154,7 @@ export function useRoomWs({
               setActiveVideoUrl(d.videoUrl);
             }
             console.log('[WS] ROOM_STATE received', { isPlaying: d.isPlaying, currentTime: d.currentTime, videoUrl: d.videoUrl });
-            stableOnRoomState(d.isPlaying ?? false, d.currentTime ?? 0, d.tags, d.videoUrl, d.activeObjectKey);
+            stableOnRoomState(d.isPlaying ?? false, d.currentTime ?? 0, d.tags, d.videoUrl, d.activeObjectKey, d.strokes, d.noteContent);
           }
           break;
         }
@@ -241,6 +251,18 @@ export function useRoomWs({
         case 'DRAW_CLEAR': {
           const d = msg.data as unknown as DrawClearData | undefined;
           if (d) stableOnDrawClear();
+          break;
+        }
+
+        case 'DRAW_CLEAR_COLOR': {
+          const d = msg.data as unknown as DrawClearColorData | undefined;
+          if (d) stableOnDrawClearColor(d.color);
+          break;
+        }
+
+        case 'NOTE_UPDATE': {
+          const d = msg.data as unknown as NoteUpdateData | undefined;
+          if (d) stableOnNoteUpdate(d.content);
           break;
         }
 
