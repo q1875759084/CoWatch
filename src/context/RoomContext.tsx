@@ -19,9 +19,12 @@ interface RoomContextValue {
   initRoom: (state: RoomState) => void;
   setActiveVideoUrl: (url: string) => void;
   addVideo: (video: VideoItem) => void;
+  /** HTTP 初始化成员名单（不含 isOnline），WS ROOM_STATE 到达后整体替换（含 isOnline） */
   setMembers: (members: Member[]) => void;
   addMember: (member: Member) => void;
   removeMember: (userId: string) => void;
+  /** 单个成员上下线时调用（MEMBER_OFFLINE / MEMBER_JOINED） */
+  setMemberOnline: (userId: string, isOnline: boolean) => void;
   setControlMode: (mode: ControlMode) => void;
   setControllerId: (userId: string | null) => void;
 }
@@ -34,6 +37,7 @@ const RoomContext = createContext<RoomContextValue>({
   setMembers: () => {},
   addMember: () => {},
   removeMember: () => {},
+  setMemberOnline: () => {},
   setControlMode: () => {},
   setControllerId: () => {},
 });
@@ -42,17 +46,23 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
 
   /**
-   * WS ROOM_STATE 可能早于 HTTP initRoom 到达，此时 roomState 为 null，
-   * setActiveVideoUrl 的 setState(prev => prev ? ... : prev) 会丢弃 url。
-   * 用 ref 暂存，initRoom 完成时将其合并进初始 state。
+   * WS ROOM_STATE / setActiveVideoUrl / setMembers 可能早于 HTTP initRoom 到达。
+   * 此时 roomState 为 null，setState 的 prev 为 null 会直接丢弃数据。
+   * 用 ref 暂存，initRoom 执行时合并进初始 state。
    */
   const pendingActiveVideoUrlRef = useRef<string | null>(null);
+  const pendingMembersRef = useRef<Member[] | null>(null);
 
   const initRoom = useMemoizedFn((state: RoomState) => {
-    const pending = pendingActiveVideoUrlRef.current;
+    const pendingUrl = pendingActiveVideoUrlRef.current;
+    const pendingMembers = pendingMembersRef.current;
     pendingActiveVideoUrlRef.current = null;
-    // 若 WS 先于 HTTP 写入了 activeVideoUrl，合并进初始 state
-    setRoomState(pending ? { ...state, activeVideoUrl: pending } : state);
+    pendingMembersRef.current = null;
+    setRoomState({
+      ...state,
+      ...(pendingUrl    ? { activeVideoUrl: pendingUrl }    : {}),
+      ...(pendingMembers ? { members: pendingMembers }       : {}),
+    });
   });
 
   const setActiveVideoUrl = useMemoizedFn((url: string) => {
@@ -82,15 +92,42 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   });
 
   const setMembers = useMemoizedFn((members: Member[]) => {
-    setRoomState((prev) => prev ? { ...prev, members } : prev);
+    setRoomState((prev) => {
+      if (!prev) {
+        // WS 早于 HTTP 到达：roomState 尚未初始化，暂存等 initRoom 消费
+        pendingMembersRef.current = members;
+        return prev;
+      }
+      return { ...prev, members };
+    });
   });
 
   const addMember = useMemoizedFn((member: Member) => {
     setRoomState((prev) => {
       if (!prev) return prev;
-      // 已存在则跳过（幂等）
-      if (prev.members.some((m) => m.userId === member.userId)) return prev;
+      // 已存在则更新 isOnline：HTTP 名单里的成员 isOnline 为 undefined，
+      // MEMBER_JOINED 到达时补上 isOnline: true（成员重新连上 WS）
+      if (prev.members.some((m) => m.userId === member.userId)) {
+        return {
+          ...prev,
+          members: prev.members.map((m) =>
+            m.userId === member.userId ? { ...m, isOnline: member.isOnline } : m
+          ),
+        };
+      }
       return { ...prev, members: [...prev.members, member] };
+    });
+  });
+
+  const setMemberOnline = useMemoizedFn((userId: string, isOnline: boolean) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        members: prev.members.map((m) =>
+          m.userId === userId ? { ...m, isOnline } : m
+        ),
+      };
     });
   });
 
@@ -100,8 +137,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       return { ...prev, members: prev.members.filter((m) => m.userId !== userId) };
     });
   });
-
-  // setMemberOnline 已移除：isOnline 语义废弃，在房间即在线，离开即从列表移除
 
   const setControlMode = useMemoizedFn((mode: ControlMode) => {
     setRoomState((prev) => prev ? { ...prev, controlMode: mode } : prev);
@@ -121,6 +156,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setMembers,
         addMember,
         removeMember,
+        setMemberOnline,
         setControlMode,
         setControllerId,
       }}

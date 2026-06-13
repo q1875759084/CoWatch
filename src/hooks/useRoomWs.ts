@@ -8,6 +8,7 @@ import type {
   ControlChangedData,
   MemberJoinedData,
   MemberLeftData,
+  MemberOfflineData,
   RoomStateData,
   VideoAddedData,
   SwitchVideoData,
@@ -83,6 +84,7 @@ export function useRoomWs({
     setMembers,
     addMember,
     removeMember,
+    setMemberOnline,
     setControllerId,
     setActiveVideoUrl,
     addVideo,
@@ -143,6 +145,7 @@ export function useRoomWs({
           if (d) {
             setControllerId(d.controllerId);
             if (d.members?.length) {
+              // WS ROOM_STATE 含 isOnline，整体替换成员列表（HTTP 初始名单不含此字段）
               setMembers(d.members);
             }
             // 初始化视频列表
@@ -180,14 +183,23 @@ export function useRoomWs({
         case 'MEMBER_JOINED': {
           const d = msg.data as unknown as MemberJoinedData | undefined;
           if (d) {
-            addMember({ userId: d.userId, nickname: d.nickname, isAdmin: d.isAdmin });
+            // isOnline: true —— 加入即代表当前在线
+            addMember({ userId: d.userId, nickname: d.nickname, isAdmin: d.isAdmin, isOnline: true });
           }
           break;
         }
 
         case 'MEMBER_LEFT': {
+          // 保留：未来退群/踢人时后端会改发此消息，届时前端需要从列表中删除
           const d = msg.data as unknown as MemberLeftData | undefined;
           if (d) removeMember(d.userId);
+          break;
+        }
+
+        case 'MEMBER_OFFLINE': {
+          // 成员 WS 断线，仅标记离线，不从列表移除
+          const d = msg.data as unknown as MemberOfflineData | undefined;
+          if (d) setMemberOnline(d.userId, false);
           break;
         }
 

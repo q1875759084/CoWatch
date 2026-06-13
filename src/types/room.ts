@@ -16,6 +16,12 @@ export interface Member {
   userId: string;
   nickname: string;
   isAdmin: boolean;
+  /**
+   * WS 连接存在则为 true，断线后标记为 false。
+   * HTTP getInfo 不返回此字段（undefined），由 WS ROOM_STATE 首次写入，
+   * 随后由 MEMBER_JOINED / MEMBER_OFFLINE 增量维护。
+   */
+  isOnline?: boolean;
 }
 
 export interface VideoItem {
@@ -56,6 +62,7 @@ export type WsMessageType =
   | 'CONTROL_CHANGED'
   | 'MEMBER_JOINED'
   | 'MEMBER_LEFT'
+  | 'MEMBER_OFFLINE'
   | 'ROOM_STATE'
   | 'VIDEO_ADDED'
   | 'TAG_ADD'
@@ -102,6 +109,11 @@ export interface MemberJoinedData {
 }
 
 export interface MemberLeftData {
+  userId: string;
+}
+
+/** 下行：服务端 → 前端，成员 WS 断线（仅标记离线，不从列表删除） */
+export interface MemberOfflineData {
   userId: string;
 }
 

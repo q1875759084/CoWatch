@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import type { Member } from '@/types/room';
 import styles from './index.module.scss';
 
@@ -15,19 +16,33 @@ export default function MemberList({
   onSelectController,
   isAdmin,
 }: MemberListProps) {
+  // 在线成员排前，离线排后；同状态内保持原有顺序（稳定排序）
+  const sortedMembers = useMemo(
+    () => [...members].sort((a, b) => Number(b.isOnline) - Number(a.isOnline)),
+    [members],
+  );
+
   return (
     <ul className={styles.list}>
-      {members.map((member) => {
+      {sortedMembers.map((member) => {
         const isController = member.userId === controllerId;
         const canClick =
           isAdmin &&
           onSelectController &&
           !isController;
 
+        const itemClass = [
+          styles.item,
+          isController ? styles.controller : '',
+          !member.isOnline ? styles.offline : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+
         return (
           <li
             key={member.userId}
-            className={`${styles.item} ${isController ? styles.controller : ''}`}
+            className={itemClass}
             onClick={canClick ? () => onSelectController!(member.userId) : undefined}
             style={{ cursor: canClick ? 'pointer' : 'default' }}
             title={canClick ? '点击指定为控制者' : undefined}
