@@ -104,8 +104,8 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
        *   Token 在每次请求时实时读取，无感刷新后也能正确携带新 Token。
        */
       const hls = new Hls({
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
+        maxBufferLength: 20,
+        maxMaxBufferLength: 30,
         xhrSetup: (xhr) => {
           const token = getAccessToken();
           if (token) {
