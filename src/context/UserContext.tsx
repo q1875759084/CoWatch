@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import { setAccessToken, clearAccessToken, getAccessToken } from '@/utils/token';
 import { saveUserInfo, loadUserInfo, clearUserInfo, type StoredUserInfo } from '@/utils/storage';
@@ -11,6 +11,8 @@ interface UserContextValue {
   isAuthLoading: boolean;
   login: (accessToken: string, info: StoredUserInfo) => void;
   logout: () => Promise<void>;
+  /** 判断当前用户是否持有某 plan，未登录或无该 plan 返回 false */
+  hasPlan: (plan: string) => boolean;
 }
 
 const UserContext = createContext<UserContextValue>({
@@ -18,6 +20,7 @@ const UserContext = createContext<UserContextValue>({
   isAuthLoading: true,
   login: () => {},
   logout: async () => {},
+  hasPlan: () => false,
 });
 
 export function UserProvider({ children }: { children: ReactNode }) {
@@ -38,7 +41,12 @@ export function UserProvider({ children }: { children: ReactNode }) {
 
     getProfileApi()
       .then((info) => {
-        const fresh: StoredUserInfo = { userId: info.userId, username: info.username, nickname: info.nickname };
+        const fresh: StoredUserInfo = {
+          userId: info.userId,
+          username: info.username,
+          nickname: info.nickname,
+          plans: info.plans ?? [],
+        };
         setUserInfo(fresh);
         saveUserInfo(fresh);
       })
@@ -64,8 +72,17 @@ export function UserProvider({ children }: { children: ReactNode }) {
     setUserInfo(null);
   });
 
+  /**
+   * 判断当前用户是否持有某 plan
+   * 用 useCallback 保持引用稳定，userInfo 变化时自动更新
+   */
+  const hasPlan = useCallback(
+    (plan: string): boolean => userInfo?.plans?.includes(plan) ?? false,
+    [userInfo],
+  );
+
   return (
-    <UserContext.Provider value={{ userInfo, isAuthLoading, login, logout }}>
+    <UserContext.Provider value={{ userInfo, isAuthLoading, login, logout, hasPlan }}>
       {children}
     </UserContext.Provider>
   );

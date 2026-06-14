@@ -10,6 +10,8 @@ export interface UserInfo {
   userId: string;
   username: string;
   nickname: string;
+  /** 当前用户有效的权益 plan 列表，普通成员为 [] */
+  plans: string[];
 }
 
 export interface AuthResponse {

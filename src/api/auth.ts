@@ -2,12 +2,12 @@ import request from '@/utils/request';
 import type { AuthResponse, UserInfo } from '@/types/api';
 
 /**
- * 注册（自动登录，返回 accessToken + userInfo）
+ * 注册（需邀请码，自动登录，返回 accessToken + userInfo）
  */
-export async function registerApi(username: string, password: string): Promise<AuthResponse> {
+export async function registerApi(username: string, password: string, inviteCode: string): Promise<AuthResponse> {
   const res = await request.post<{ code: number; message: string; data: AuthResponse }>(
     '/auth/register',
-    { username, password },
+    { username, password, inviteCode },
   );
   return res.data.data;
 }

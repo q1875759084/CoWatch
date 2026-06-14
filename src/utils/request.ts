@@ -104,6 +104,12 @@ request.interceptors.response.use(
       }) as never;
     }
 
+    // 4xx（除 401）：尝试从响应体取后端 message，包成 ApiError 让上层拿到中文文案
+    if (response && typeof response.data === 'object' && response.data !== null && 'message' in response.data) {
+      const msg = (response.data as { message?: string }).message;
+      if (msg) return Promise.reject(new ApiError(msg, response));
+    }
+
     return Promise.reject(error);
   },
 );

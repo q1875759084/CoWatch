@@ -11,6 +11,7 @@ type Tab = 'login' | 'register';
  *
  * 账号规则：6-20位，英文字母 + 数字 + 特殊字符
  * 密码规则：至少6位
+ * 注册需要邀请码，邀请码类型决定注册后身份（会员/普通成员）
  * 注册成功后自动登录，直接进入 Dashboard
  */
 export default function AuthPage() {
@@ -20,6 +21,7 @@ export default function AuthPage() {
   const [tab, setTab] = useState<Tab>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -34,12 +36,15 @@ export default function AuthPage() {
     setLoading(true);
 
     try {
-      const apiFn = tab === 'login' ? loginApi : registerApi;
-      const result = await apiFn(username, password);
+      const result = tab === 'login'
+        ? await loginApi(username, password)
+        : await registerApi(username, password, inviteCode);
+
       login(result.accessToken, {
         userId: result.userInfo.userId,
         username: result.userInfo.username,
         nickname: result.userInfo.nickname,
+        plans: result.userInfo.plans ?? [],
       });
       navigate('/', { replace: true });
     } catch (err: unknown) {
@@ -66,12 +71,11 @@ export default function AuthPage() {
             登录
           </button>
           <button
-            disabled
             type="button"
             className={`${styles.tab} ${tab === 'register' ? styles.active : ''}`}
             onClick={() => reset('register')}
           >
-            注册（嘻嘻，还没做）
+            注册
           </button>
         </div>
 
@@ -103,7 +107,22 @@ export default function AuthPage() {
           </div>
 
           {tab === 'register' && (
-            <p className={styles.hint}>注册后账号名即为默认昵称，可后续修改</p>
+            <div className={styles.field}>
+              <label htmlFor="inviteCode">邀请码</label>
+              <input
+                id="inviteCode"
+                type="text"
+                placeholder="请输入邀请码"
+                autoComplete="off"
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value)}
+                required
+              />
+            </div>
+          )}
+
+          {tab === 'register' && (
+            <p className={styles.hint}>注册后账号名即为默认昵称</p>
           )}
 
           {error && <p className={styles.error}>{error}</p>}
