@@ -20,7 +20,7 @@
 | 模块 | 路由 | 说明 |
 |------|------|------|
 | 登录/注册 | `/auth` | 账号注册与登录 |
-| Dashboard | `/` | 我的房间列表、创建/加入房间入口 |
+| Dashboard | `/` | 我的房间列表、创建/加入房间入口；顶栏用户信息面板（hover 弹出：头像（可换图）+ 昵称（可改名）+ uid + 退出登录） |
 | 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 + 进度条 Tag 标注（主控在时间轴打标注，点击跳转并同步给所有成员）+ 鼠标共享（Canvas PainterLayer 蒙层，多端实时同步光标位置）+ 协同绘制（绘制模式下按住左键画笔迹，WS 广播同步，支持黑/白/红三色，清空画布） |
 
 ### 技术栈
@@ -30,6 +30,7 @@
 | 前端 | React 19 + Webpack 5 + TypeScript + antd 5.x，Node 20 |
 | 后端 | Node.js 20 + Express + ws 库 + SQLite（better-sqlite3），用 `tsx` 直接运行 TS |
 | 视频存储 | 腾讯云 COS（预签名直传）或本地 `/uploads` 目录（开发环境） |
+| 头像存储 | 腾讯云 COS static 桶（public read），CDN 域名 `static.daibao.site`，路径 `avatar/{userId}.jpg`；无需签名直接访问；本地开发写入 `uploads/avatar/` 目录 |
 | 实时通信 | WebSocket（ws 库），服务端广播房间事件 |
 
 **项目结构：** 前后端分离，非 Monorepo。`CoWatch/`（前端）和 `CoWatch-backend/`（后端）各自独立。
@@ -49,11 +50,12 @@
 - OSS 预签名直传用 XHR（不能带自定义 Authorization），后端接口上传用 `request.put` + `onUploadProgress`
 - `__dirname` 在 `tsx` 直接运行时指向源文件目录（`src/`），路径层级与编译后运行不同，写静态文件路径时需注意
 - WebSocket 消息类型定义在 `src/types/room.ts`，增加新消息类型时前后端同步更新；当前已有类型含 `DRAW_STROKE`（笔迹广播，含 `userId`、`color`、`points[]`）和 `DRAW_CLEAR`（清空画布），后端纯内存转发不落库
-- SQLite schema 新增字段时，`CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，需手动执行 `ALTER TABLE ... ADD COLUMN` 迁移旧数据库文件
+- SQLite schema 新增字段时，`CREATE TABLE IF NOT EXISTS` 不会修改已存在的表，应在 `schema.ts` 的 `runMigrations()` 中追加 `ALTER TABLE ... ADD COLUMN` 语句并用 try/catch 捕获 `duplicate column name` 错误实现幂等；新列 DB 层默认为 NULL，service 层统一做 fallback（如 `avatar_url ?? DEFAULT_AVATAR_URL`）而不是每处判断 NULL
 - 视频上传前在前端做两层校验（`src/utils/validateVideo.ts`）：① 读文件头 32KB 扫描 moov/mdat 顺序（moov 必须在 mdat 之前）；② 用临时 `<video>` 获取时长后计算平均码率（当前上限 8 Mbps，对应 CRF 28）；失败时用 antd `Modal.error()` 弹窗告知用户
 - 视频上传链路按白名单分流：白名单用户（`users.is_upload_whitelist = 1`）走 OSS 直传（`getUploadUrl` 返回预签名 URL，`mode` 为空）；非白名单用户走后端代理中转（返回 `mode: 'proxy'`，前端 POST 到 `/upload-proxy`，后端流式 putStream 到 OSS）
 - 后端 `uploadGuard` 中间件挂载在 `POST /upload-proxy` 上（非白名单用户上传路径）：校验 Sec-Fetch 请求头 + 每日中转总字节数上限 5GB（`Content-Length` 预检 + 真实写入后 `addDailyBytes` 计费）；白名单用户不经过此中间件；OSS 服务端的 `content-length-range` Policy 待接入 COS 时对白名单直传启用
 - `.bat` 压缩脚本：当前仅开放 `compress_30.bat`（CRF 30），`BatController` 的 `VALID_PRESETS` 仅含 `'30'`，扩展时在数组和 `src/assets/bat/` 目录同步新增对应文件；ffmpeg 下载至 `%LOCALAPPDATA%\CoWatch\ffmpeg-bin\`（与 `.bat` 存放位置无关，用户移动脚本不会触发重复下载）
+- multer 文件上传路由中，`upload.single()` 之后必须挂载专用 4 参数错误中间件（`err, req, res, next`）拦截 `MulterError`（超大文件等）并返回 400；否则会被全局 errorHandler 当成 500 处理。后续内联箭头函数需显式标注 `(req: Request, res: Response)`，否则 TypeScript 推断链断裂报 `implicit any`
 
 ## 编码规范
 

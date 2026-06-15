@@ -22,6 +22,7 @@
   overflow-y: auto;
   min-width: 0;
   padding-top: 8px;
+  background: #161b22;
 }
 
 // 16:9 视频容器。
@@ -73,7 +74,7 @@
   position: relative;
   width: 280px;
   flex-shrink: 0;
-  background: #0f172a;
+  background: #161b22;
   border-left: 1px solid rgba(255, 255, 255, 0.06);
   overflow-y: auto;
   overflow-x: hidden;
@@ -111,7 +112,7 @@
   height: 48px;
   border: none;
   border-radius: 6px 0 0 6px;
-  background: #0f172a;
+  background: #161b22;
   color: #4a5568;
   font-size: 10px;
   cursor: pointer;

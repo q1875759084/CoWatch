@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { DownOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
 interface CollapseSectionProps {
@@ -50,7 +51,7 @@ export default function CollapseSection({
           onClick={() => setOpen((v) => !v)}
         >
           {titleContent}
-          <span className={`${styles.arrow} ${open ? styles.arrowOpen : ''}`}>▼</span>
+          <DownOutlined className={`${styles.arrow} ${open ? styles.arrowOpen : ''}`} />
         </button>
       ) : (
         <div className={styles.header}>

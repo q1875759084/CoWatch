@@ -1196,6 +1196,27 @@ parent.addEventListener('click', handleClick, { capture: true });
 
 ---
 
+### Docker Hub mirror 同步延迟导致 CI/CD 拉镜像失败
+
+**现象：** 业务仓库 CI 推镜像成功后立刻触发 infra 部署，infra `docker pull` 报 `manifest not found` 或 `content not found`。
+
+**根因：** 服务器配置了第三方 mirror（如 `docker.1ms.run`）做 Docker Hub 加速。mirror 是**按需缓存**机制——首次有人拉某个 tag 时才回源 Docker Hub 建立缓存。push 完立刻触发 infra，此时 mirror 尚未缓存该镜像，拉取失败。
+
+**解决：** 等几分钟让 mirror 同步完成后，在 infra 手动重新触发 `workflow_dispatch`，填入相同的 image tag（如 `sha-4a61131d`）即可。
+
+**长期方案（待实施）：** 在 infra deploy script 中加 pull 重试逻辑：
+```bash
+for i in 1 2 3; do
+  docker pull docker.io/$DOCKER_HUB_USERNAME/cowatch:$FRONTEND_TAG && break
+  echo "pull 失败，第 $i 次重试（等待 15s）..."
+  sleep 15
+done
+```
+
+**注意：** image tag 是 `sha-4a61131d` 这样的短 SHA（CI 生成），不是 `sha256:675d769d...` 这种 digest。infra `workflow_dispatch` 的 `image_tag` 参数填前者。
+
+---
+
 ### 腾讯云 CDN 日志字段解读
 
 **日志格式（空格分隔）：**

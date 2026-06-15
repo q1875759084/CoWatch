@@ -21,8 +21,7 @@ import PainterLayer, {
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './cursorStyles';
 import NotePanel from './NotePanel';
-import iconLeft from '@/assets/icon/dark/left.svg';
-import iconRight from '@/assets/icon/dark/right.svg';
+import { LeftOutlined, RightOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
 /** 默认画笔颜色 */
@@ -671,12 +670,7 @@ export default function RoomPage() {
                         onClick={() => setPanelCollapsed((v) => !v)}
                         title={panelCollapsed ? '展开面板' : '收起面板'}
                     >
-                        <img
-                            src={panelCollapsed ? iconLeft : iconRight}
-                            alt={panelCollapsed ? '展开' : '收起'}
-                            width={16}
-                            height={16}
-                        />
+                        {panelCollapsed ? <LeftOutlined /> : <RightOutlined />}
                     </button>
                     <div className={`${styles.panelContent} ${panelCollapsed ? styles.panelContentHidden : ''}`}>
                     <ControlPanel

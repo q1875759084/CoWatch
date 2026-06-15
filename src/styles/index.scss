@@ -1,0 +1,45 @@
+// ── 全局基础样式 ──────────────────────────────────────────────────────────────
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  line-height: 1.6;
+  font-size: 14px;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+// ── antd 深色主题适配 ────────────────────────────────────────────────────────
+
+// Switch 未选中轨道色：antd 默认几乎透明，深色背景下不可见
+.ant-switch:not(.ant-switch-checked) {
+  background: #4a5568;
+}
+
+.ant-switch:not(.ant-switch-checked):hover {
+  background: #6b7280 !important;
+}

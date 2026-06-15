@@ -8,42 +8,35 @@
 .roomIdRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px; // ID 与按钮之间留小间距，不贴边
+  justify-content: flex-start;
 }
 
 .roomIdText {
-  font-size: 14px;
-  font-weight: 700;
-  color: #68d391;
-  letter-spacing: 1px;
-  flex: 1;
+  color: #a0aec0;
+  letter-spacing: 0.5px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.roomNameHint {
-  font-size: 11px;
-  color: #4a5568;
-  margin-top: 4px;
-}
 
 .copyBtn {
   flex-shrink: 0;
-  padding: 3px 10px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   background: none;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 4px;
   color: #8b949e;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s;
-
-  &:hover {
-    border-color: #68d391;
-    color: #68d391;
-  }
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
 }
 
 .copyBtnDone {
@@ -51,13 +44,6 @@
   color: #68d391;
 }
 
-.controllerInfo {
-  font-size: 13px;
-}
-
-.designatedMode {
-  color: #e2e8f0;
-}
 
 .modeHint {
   font-size: 11px;

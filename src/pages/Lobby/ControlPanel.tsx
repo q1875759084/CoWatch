@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Modal, Switch } from 'antd';
+import { Modal, Switch, Tooltip } from 'antd';
+import { CopyOutlined, CheckOutlined } from '@ant-design/icons';
 import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
 import MemberList from '@/components/MemberList';
@@ -69,8 +70,6 @@ export default function ControlPanel({
   onClearStrokes,
   onClearStrokesByColor,
 }: ControlPanelProps) {
-  const controller = members.find((m) => m.userId === controllerId);
-
   const [copied, setCopied] = useState(false);
   const handleCopy = useMemoizedFn(() => {
     void navigator.clipboard.writeText(roomId).then(() => {
@@ -110,30 +109,18 @@ export default function ControlPanel({
   return (
     <div className={styles.panel}>
       {/* Room ID */}
-      <CollapseSection title="Room ID">
+      <CollapseSection title={roomName || roomId}>
         <div className={styles.roomIdRow}>
           <span className={styles.roomIdText}>{roomId}</span>
-          <button
-            type="button"
-            className={`${styles.copyBtn} ${copied ? styles.copyBtnDone : ''}`}
-            onClick={handleCopy}
-            title="复制房间码"
-          >
-            {copied ? '✓' : '复制'}
-          </button>
-        </div>
-        {roomName && <div className={styles.roomNameHint}>{roomName}</div>}
-      </CollapseSection>
-
-      {/* 控制权 */}
-      <CollapseSection title="控制权">
-        {isAdmin && (
-          <p className={styles.modeHint}>点击成员名称可指定其为控制者</p>
-        )}
-        <div className={styles.controllerInfo}>
-          <span className={styles.designatedMode}>
-            {controller ? controller.nickname : '无'} 正在控制
-          </span>
+          <Tooltip title={copied ? '已复制' : '复制房间码'} placement="top">
+            <button
+              type="button"
+              className={`${styles.copyBtn} ${copied ? styles.copyBtnDone : ''}`}
+              onClick={handleCopy}
+            >
+              {copied ? <CheckOutlined /> : <CopyOutlined />}
+            </button>
+          </Tooltip>
         </div>
       </CollapseSection>
 
@@ -219,6 +206,9 @@ export default function ControlPanel({
 
       {/* 成员列表 */}
       <CollapseSection title="成员" collapsible>
+        {isAdmin && (
+          <p className={styles.modeHint}>点击成员名称可指定其为控制者</p>
+        )}
         <MemberList
           members={members}
           controllerId={controllerId}
