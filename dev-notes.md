@@ -253,6 +253,46 @@ function stripCosSignature(url: string): string {
 
 ## 工具与概念
 
+### CSS `grid-template-rows` 折叠动画
+
+**背景：** 需要为 `CollapseSection` 组件实现展开/收起过渡动画。
+
+**为什么不用 `max-height` 过渡：**
+`max-height` 必须写死一个足够大的上限值（如 `999px`）。过渡时浏览器在 `0 → 999px` 全程匀速，但内容实际高度只有 `200px`，`999→200` 这段视觉静止，导致动画明显卡顿/延迟。贝塞尔曲线（easing）无法解决此问题——它只控制速率，不改变起止值范围。
+
+**为什么不用 JS 读取 scrollHeight：**
+需要在展开/收起前后各插一次 `requestAnimationFrame` 强制回流，还要监听 `transitionend` 清除 inline style，逻辑复杂且容易出现"从 auto 直接到 0 无动画"的边界 bug（antd 的 rc-motion 通过两步 `auto → 精确值 → 0` 解决，但实现较重）。
+
+**最终方案：`grid-template-rows: 1fr ↔ 0fr`**
+
+浏览器在插值时自动感知 `1fr` 对应的真实行高，过渡范围精确等于内容高度，无需任何 JS。
+
+```scss
+// 外层 grid 容器
+.body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.25s ease;
+}
+.bodyClosed {
+  grid-template-rows: 0fr;
+  .bodyInner { padding-top: 0; padding-bottom: 0; }
+}
+
+// 内层必须有 overflow: hidden，否则 grid 行高归 0 后内容仍然溢出可见
+.bodyInner {
+  overflow: hidden;
+  padding: 0 12px 12px;
+  transition: padding 0.25s ease;
+}
+```
+
+**必须双层 DOM 的原因：** `grid-template-rows: 0fr` 只压缩 grid 行高，不处理直接子元素的 `padding`。`padding` 区域不受 `overflow: hidden` 裁剪，需要内层元素单独同步过渡 `padding → 0`。
+
+**已知限制（兼容性）：** `grid-template-rows` 插值动画在 Chrome 107+、Firefox 116+、Safari 16+ 才稳定支持，不支持 IE。对于只需支持现代浏览器的项目（如 CoWatch）完全可用。
+
+---
+
 ### SW 视频缓存：Range 请求重组与预缓存
 
 **背景：** 视频播放器不会一次性请求整个视频文件，而是通过多个 `Range` 请求分段拉取（如 `bytes=0-65535`）。这导致两个问题需要解决：
