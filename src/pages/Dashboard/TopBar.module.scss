@@ -16,29 +16,170 @@
   letter-spacing: 0.5px;
 }
 
-.user {
+// 头像触发按钮：重置 button 默认样式
+.avatarBtn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
   display: flex;
   align-items: center;
-  gap: 12px;
+  border-radius: 50%;
+  transition: opacity 0.15s;
+
+  &:hover {
+    opacity: 0.85;
+  }
 }
 
-.nickname {
-  color: #c9d1d9;
-  font-size: 14px;
+// ── Popover 卡片内容 ───────────────────────────────────────────────────────────
+
+.popoverCard {
+  width: 210px;
+  padding: 0;
 }
 
-.logoutBtn {
-  background: none;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  color: #8b949e;
-  font-size: 13px;
-  padding: 4px 12px;
+// 头像换图区域：相对定位容器 + hover 遮罩
+.avatarWrap {
+  position: relative;
+  flex-shrink: 0;
   cursor: pointer;
-  transition: color 0.2s, border-color 0.2s;
+  border-radius: 50%;
+  overflow: hidden;
+
+  // hover 时显示遮罩
+  &:hover .avatarOverlay {
+    opacity: 1;
+  }
+}
+
+.avatarOverlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none; // 点击穿透到 .avatarWrap
+}
+
+// 上传中：遮罩常亮
+.avatarUploading {
+  opacity: 1 !important;
+}
+
+// 分块容器：上区、下区分别用此包裹，上下各留 6px
+.cardSection {
+  padding: 12px 0;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cardInfo {
+  min-width: 0;
+  flex: 1;
+}
+
+// 昵称行：文字 + 铅笔图标横排，hover 时图标才出现
+.nicknameRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  cursor: default;
+
+  &:hover .editIcon {
+    opacity: 1;
+  }
+}
+
+.cardNickname {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.editIcon {
+  font-size: 12px;
+  color: #8b949e;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  flex-shrink: 0;
+  cursor: pointer;
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}
+
+// 昵称编辑输入框：跟昵称文字等高，无边框背景，深色风格
+.nicknameInput {
+  width: 100%;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 1px 5px;
+  outline: none;
+  box-sizing: border-box;
+
+  &:focus {
+    border-color: #58a6ff;
+  }
+}
+
+.cardUid {
+  font-size: 11px;
+  color: #4a5568;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logoutText {
+  font-size: 13px;
+  color: #8b949e;
+  cursor: pointer;
+  padding: 2px 0;
+  transition: color 0.15s;
 
   &:hover {
     color: #f85149;
-    border-color: #f85149;
+  }
+}
+
+// ── Popover 深色主题覆写 ───────────────────────────────────────────────────────
+// overlayClassName 绑定此 class，限定覆写范围避免污染其他 Popover
+.darkPopover {
+  // antd v6 内容容器类名为 ant-popover-container（v5 是 ant-popover-inner）
+  :global(.ant-popover-container) {
+    // CSS 变量覆写（antd v6 通过变量注入颜色，直接写 background 会被变量覆盖）
+    --ant-color-bg-elevated: #1c2128;
+    background: #1c2128;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    padding: 0 12px;
+  }
+
+  :global(.ant-divider) {
+    border-color: #30363d;
   }
 }

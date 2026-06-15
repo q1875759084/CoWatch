@@ -46,6 +46,7 @@ export function UserProvider({ children }: { children: ReactNode }) {
           username: info.username,
           nickname: info.nickname,
           plans: info.plans ?? [],
+          avatarUrl: info.avatarUrl,
         };
         setUserInfo(fresh);
         saveUserInfo(fresh);

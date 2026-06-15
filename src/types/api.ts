@@ -12,6 +12,8 @@ export interface UserInfo {
   nickname: string;
   /** 当前用户有效的权益 plan 列表，普通成员为 [] */
   plans: string[];
+  /** 用户头像 URL，始终非空（后端 DB 为 null 时返回默认头像地址） */
+  avatarUrl: string;
 }
 
 export interface AuthResponse {

@@ -39,3 +39,31 @@ export async function getProfileApi(): Promise<UserInfo> {
 export async function logoutApi(): Promise<void> {
   await request.post('/auth/logout');
 }
+
+/**
+ * 修改昵称（最多 20 个字符）
+ */
+export async function updateNicknameApi(nickname: string): Promise<string> {
+  const res = await request.put<{ code: number; message: string; data: { nickname: string } }>(
+    '/auth/nickname',
+    { nickname },
+  );
+  return res.data.data.nickname;
+}
+
+/**
+ * 上传用户头像
+ *
+ * @param file  用户选择的图片文件（jpg / png / webp，≤ 2MB）
+ * @returns     新头像的 CDN URL
+ */
+export async function uploadAvatarApi(file: File): Promise<string> {
+  const form = new FormData();
+  form.append('avatar', file);
+  const res = await request.post<{ code: number; message: string; data: { avatarUrl: string } }>(
+    '/auth/avatar',
+    form,
+    { headers: { 'Content-Type': 'multipart/form-data' } },
+  );
+  return res.data.data.avatarUrl;
+}

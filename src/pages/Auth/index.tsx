@@ -45,6 +45,7 @@ export default function AuthPage() {
         username: result.userInfo.username,
         nickname: result.userInfo.nickname,
         plans: result.userInfo.plans ?? [],
+        avatarUrl: result.userInfo.avatarUrl,
       });
       navigate('/', { replace: true });
     } catch (err: unknown) {
