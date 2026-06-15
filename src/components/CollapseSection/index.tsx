@@ -23,6 +23,9 @@ interface CollapseSectionProps {
  *
  * **可折叠（collapsible=true）**
  *   标题行可点击展开/折叠，右侧 ▼ 箭头旋转指示状态。
+ *
+ * 折叠动画通过 CSS grid-template-rows: 1fr ↔ 0fr 实现，
+ * 浏览器自动感知真实内容高度，无需 JS 读取 scrollHeight。
  */
 export default function CollapseSection({
   title,
@@ -54,7 +57,12 @@ export default function CollapseSection({
           {titleContent}
         </div>
       )}
-      {(!collapsible || open) && <div className={styles.body}>{children}</div>}
+      {/* grid 容器：1fr ↔ 0fr 过渡，浏览器自动计算真实高度，无需写死数值 */}
+      <div className={`${styles.body} ${collapsible && !open ? styles.bodyClosed : ''}`}>
+        <div className={styles.bodyInner}>
+          {children}
+        </div>
+      </div>
     </div>
   );
 }

@@ -56,7 +56,26 @@
   transform: rotate(180deg);
 }
 
-// 展开内容区：左右与 header 对齐，底部留白
+// grid 容器：grid-template-rows: 1fr ↔ 0fr 过渡，浏览器自动感知真实行高
 .body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.bodyClosed {
+  grid-template-rows: 0fr;
+
+  // 同步消除 padding：grid 行高归 0 时 padding 仍会占高，需要一并收缩
+  .bodyInner {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}
+
+// 内层 wrapper：overflow: hidden 裁剪内容；padding 跟随 transition 收缩
+.bodyInner {
+  overflow: hidden;
   padding: 0 12px 12px;
+  transition: padding 0.25s ease;
 }
