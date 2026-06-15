@@ -1,7 +1,7 @@
-import { useState, type FormEvent } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Modal, Tabs, Form, Input, Button } from 'antd';
 import { createRoomApi, joinRoomApi } from '@/api/room';
-import styles from './RoomModal.module.scss';
 
 type ModalTab = 'create' | 'join';
 
@@ -17,123 +17,89 @@ interface RoomModalProps {
 export function RoomModal({ onClose, onSuccess }: RoomModalProps) {
   const navigate = useNavigate();
   const [tab, setTab] = useState<ModalTab>('create');
-  const [roomName, setRoomName] = useState('');
-  const [roomId, setRoomId] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [nameError, setNameError] = useState('');
+  const [form] = Form.useForm<{ roomName?: string; roomId?: string }>();
 
   const switchTab = (next: ModalTab) => {
     setTab(next);
-    setError('');
-    setNameError('');
+    form.resetFields();
   };
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setNameError('');
-
-    // 创建时前置校验房间名
-    if (tab === 'create') {
-      if (!roomName.trim()) {
-        setNameError('请输入房间名');
-        return;
-      }
-      if (roomName.trim().length > 10) {
-        setNameError('房间名最多 10 个字符');
-        return;
-      }
-    }
-
-    if (tab === 'join' && !roomId.trim()) {
-      setError('请输入房间码');
-      return;
-    }
-
+  const handleSubmit = async () => {
+    const values = await form.validateFields();
     setLoading(true);
     try {
       if (tab === 'create') {
-        const result = await createRoomApi(roomName.trim());
+        const result = await createRoomApi(values.roomName!.trim());
         onSuccess();
         navigate(`/room/${result.roomId}/lobby`);
       } else {
-        await joinRoomApi(roomId.trim());
+        await joinRoomApi(values.roomId!.trim());
         onSuccess();
-        navigate(`/room/${roomId.trim()}/lobby`);
+        navigate(`/room/${values.roomId!.trim()}/lobby`);
       }
       onClose();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '操作失败，请稍后重试');
+      form.setFields([
+        {
+          name: tab === 'create' ? 'roomName' : 'roomId',
+          errors: [err instanceof Error ? err.message : '操作失败，请稍后重试'],
+        },
+      ]);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className={styles.overlay} onClick={onClose}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div className={styles.header}>
-          <h3>{tab === 'create' ? '创建新房间' : '加入房间'}</h3>
-          <button type="button" onClick={onClose}>×</button>
-        </div>
+    <Modal
+      open
+      title={tab === 'create' ? '创建新房间' : '加入房间'}
+      onCancel={onClose}
+      footer={
+        <Button type="primary" loading={loading} onClick={() => void handleSubmit()}>
+          {tab === 'create' ? '立即创建' : '加入房间'}
+        </Button>
+      }
+      width={360}
+      destroyOnHidden
+    >
+      <Tabs
+        activeKey={tab}
+        onChange={(key) => switchTab(key as ModalTab)}
+        items={[
+          { key: 'create', label: '创建房间' },
+          { key: 'join', label: '加入房间' },
+        ]}
+      />
 
-        <div className={styles.tabs}>
-          <button
-            type="button"
-            className={`${styles.tab} ${tab === 'create' ? styles.active : ''}`}
-            onClick={() => switchTab('create')}
+      <Form form={form} layout="vertical" onFinish={() => void handleSubmit()}>
+        {tab === 'create' ? (
+          <Form.Item
+            name="roomName"
+            rules={[
+              { required: true, message: '请输入房间名' },
+              { max: 10, message: '房间名最多 10 个字符' },
+            ]}
           >
-            创建房间
-          </button>
-          <button
-            type="button"
-            className={`${styles.tab} ${tab === 'join' ? styles.active : ''}`}
-            onClick={() => switchTab('join')}
-          >
-            加入房间
-          </button>
-        </div>
-
-        <form onSubmit={(e) => { void handleSubmit(e); }}>
-          {tab === 'create' && (
-            <div className={styles.fieldGroup}>
-              <input
-                className={`${styles.input} ${nameError ? styles.inputError : ''}`}
-                type="text"
-                placeholder="输入房间名，最多 10 个字符"
-                value={roomName}
-                maxLength={10}
-                autoFocus
-                onChange={(e) => {
-                  setRoomName(e.target.value);
-                  if (nameError) setNameError('');
-                }}
-              />
-              {nameError && <p className={styles.fieldError}>{nameError}</p>}
-            </div>
-          )}
-
-          {tab === 'join' && (
-            <input
-              className={styles.input}
-              type="text"
-              placeholder="输入房间码（6位字母/数字）"
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value)}
+            <Input
+              placeholder="输入房间名，最多 10 个字符"
+              maxLength={10}
               autoFocus
             />
-          )}
-
-          {error && <p className={styles.error}>{error}</p>}
-
-          <div className={styles.actions}>
-            <button type="submit" className={styles.confirm} disabled={loading}>
-              {loading ? '处理中…' : tab === 'create' ? '立即创建' : '加入房间'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+          </Form.Item>
+        ) : (
+          <Form.Item
+            name="roomId"
+            rules={[{ required: true, message: '请输入房间码' }]}
+          >
+            <Input
+              placeholder="输入房间码（6位字母/数字）"
+              autoFocus
+            />
+          </Form.Item>
+        )}
+      </Form>
+    </Modal>
   );
 }

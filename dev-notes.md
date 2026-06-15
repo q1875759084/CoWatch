@@ -922,6 +922,32 @@ req → 写入 /tmp/cowatch-{uuid}.mp4（本地磁盘 I/O）
 
 ---
 
+### .bat 压缩脚本分发设计
+
+**背景：** 用户需要在上传前用 ffmpeg 对录屏做 CRF 转码，后端提供 `.bat` 脚本供 Windows 用户下载使用。
+
+**ffmpeg 存储位置：`%LOCALAPPDATA%\CoWatch\ffmpeg-bin\`**
+
+早期版本将 ffmpeg 下载到 `.bat` 同目录的 `ffmpeg-bin\` 子文件夹。用户不了解原理时容易只移动 `.bat` 文件，导致每次使用都触发重新下载（130MB）。改为固定存储在 `%LOCALAPPDATA%\CoWatch\ffmpeg-bin\`（即 `C:\Users\{用户名}\AppData\Local\CoWatch\ffmpeg-bin\`）：
+- 路径与 `.bat` 存放位置完全无关，移动脚本不影响 ffmpeg 复用
+- `%LOCALAPPDATA%` 是用户目录，无需管理员权限，各 Windows 版本均有效
+
+**PowerShell 下载的两个必要优化：**
+
+1. **`$ProgressPreference = 'SilentlyContinue'`**：`Invoke-WebRequest` 默认渲染进度条，在 cmd 窗口内嵌执行时会大幅拖慢下载速度（130MB 可能从 30 秒变成 5 分钟），且界面出现乱码/闪烁。`SilentlyContinue` 禁用进度条，速度恢复正常。
+
+2. **`try/catch + exit 1`**：PowerShell 下载失败时默认退出码不一定传递给 cmd，直接用 `if errorlevel 1` 捕获不可靠。用 `try { ... } catch { exit 1 }` 包裹，配合 cmd 侧的 `if errorlevel 1 ( pause; exit /b 1 )` 才能让窗口在失败时停住而不是闪退。
+
+**当前档位与扩展方式：**
+
+仅开放 CRF 30 一档，`BatController` 中 `VALID_PRESETS = ['30']`。扩展时两处同步：
+1. `src/assets/bat/` 新增对应 `.bat` 文件
+2. `VALID_PRESETS` 数组添加对应数字字符串
+
+**ffmpeg 安全性：** 使用 gyan.dev 构建的有 Authenticode 签名版本，Windows Defender 误杀率低。企业 EDR 环境（Crowdstrike 等）可能仍会拦截，属于策略问题，无法在 `.bat` 层面解决。
+
+---
+
 ## CDN 接入与 TypeA 鉴权
 
 ### 背景
@@ -1127,3 +1153,22 @@ parent.addEventListener('click', handleClick, { capture: true });
 **影响：** .m3u8 `#EXTINF:` 标记的是每片实际时长，hls.js 能正确处理不均匀片长，播放不受影响。
 
 **注意：** 如果需要严格的 15s 切割（如广告插入场景），必须用 `-c:v libx264 -force_key_frames "expr:gte(t, n_forced * 15)"` 强制在切割点插入 I 帧，代价是重编码，时间更长（约 2–5 倍）。CoWatch 复盘场景不需要严格切割，`-c copy` 足够。
+
+---
+
+### 腾讯云 CDN 日志字段解读
+
+**日志格式（空格分隔）：**
+```
+时间 IP 域名 路径 响应字节数 请求数 并发数 状态码 NULL 耗时ms UA referer 方法 协议 缓存状态 端口
+```
+
+**第5字段 = 实际传输字节数**（非 `Content-Length` 元数据）。浏览器 Range 请求下值较小（几百KB/片），完整下载时与文件大小接近。
+
+**`Go-http-client/1.1` UA + `hit` 缓存状态 = CDN 节点间内网流量**
+
+`123.58.10.x` 是腾讯云 CDN 内部节点 IP，`Go-http-client` 是其内部传输客户端的 UA。缓存状态 `hit` 表示该节点已有缓存，不触发回源，**流量不计入 COS 出口流量**，计入 CDN 节点间流量费用科目（通常低于出口流量单价，部分套餐免费）。
+
+**`miss` = 真实回源**，此时 COS 出口流量计费。整个 6.14 晚 18-20 点时段仅有 1 条 `miss`（64KB，分片回源首片），说明 CDN 缓存命中率极高。
+
+**真实用户流量识别：** 看 UA 是否为浏览器（`Mozilla/5.0`）或 PowerShell（`WindowsPowerShell`），排除 `Go-http-client` 节点内部流量后，才是终端用户实际产生的下载流量。

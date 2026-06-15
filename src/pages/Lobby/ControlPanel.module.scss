@@ -67,45 +67,6 @@
 
 // ── 鼠标共享区块 ──────────────────────────────────────────────────────────────
 
-// Toggle 开关（CSS only，无第三方组件）
-.cursorToggle {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 10px;
-  cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
-  flex-shrink: 0;
-  padding: 0;
-
-  &:hover {
-    border-color: rgba(255, 255, 255, 0.25);
-  }
-}
-
-.cursorToggleOn {
-  background: rgba(99, 179, 237, 0.35);
-  border-color: #63b3ed;
-
-  .cursorToggleThumb {
-    transform: translateX(16px);
-    background: #63b3ed;
-  }
-}
-
-.cursorToggleThumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  background: #4a5568;
-  border-radius: 50%;
-  transition: transform 0.2s, background 0.2s;
-}
-
 // 样式选择器：图片直接排列，无边框容器感
 .cursorStylePicker {
   display: flex;

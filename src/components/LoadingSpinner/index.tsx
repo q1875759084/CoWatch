@@ -1,4 +1,4 @@
-import styles from './index.module.scss';
+import { Spin } from 'antd';
 
 interface LoadingSpinnerProps {
   text?: string;
@@ -6,10 +6,8 @@ interface LoadingSpinnerProps {
 }
 
 export default function LoadingSpinner({ text = '加载中...', fullPage = false }: LoadingSpinnerProps) {
-  return (
-    <div className={`${styles.wrapper} ${fullPage ? styles.fullPage : ''}`}>
-      <div className={styles.spinner} />
-      {text && <p className={styles.text}>{text}</p>}
-    </div>
-  );
+  if (fullPage) {
+    return <Spin tip={text} size="large" fullscreen />;
+  }
+  return <Spin tip={text} size="large" />;
 }

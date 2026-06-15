@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Modal } from 'antd';
+import { Modal, Switch } from 'antd';
 import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
 import MemberList from '@/components/MemberList';
@@ -163,27 +163,23 @@ export default function ControlPanel({
         {/* 鼠标共享开关 */}
         <div className={styles.toggleRow}>
           <span className={styles.toggleLabel}>🖱️ 鼠标共享</span>
-          <button
-            type="button"
-            className={`${styles.cursorToggle} ${cursorEnabled ? styles.cursorToggleOn : ''}`}
-            onClick={onCursorToggle}
+          <Switch
+            size="small"
+            checked={cursorEnabled}
+            onChange={onCursorToggle}
             title={cursorEnabled ? '关闭鼠标共享' : '开启鼠标共享'}
-          >
-            <span className={styles.cursorToggleThumb} />
-          </button>
+          />
         </div>
 
         {/* 绘制模式开关 */}
         <div className={styles.toggleRow}>
           <span className={styles.toggleLabel}>✒️ 绘制模式</span>
-          <button
-            type="button"
-            className={`${styles.cursorToggle} ${drawingMode ? styles.cursorToggleOn : ''}`}
-            onClick={onDrawingModeToggle}
+          <Switch
+            size="small"
+            checked={drawingMode}
+            onChange={onDrawingModeToggle}
             title={drawingMode ? '退出绘制模式' : '进入绘制模式'}
-          >
-            <span className={styles.cursorToggleThumb} />
-          </button>
+          />
         </div>
 
         {/* 颜色选择器 — 始终显示，与绘制模式无关 */}
