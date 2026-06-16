@@ -84,7 +84,7 @@
 
 // 折叠态：收缩为切换按钮的宽度
 .panelCollapsed {
-  width: 28px;
+  width: 24px;
   overflow-y: hidden;
 }
 
@@ -108,20 +108,24 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  width: 24px;
   height: 48px;
   border: none;
   border-radius: 6px 0 0 6px;
   background: #161b22;
-  color: #4a5568;
-  font-size: 10px;
+  color: #718096;
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: color 0.15s;
   z-index: 1;
   flex-shrink: 0;
 
+  // svg icon 固定 16px
+  :global(svg) {
+    width: 16px;
+    height: 16px;
+  }
+
   &:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: #a0aec0;
+    color: #e2e8f0;
   }
 }
