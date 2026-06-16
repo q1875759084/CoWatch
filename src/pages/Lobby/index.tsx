@@ -83,6 +83,8 @@ export default function RoomPage() {
      *   - 非空 → 已由本地点击或远端广播设置
      */
     const [activeVideoId, setActiveVideoId] = useState<string>('');
+    /** 始终保持最新的 activeVideoId，供 useMemoizedFn 闭包内读取（避免 stale closure） */
+    const activeVideoIdRef = useRef<string>('');
 
     /**
      * 最近一次收到 VIDEO_ADDED 的文件名。
@@ -187,6 +189,7 @@ export default function RoomPage() {
                 pendingActiveObjectKeyRef.current = null;
                 const matched = videos.find((v) => v.objectKey === pendingKey);
                 if (matched) {
+                    activeVideoIdRef.current = matched.id;
                     setActiveVideoId(matched.id);
                     fetchTags(matched.id);
                 }
@@ -241,14 +244,19 @@ export default function RoomPage() {
     const handleControlChanged = useMemoizedFn((newControllerId: string) => {
         const myUserId = userInfo?.userId;
         if (!myUserId) return;
-        // 仅在自己从主控变为非主控时处理（其他人的身份变化不影响自己的 followMode）
-        const wasController = newControllerId !== myUserId;
-        if (wasController) {
-            // 注：此时 roomState.controllerId 已由 useRoomWs 更新为 newControllerId，
-            // 但 isController 是 render 阶段派生的局部变量，在闭包里不可靠。
-            // 通过对比 newControllerId != myUserId 来判断"我不再是主控"。
-            // 只有当我之前确实是主控时才需要重置，但由于 followMode 对主控无意义，
-            // 即使冗余置为 false 也没有副作用，直接重置即可。
+
+        if (newControllerId === myUserId) {
+            // 自己成为新主控：将当前正在播放的视频同步给后端，更新 room.video_url。
+            // 场景：自己处于自由模式播放了与旧主控不同的视频，
+            // 若不同步，其他成员点击跟随时帎端会单播回旧的 room.video_url。
+            const currentObjectKey = activeObjectKeyRef.current;
+            const currentVideoId = activeVideoIdRef.current;
+            if (currentObjectKey && currentVideoId) {
+                sendMessageRef.current?.('SWITCH_VIDEO', { objectKey: currentObjectKey, videoId: currentVideoId });
+            }
+        } else {
+            // 自己从主控变为非主控：重置为自由模式，由用户自行决定是否开启跟随。
+            // 即使之前不是主控，决置为 false 也没有副作用（followMode 对主控无意义）。
             followModeRef.current = false;
             setFollowMode(false);
         }
@@ -283,6 +291,7 @@ export default function RoomPage() {
             setActiveObjectKey(activeObjectKey);
             const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
             if (matched) {
+                activeVideoIdRef.current = matched.id;
                 setActiveVideoId(matched.id);
                 fetchTags(matched.id);
             } else {
@@ -392,12 +401,14 @@ export default function RoomPage() {
         setTags([]);
         setDuration(0);
         if (videoId) {
+            activeVideoIdRef.current = videoId;
             setActiveVideoId(videoId);
             fetchTags(videoId);
         } else {
             // 兜底：后端未下发 videoId 时，从视频列表里用 objectKey 查找
             const matched = videosRef.current.find((v) => v.objectKey === objectKey);
             if (matched) {
+                activeVideoIdRef.current = matched.id;
                 setActiveVideoId(matched.id);
                 fetchTags(matched.id);
             }
@@ -579,6 +590,8 @@ export default function RoomPage() {
 onVideoDeleted: (deletedVideoId) => {
     // 删除的是当前激活视频：重置播放器和相关状态
     if (deletedVideoId === activeVideoId) {
+        activeObjectKeyRef.current = null;
+        activeVideoIdRef.current = '';
         setActiveObjectKey(null);
         setActiveVideoId('');
         setTags([]);
@@ -648,6 +661,7 @@ onVideoDeleted: (deletedVideoId) => {
 
     const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
         activeObjectKeyRef.current = objectKey;
+        activeVideoIdRef.current = videoId;
         setActiveObjectKey(objectKey);
         setActiveVideoId(videoId);
         setTags([]);

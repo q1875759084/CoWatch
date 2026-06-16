@@ -1276,6 +1276,53 @@ done
 
 ---
 
+### `useMemoizedFn` 内读取 state 变量的 stale closure 问题
+
+**现象：** `handleSwitchVideo` 里用 `objectKey === activeObjectKey` 判断是否为主控自身广播，但该判断**永远为 false**，导致主控收到自己发出的 `SWITCH_VIDEO` 广播时重复执行了完整的元数据同步逻辑。
+
+**根因：** `useMemoizedFn` 的核心机制是记忆函数引用，其闭包在首次创建时捕获 state 变量（此时为初始值 `null`）。后续 `setState` 不会更新闭包内的捕获值，因此闭包里的 `activeObjectKey` 永远是 `null`，比较永远不成立。
+
+**解决：** 对所有需要在 `useMemoizedFn` 闭包内读取最新值的 state，引入对应的 `useRef` 作为"可变镜像"：
+
+```ts
+const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
+const activeObjectKeyRef = useRef<string | null>(null); // 同步镜像
+
+// 每次 setState 时同步写 ref
+activeObjectKeyRef.current = objectKey;
+setActiveObjectKey(objectKey);
+
+// useMemoizedFn 内读 ref，而非 state
+if (objectKey === activeObjectKeyRef.current) { ... }
+```
+
+**同类场景：** `followModeRef` 也是同一模式，用于解决 `followMode` 在 `useMemoizedFn` 内读取时的 stale closure。项目中所有需要在稳定函数引用内读取最新状态的变量，均应配套 ref 镜像。
+
+---
+
+### 控制权转移后原主控意外进入跟随状态
+
+**现象：** 管理员 A 将控制权转移给 B 后，A 的界面开始跟随 B 的播放操作（进度同步、视频切换均随 B 变化）。
+
+**根因：** `CONTROL_CHANGED` 消息只触发了 `setControllerId` 更新，没有重置 `followMode`。A 变成非主控后，`followMode` 仍保持初始值 `true`（跟随模式），立即开始响应新主控 B 的所有广播。
+
+**解决：** 在 `useRoomWs` 的 `CONTROL_CHANGED` 处新增 `onControlChanged` 回调，`index.tsx` 收到后判断：若 `newControllerId !== myUserId`（自己不再是主控），则将 `followMode` 重置为 `false`（自由模式）：
+
+```ts
+const handleControlChanged = useMemoizedFn((newControllerId: string) => {
+    const myUserId = userInfo?.userId;
+    if (!myUserId) return;
+    if (newControllerId !== myUserId) {
+        followModeRef.current = false;
+        setFollowMode(false);
+    }
+});
+```
+
+**三人房间的影响：** 控制权从 A 转给 B 时，C（第三人）若之前处于跟随模式，也会被重置为自由模式——主控换人意味着跟随对象改变，让 C 自主决定是否继续跟随新主控，比静默继续跟随更安全。
+
+---
+
 ### 腾讯云 CDN 日志字段解读
 
 **日志格式（空格分隔）：**
