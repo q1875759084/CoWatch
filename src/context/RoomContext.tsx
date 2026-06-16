@@ -19,8 +19,11 @@ interface RoomContextValue {
   initRoom: (state: RoomState) => void;
   setActiveVideoUrl: (url: string) => void;
   addVideo: (video: VideoItem) => void;
-  /** HTTP 初始化成员名单（不含 isOnline），WS ROOM_STATE 到达后整体替换（含 isOnline） */
-  setMembers: (members: Member[]) => void;
+  /**
+   * WS ROOM_STATE 到达时，用下发的在线状态列表更新每个成员的 isOnline 字段。
+   * 不整体替换成员列表，避免覆盖 HTTP 带来的 avatarUrl 等完整用户信息。
+   */
+  syncMembersOnlineStatus: (members: Pick<Member, 'userId' | 'isOnline'>[]) => void;
   addMember: (member: Member) => void;
   removeMember: (userId: string) => void;
   /** 单个成员上下线时调用（MEMBER_OFFLINE / MEMBER_JOINED） */
@@ -40,7 +43,7 @@ const RoomContext = createContext<RoomContextValue>({
   initRoom: () => {},
   setActiveVideoUrl: () => {},
   addVideo: () => {},
-  setMembers: () => {},
+  syncMembersOnlineStatus: () => {},
   addMember: () => {},
   removeMember: () => {},
   setMemberOnline: () => {},
@@ -55,22 +58,33 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
 
   /**
-   * WS ROOM_STATE / setActiveVideoUrl / setMembers 可能早于 HTTP initRoom 到达。
+   * WS ROOM_STATE / setActiveVideoUrl 可能早于 HTTP initRoom 到达。
    * 此时 roomState 为 null，setState 的 prev 为 null 会直接丢弃数据。
    * 用 ref 暂存，initRoom 执行时合并进初始 state。
    */
   const pendingActiveVideoUrlRef = useRef<string | null>(null);
-  const pendingMembersRef = useRef<Member[] | null>(null);
+  /**
+   * WS ROOM_STATE 比 HTTP 先到时，暂存在线状态列表（{ userId, isOnline }[]）。
+   * initRoom 执行后合并到成员列表里的 isOnline 字段。
+   */
+  const pendingOnlineStatusRef = useRef<Pick<Member, 'userId' | 'isOnline'>[] | null>(null);
 
   const initRoom = useMemoizedFn((state: RoomState) => {
     const pendingUrl = pendingActiveVideoUrlRef.current;
-    const pendingMembers = pendingMembersRef.current;
+    const pendingOnlineStatus = pendingOnlineStatusRef.current;
     pendingActiveVideoUrlRef.current = null;
-    pendingMembersRef.current = null;
+    pendingOnlineStatusRef.current = null;
+    // 合并在线状态：HTTP 成员列表 + WS 带来的 isOnline
+    const members = pendingOnlineStatus
+      ? state.members.map((m) => {
+          const matched = pendingOnlineStatus.find((s) => s.userId === m.userId);
+          return matched ? { ...m, isOnline: matched.isOnline } : m;
+        })
+      : state.members;
     setRoomState({
       ...state,
-      ...(pendingUrl    ? { activeVideoUrl: pendingUrl }    : {}),
-      ...(pendingMembers ? { members: pendingMembers }       : {}),
+      members,
+      ...(pendingUrl ? { activeVideoUrl: pendingUrl } : {}),
     });
   });
 
@@ -100,14 +114,21 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     });
   });
 
-  const setMembers = useMemoizedFn((members: Member[]) => {
+  const syncMembersOnlineStatus = useMemoizedFn((onlineList: Pick<Member, 'userId' | 'isOnline'>[]) => {
     setRoomState((prev) => {
       if (!prev) {
-        // WS 早于 HTTP 到达：roomState 尚未初始化，暂存等 initRoom 消费
-        pendingMembersRef.current = members;
+        // WS 早于 HTTP 到达：roomState 尚未初始化，暂存在线状态等 initRoom 消费
+        pendingOnlineStatusRef.current = onlineList;
         return prev;
       }
-      return { ...prev, members };
+      // 只更新 isOnline，保留 HTTP 带来的 avatarUrl / nickname 等完整信息
+      return {
+        ...prev,
+        members: prev.members.map((m) => {
+          const matched = onlineList.find((s) => s.userId === m.userId);
+          return matched ? { ...m, isOnline: matched.isOnline } : m;
+        }),
+      };
     });
   });
 
@@ -193,7 +214,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         initRoom,
         setActiveVideoUrl,
         addVideo,
-        setMembers,
+        syncMembersOnlineStatus,
         addMember,
         removeMember,
         setMemberOnline,

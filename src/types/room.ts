@@ -22,6 +22,8 @@ export interface Member {
    * 随后由 MEMBER_JOINED / MEMBER_OFFLINE 增量维护。
    */
   isOnline?: boolean;
+  /** 用户头像 URL，由 HTTP getInfo 下发；null 表示使用首字母占位 */
+  avatarUrl?: string | null;
 }
 
 export interface VideoItem {

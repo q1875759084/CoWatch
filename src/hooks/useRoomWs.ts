@@ -99,7 +99,7 @@ export function useRoomWs({
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
-    setMembers,
+    syncMembersOnlineStatus,
     addMember,
     removeMember,
     setMemberOnline,
@@ -170,8 +170,10 @@ export function useRoomWs({
           if (d) {
             setControllerId(d.controllerId);
             if (d.members?.length) {
-              // WS ROOM_STATE 含 isOnline，整体替换成员列表（HTTP 初始名单不含此字段）
-              setMembers(d.members);
+              // WS ROOM_STATE 只用来同步 isOnline，不整体替换（避免覆盖 HTTP 带来的 avatarUrl 等完整信息）
+              syncMembersOnlineStatus(
+                d.members.map((m) => ({ userId: m.userId, isOnline: m.isOnline }))
+              );
             }
             // 初始化视频列表
             if (d.videos?.length) {

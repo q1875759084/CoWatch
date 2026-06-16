@@ -48,7 +48,11 @@ export default function MemberList({
             title={canClick ? '点击指定为控制者' : undefined}
           >
             <span className={styles.avatar}>
-              {member.nickname.charAt(0).toUpperCase()}
+              {member.avatarUrl ? (
+                <img src={member.avatarUrl} alt={member.nickname} className={styles.avatarImg} />
+              ) : (
+                member.nickname.charAt(0).toUpperCase()
+              )}
             </span>
             <span className={styles.nickname}>{member.nickname}</span>
             <span className={styles.badges}>
