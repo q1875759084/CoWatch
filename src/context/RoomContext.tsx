@@ -31,6 +31,8 @@ interface RoomContextValue {
   renameVideo: (videoId: string, displayName: string) => void;
   /** 从列表移除视频（WS VIDEO_DELETED 广播到来时调用） */
   removeVideo: (videoId: string) => void;
+  /** 更新视频的 label 列表（WS VIDEO_LABELS_UPDATED 广播到来时调用） */
+  updateVideoLabels: (videoId: string, labels: string[]) => void;
 }
 
 const RoomContext = createContext<RoomContextValue>({
@@ -46,6 +48,7 @@ const RoomContext = createContext<RoomContextValue>({
   setControllerId: () => {},
   renameVideo: () => {},
   removeVideo: () => {},
+  updateVideoLabels: () => {},
 });
 
 export function RoomProvider({ children }: { children: ReactNode }) {
@@ -171,6 +174,18 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     });
   });
 
+  const updateVideoLabels = useMemoizedFn((videoId: string, labels: string[]) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        videos: prev.videos.map((v) =>
+          v.id === videoId ? { ...v, labels } : v
+        ),
+      };
+    });
+  });
+
   return (
     <RoomContext.Provider
       value={{
@@ -186,6 +201,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setControllerId,
         renameVideo,
         removeVideo,
+        updateVideoLabels,
       }}
     >
       {children}

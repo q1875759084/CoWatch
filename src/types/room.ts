@@ -43,6 +43,8 @@ export interface VideoItem {
   createdAt: number;
   /** HLS 切片状态：切片完成后才可播放 */
   hlsStatus?: 'pending' | 'done' | 'error';
+  /** 视频标签，最多 3 个，每个最多 8 个字 */
+  labels?: string[];
 }
 
 export interface RoomInfo {
@@ -80,6 +82,7 @@ export type WsMessageType =
   | 'NOTE_UPDATE'
   | 'VIDEO_RENAMED'
   | 'VIDEO_DELETED'
+  | 'VIDEO_LABELS_UPDATED'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -119,6 +122,12 @@ export interface MemberLeftData {
 /** 下行：服务端 → 全员，视频已删除 */
 export interface VideoDeletedData {
   videoId: string;
+}
+
+/** 下行：服务端 → 全员，视频 label 列表已更新 */
+export interface VideoLabelsUpdatedData {
+  videoId: string;
+  labels: string[];
 }
 
 /** 下行：服务端 → 全员，视频展示名已更新 */

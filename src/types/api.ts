@@ -77,6 +77,8 @@ export interface VideoItemResponse {
   createdAt: number;
   /** HLS 切片状态：'pending' | 'done' | 'error' */
   hlsStatus?: 'pending' | 'done' | 'error';
+  /** 视频标签，最多 3 个 */
+  labels?: string[];
 }
 
 export interface RoomVideosResponse {

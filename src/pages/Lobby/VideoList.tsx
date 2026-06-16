@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { EditOutlined } from '@ant-design/icons';
-import { Modal, Tooltip } from 'antd';
+import { Tag, Modal, Tooltip } from 'antd';
 import type { VideoItem } from '@/types/room';
 import styles from './VideoList.module.scss';
 
@@ -22,6 +22,8 @@ interface VideoListProps {
   onRename: (videoId: string, displayName: string) => void;
   /** 删除回调：由 Lobby 负责调用接口，成功后后端广播 VIDEO_DELETED 更新全员列表 */
   onDelete: (videoId: string) => void;
+  /** label 更新回调：点确定时若 label 有变化则调用，后端广播 VIDEO_LABELS_UPDATED */
+  onUpdateLabels: (videoId: string, labels: string[]) => void;
 }
 
 export default function VideoList({
@@ -33,28 +35,74 @@ export default function VideoList({
   isAdmin,
   onRename,
   onDelete,
+  onUpdateLabels,
 }: VideoListProps) {
   /** 当前正在编辑的视频 id，同时只能编辑一个 */
   const [editingId, setEditingId] = useState<string | null>(null);
-  /** 输入框草稿值 */
-  const [inputValue, setInputValue] = useState('');
+  /** 标题草稿（文件名输入框 blur 时更新） */
+  const [draftName, setDraftName] = useState('');
+  /** label 草稿列表（增删 label 时实时更新） */
+  const [draftLabels, setDraftLabels] = useState<string[]>([]);
+  /** 是否正在显示新增 label 输入框 */
+  const [addingLabel, setAddingLabel] = useState(false);
+  /** 新增 label 的输入值 */
+  const [labelInput, setLabelInput] = useState('');
 
   const startEdit = (v: VideoItem) => {
     setEditingId(v.id);
-    setInputValue(v.displayName ?? v.fileName);
+    setDraftName(v.displayName ?? v.fileName);
+    setDraftLabels([...(v.labels ?? [])]);
+    setAddingLabel(false);
+    setLabelInput('');
   };
 
-  const cancelEdit = () => {
+  /** 取消：回滚 draft，退出编辑态 */
+  const cancelEdit = (v: VideoItem) => {
     setEditingId(null);
-    setInputValue('');
+    setDraftName(v.displayName ?? v.fileName);
+    setDraftLabels([...(v.labels ?? [])]);
+    setAddingLabel(false);
+    setLabelInput('');
   };
 
-  const confirmEdit = (videoId: string) => {
-    const trimmed = inputValue.trim();
-    if (trimmed) {
-      onRename(videoId, trimmed);
+  /** 确定：diff 后按需调用 API，退出编辑态 */
+  const confirmEdit = (v: VideoItem) => {
+    // 若新增输入框还开着且有内容，先追加到 draft
+    let finalLabels = draftLabels;
+    if (addingLabel && labelInput.trim()) {
+      const t = labelInput.trim();
+      if (t.length <= 8 && draftLabels.length < 3) {
+        finalLabels = [...draftLabels, t];
+      }
     }
-    cancelEdit();
+
+    const trimmedName = draftName.trim();
+    const origName = v.displayName ?? v.fileName;
+    if (trimmedName && trimmedName !== origName) {
+      onRename(v.id, trimmedName);
+    }
+
+    const origLabels = v.labels ?? [];
+    const labelsChanged =
+      finalLabels.length !== origLabels.length ||
+      finalLabels.some((l, i) => l !== origLabels[i]);
+    if (labelsChanged) {
+      onUpdateLabels(v.id, finalLabels);
+    }
+
+    setEditingId(null);
+    setAddingLabel(false);
+    setLabelInput('');
+  };
+
+  /** 新增 label 输入框确认（Enter / 非空 blur） */
+  const confirmAddLabel = () => {
+    const t = labelInput.trim();
+    if (t && t.length <= 8 && draftLabels.length < 3) {
+      setDraftLabels((prev) => [...prev, t]);
+    }
+    setAddingLabel(false);
+    setLabelInput('');
   };
 
   if (videos.length === 0) {
@@ -71,35 +119,93 @@ export default function VideoList({
       <ul className={styles.items}>
         {videos.map((v, idx) => {
           const isActive = v.objectKey === activeObjectKey;
-          const canRename = v.uploaderId === currentUserId || isAdmin;
+          const canEdit = v.uploaderId === currentUserId || isAdmin;
           const isEditing = editingId === v.id;
+          const labels = v.labels ?? [];
 
           return (
-            <li key={v.id} className={`${styles.item} ${isActive ? styles.active : ''}`}>
+            <li key={v.id} className={`${styles.item} ${isActive ? styles.active : ''} ${isEditing ? styles.editing : ''}`}>
               <div className={styles.itemLeft}>
-                <span className={styles.index}>{idx + 1}</span>
                 <div className={styles.itemInfo}>
                   {isEditing ? (
-                    <input
-                      className={styles.nameInput}
-                      value={inputValue}
-                      autoFocus
-                      onChange={(e) => setInputValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') confirmEdit(v.id);
-                        if (e.key === 'Escape') cancelEdit();
-                      }}
-                      onBlur={cancelEdit}
-                      // 阻止失焦时冒泡触发父级的其他事件
-                      onClick={(e) => e.stopPropagation()}
-                    />
+                    /* ── 编辑态 ─────────────────────────────────────── */
+                    <div className={styles.editRow}>
+                      <input
+                        className={styles.nameInput}
+                        value={draftName}
+                        autoFocus
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') cancelEdit(v);
+                          if (e.key === 'Enter') confirmEdit(v);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      {/* label chip 列表 */}
+                      {draftLabels.map((label, i) => (
+                        <Tag
+                          key={i}
+                          closable
+                          className={styles.labelTagEdit}
+                          onClose={(e) => {
+                            e.preventDefault();
+                            setDraftLabels((prev) => prev.filter((_, idx2) => idx2 !== i));
+                          }}
+                        >
+                          {label}
+                        </Tag>
+                      ))}
+                      {/* 新增 label 输入框 或 「新增标签」文字按钮 */}
+                      {addingLabel ? (
+                        <input
+                          className={styles.labelInput}
+                          value={labelInput}
+                          autoFocus
+                          maxLength={8}
+                          placeholder="输入标签"
+                          onChange={(e) => setLabelInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); confirmAddLabel(); }
+                            if (e.key === 'Escape') { setAddingLabel(false); setLabelInput(''); }
+                          }}
+                          onBlur={() => {
+                            if (!labelInput.trim()) {
+                              setAddingLabel(false);
+                              setLabelInput('');
+                            } else {
+                              confirmAddLabel();
+                            }
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        draftLabels.length < 3 && (
+                          <button
+                            className={styles.addLabelBtn}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAddingLabel(true);
+                            }}
+                          >
+                            新增标签
+                          </button>
+                        )
+                      )}
+                    </div>
                   ) : (
+                    /* ── 普通态 ─────────────────────────────────────── */
                     <div className={styles.nameRow}>
                       <span className={styles.fileName}>{v.displayName ?? v.fileName}</span>
-                      {canRename && (
+                      {labels.map((label, i) => (
+                        <Tag key={i} className={styles.labelTag}>
+                          {label}
+                        </Tag>
+                      ))}
+                      {canEdit && (
                         <button
                           className={styles.editIcon}
-                          title="重命名"
+                          title="编辑"
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -122,35 +228,58 @@ export default function VideoList({
                 </div>
               </div>
               <div className={styles.itemActions}>
-                {canRename && (
-                  <Tooltip title={isActive ? '视频正在播放中，无法删除' : ''}>
+                {isEditing ? (
+                  /* 编辑态：确定 / 取消 */
+                  <>
                     <button
-                      className={styles.deleteBtn}
-                      disabled={isActive}
+                      className={styles.confirmBtn}
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        Modal.confirm({
-                          title: '确认删除视频',
-                          content: `确认删除《${v.displayName ?? v.fileName}》？此操作不可撤销，同时会删除该视频的所有标注。`,
-                          okText: '删除',
-                          okButtonProps: { danger: true },
-                          cancelText: '取消',
-                          onOk: () => onDelete(v.id),
-                        });
-                      }}
+                      onClick={(e) => { e.stopPropagation(); confirmEdit(v); }}
                     >
-                      删除
+                      确定
                     </button>
-                  </Tooltip>
-                )}
-                {isController && (
-                  <button
-                    className={`${styles.playBtn} ${isActive ? styles.playBtnActive : ''}`}
-                    onClick={() => onPlay(v.objectKey, v.id)}
-                  >
-                    {isActive ? '播放中' : '播放'}
-                  </button>
+                    <button
+                      className={styles.cancelBtn}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={(e) => { e.stopPropagation(); cancelEdit(v); }}
+                    >
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  /* 普通态：删除 / 播放 */
+                  <>
+                    {canEdit && (
+                      <Tooltip title={isActive ? '视频正在播放中，无法删除' : ''}>
+                        <button
+                          className={styles.deleteBtn}
+                          disabled={isActive}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            Modal.confirm({
+                              title: '确认删除视频',
+                              content: `确认删除《${v.displayName ?? v.fileName}》？此操作不可撤销，同时会删除该视频的所有标注。`,
+                              okText: '删除',
+                              okButtonProps: { danger: true },
+                              cancelText: '取消',
+                              onOk: () => onDelete(v.id),
+                            });
+                          }}
+                        >
+                          删除
+                        </button>
+                      </Tooltip>
+                    )}
+                    {isController && (
+                      <button
+                        className={`${styles.playBtn} ${isActive ? styles.playBtnActive : ''}`}
+                        onClick={() => onPlay(v.objectKey, v.id)}
+                      >
+                        {isActive ? '播放中' : '播放'}
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </li>

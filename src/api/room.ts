@@ -124,6 +124,21 @@ export async function renameVideoApi(
 }
 
 /**
+ * 整体替换视频的 label 列表
+ * 权限：上传者 或 房间管理员
+ */
+export async function updateVideoLabelsApi(
+  roomId: string,
+  videoId: string,
+  labels: string[],
+): Promise<void> {
+  await request.put(
+    `/rooms/${roomId}/videos/${videoId}/labels`,
+    { labels },
+  );
+}
+
+/**
  * 删除视频及其所有 tags
  * 权限：上传者 或 房间管理员
  */

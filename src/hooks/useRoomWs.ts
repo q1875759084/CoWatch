@@ -23,6 +23,7 @@ import type {
   NoteUpdateData,
   VideoRenamedData,
   VideoDeletedData,
+  VideoLabelsUpdatedData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
@@ -66,6 +67,8 @@ interface UseRoomWsOptions {
   onVideoRenamed?: (videoId: string, displayName: string) => void;
   /** 收到 VIDEO_DELETED 时通知调用方（RoomContext 已直接处理，此回调供 Lobby 处理激活视频被删的播放器重置） */
   onVideoDeleted?: (videoId: string) => void;
+  /** 收到 VIDEO_LABELS_UPDATED 时通知调用方（RoomContext 已直接处理，此回调供额外业务使用） */
+  onVideoLabelsUpdated?: (videoId: string, labels: string[]) => void;
 }
 
 export function useRoomWs({
@@ -86,6 +89,7 @@ export function useRoomWs({
   onNoteUpdate,
   onVideoRenamed,
   onVideoDeleted,
+  onVideoLabelsUpdated,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -98,6 +102,7 @@ export function useRoomWs({
     addVideo,
     renameVideo,
     removeVideo,
+    updateVideoLabels,
   } = useRoom();
 
   /**
@@ -117,8 +122,9 @@ export function useRoomWs({
   const stableOnDrawClear      = useMemoizedFn(onDrawClear      ?? (() => {}));
   const stableOnDrawClearColor = useMemoizedFn(onDrawClearColor ?? (() => {}));
   const stableOnNoteUpdate     = useMemoizedFn(onNoteUpdate     ?? (() => {}));
-  const stableOnVideoRenamed   = useMemoizedFn(onVideoRenamed   ?? (() => {}));
-  const stableOnVideoDeleted   = useMemoizedFn(onVideoDeleted   ?? (() => {}));
+  const stableOnVideoRenamed      = useMemoizedFn(onVideoRenamed      ?? (() => {}));
+  const stableOnVideoDeleted      = useMemoizedFn(onVideoDeleted      ?? (() => {}));
+  const stableOnVideoLabelsUpdated = useMemoizedFn(onVideoLabelsUpdated ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -304,6 +310,15 @@ export function useRoomWs({
           if (d) {
             removeVideo(d.videoId);
             stableOnVideoDeleted(d.videoId);
+          }
+          break;
+        }
+
+        case 'VIDEO_LABELS_UPDATED': {
+          const d = msg.data as unknown as VideoLabelsUpdatedData | undefined;
+          if (d) {
+            updateVideoLabels(d.videoId, d.labels);
+            stableOnVideoLabelsUpdated(d.videoId, d.labels);
           }
           break;
         }

@@ -5,7 +5,7 @@ import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
-import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi } from '@/api/room';
+import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi, updateVideoLabelsApi } from '@/api/room';
 import type { Tag, CursorMoveDownData, DrawStrokeData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import CollapseSection from '@/components/CollapseSection';
@@ -165,6 +165,7 @@ export default function RoomPage() {
                 displayName: v.displayName ?? null,
                 uploaderId: v.uploaderId,
                 createdAt: v.createdAt,
+                labels: v.labels ?? [],
             }));
             videosRef.current = videos;
             initRoom({
@@ -550,6 +551,16 @@ onVideoDeleted: (deletedVideoId) => {
         }
     });
 
+    const handleUpdateLabels = useMemoizedFn(async (videoId: string, labels: string[]) => {
+        if (!roomId) return;
+        try {
+            await updateVideoLabelsApi(roomId, videoId, labels);
+            // HTTP 成功后，后端广播 VIDEO_LABELS_UPDATED，useRoomWs 自动调用 updateVideoLabels 更新 Context
+        } catch (err) {
+            console.error('[labels] 视频 label 更新失败:', err);
+        }
+    });
+
     const handleRenameVideo = useMemoizedFn(async (videoId: string, displayName: string) => {
         if (!roomId) return;
         try {
@@ -617,6 +628,7 @@ onVideoDeleted: (deletedVideoId) => {
                             isAdmin={isAdmin}
                             onRename={handleRenameVideo}
                             onDelete={handleDeleteVideo}
+                            onUpdateLabels={handleUpdateLabels}
                         />
                     </CollapseSection>
                     {/* 上传区（全员可见；空闲态下仅主控可操作） */}

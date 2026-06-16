@@ -70,6 +70,11 @@
     background: rgba(99, 179, 237, 0.08);
     border-color: rgba(99, 179, 237, 0.3);
   }
+
+  &.editing {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(99, 179, 237, 0.4);
+  }
 }
 
 .itemLeft {
@@ -80,18 +85,6 @@
   flex: 1;
 }
 
-.index {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.06);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  color: #718096;
-  flex-shrink: 0;
-}
 
 .itemInfo {
   display: flex;
@@ -114,6 +107,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 260px;
+  margin-right: 8px;
 }
 
 .editIcon {
@@ -135,6 +129,89 @@
 
 .item:hover .editIcon {
   opacity: 1;
+}
+
+// ── label Tag（普通态）────────────────────────────────────────────────────────
+.labelTag {
+  // 覆盖 antd Tag 默认样式，适配暗色主题
+  background: rgba(237, 137, 54, 0.12) !important;
+  border-color: rgba(237, 137, 54, 0.4) !important;
+  color: #ed8936 !important;
+  font-size: 11px !important;
+  line-height: 18px !important;
+  padding: 0 6px !important;
+  border-radius: 4px !important;
+  flex-shrink: 0;
+}
+
+// ── label Tag（编辑态，带 × 关闭按钮）────────────────────────────────────────
+.labelTagEdit {
+  background: rgba(237, 137, 54, 0.12) !important;
+  border-color: rgba(237, 137, 54, 0.4) !important;
+  color: #ed8936 !important;
+  font-size: 11px !important;
+  line-height: 18px !important;
+  padding: 0 6px !important;
+  border-radius: 4px !important;
+  flex-shrink: 0;
+
+  // antd Tag 关闭按钮颜色
+  :global(.ant-tag-close-icon) {
+    color: #ed8936;
+    &:hover { color: #fbd38d; }
+  }
+}
+
+// ── 编辑态整行容器 ─────────────────────────────────────────────────────────────
+.editRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  outline: none; // 避免 tabIndex=-1 时出现 focus ring
+}
+
+// ── 「新增标签」文字按钮 ────────────────────────────────────────────────────────
+.addLabelBtn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  background: none;
+  border: 1px dashed rgba(237, 137, 54, 0.4);
+  border-radius: 4px;
+  cursor: pointer;
+  color: #ed8936;
+  font-size: 11px;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+
+  &:hover {
+    background: rgba(237, 137, 54, 0.08);
+    border-color: rgba(237, 137, 54, 0.65);
+    color: #f6ad55;
+  }
+}
+
+// ── 新增 label 内联输入框 ──────────────────────────────────────────────────────
+.labelInput {
+  width: 72px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(99, 179, 237, 0.5);
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 11px;
+  padding: 1px 5px;
+  outline: none;
+  flex-shrink: 0;
+
+  &::placeholder {
+    color: #4a5568;
+  }
+
+  &:focus {
+    border-color: rgba(99, 179, 237, 0.8);
+    background: rgba(255, 255, 255, 0.09);
+  }
 }
 
 .nameInput {
@@ -195,6 +272,46 @@
 
 .item:hover .deleteBtn:not(:disabled) {
   display: block;
+}
+
+// ── 编辑态确定按钮 ────────────────────────────────────────────────────────────
+.confirmBtn {
+  flex-shrink: 0;
+  padding: 5px 14px;
+  background: rgba(99, 179, 237, 0.12);
+  border: 1px solid rgba(99, 179, 237, 0.35);
+  border-radius: 6px;
+  color: #63b3ed;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover {
+    background: rgba(99, 179, 237, 0.22);
+    border-color: rgba(99, 179, 237, 0.6);
+    color: #90cdf4;
+  }
+}
+
+// ── 编辑态取消按钮 ────────────────────────────────────────────────────────────
+.cancelBtn {
+  flex-shrink: 0;
+  padding: 5px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: #718096;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.18);
+    color: #a0aec0;
+  }
 }
 
 .playBtn {
