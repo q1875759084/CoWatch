@@ -37,6 +37,8 @@ export interface VideoItem {
    */
   videoUrl: string | null;
   fileName: string;
+  /** 用户自定义展示名，未设置时为 null/undefined，前端 fallback 到 fileName */
+  displayName?: string | null;
   uploaderId: string;
   createdAt: number;
   /** HLS 切片状态：切片完成后才可播放 */
@@ -76,6 +78,8 @@ export type WsMessageType =
   | 'DRAW_CLEAR'
   | 'DRAW_CLEAR_COLOR'
   | 'NOTE_UPDATE'
+  | 'VIDEO_RENAMED'
+  | 'VIDEO_DELETED'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -110,6 +114,17 @@ export interface MemberJoinedData {
 
 export interface MemberLeftData {
   userId: string;
+}
+
+/** 下行：服务端 → 全员，视频已删除 */
+export interface VideoDeletedData {
+  videoId: string;
+}
+
+/** 下行：服务端 → 全员，视频展示名已更新 */
+export interface VideoRenamedData {
+  videoId: string;
+  displayName: string;
 }
 
 /** 下行：服务端 → 前端，成员 WS 断线（仅标记离线，不从列表删除） */

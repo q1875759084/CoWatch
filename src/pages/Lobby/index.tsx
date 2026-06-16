@@ -5,7 +5,7 @@ import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
-import { getRoomInfoApi, getVideosApi, getTagsApi } from '@/api/room';
+import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi } from '@/api/room';
 import type { Tag, CursorMoveDownData, DrawStrokeData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import CollapseSection from '@/components/CollapseSection';
@@ -162,6 +162,7 @@ export default function RoomPage() {
                 objectKey: v.objectKey,
                 videoUrl: null as string | null,
                 fileName: v.fileName,
+                displayName: v.displayName ?? null,
                 uploaderId: v.uploaderId,
                 createdAt: v.createdAt,
             }));
@@ -500,6 +501,16 @@ export default function RoomPage() {
         onTagDeleted: handleTagDeleted,
         onSwitchVideo: handleSwitchVideo,
         onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
+onVideoDeleted: (deletedVideoId) => {
+    // 删除的是当前激活视频：重置播放器和相关状态
+    if (deletedVideoId === activeVideoId) {
+        setActiveObjectKey(null);
+        setActiveVideoId('');
+        setTags([]);
+        setDuration(0);
+        setActiveVideoUrl('');
+    }
+},
         onCursorMove: handleCursorMove,
         onCursorHide: handleCursorHide,
         onDrawStroke: handleDrawStroke,
@@ -529,6 +540,27 @@ export default function RoomPage() {
      * useRoomWs 收到后调用 setActiveVideoUrl 更新播放 URL。
      * 本地优先设置 activeObjectKey （列表立即高亮）， activeVideoId（tag 归属）。
      */
+    const handleDeleteVideo = useMemoizedFn(async (videoId: string) => {
+        if (!roomId) return;
+        try {
+            await deleteVideoApi(roomId, videoId);
+            // HTTP 成功后，后端广播 VIDEO_DELETED，useRoomWs 自动调用 removeVideo 更新 Context
+        } catch (err) {
+            console.error('[delete] 视频删除失败:', err);
+        }
+    });
+
+    const handleRenameVideo = useMemoizedFn(async (videoId: string, displayName: string) => {
+        if (!roomId) return;
+        try {
+            await renameVideoApi(roomId, videoId, displayName);
+            // HTTP 成功后，后端会广播 VIDEO_RENAMED，useRoomWs 自动调用 renameVideo 更新 Context
+            // 改名者自身也会收到广播，无需本地额外更新
+        } catch (err) {
+            console.error('[rename] 视频改名失败:', err);
+        }
+    });
+
     const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
         setActiveObjectKey(objectKey);
         setActiveVideoId(videoId);
@@ -581,6 +613,10 @@ export default function RoomPage() {
                             activeObjectKey={activeObjectKey}
                             isController={isController}
                             onPlay={handlePlayVideo}
+                            currentUserId={userInfo?.userId ?? ''}
+                            isAdmin={isAdmin}
+                            onRename={handleRenameVideo}
+                            onDelete={handleDeleteVideo}
                         />
                     </CollapseSection>
                     {/* 上传区（全员可见；空闲态下仅主控可操作） */}

@@ -27,6 +27,10 @@ interface RoomContextValue {
   setMemberOnline: (userId: string, isOnline: boolean) => void;
   setControlMode: (mode: ControlMode) => void;
   setControllerId: (userId: string | null) => void;
+  /** 更新视频的自定义展示名（WS VIDEO_RENAMED 广播到来时调用） */
+  renameVideo: (videoId: string, displayName: string) => void;
+  /** 从列表移除视频（WS VIDEO_DELETED 广播到来时调用） */
+  removeVideo: (videoId: string) => void;
 }
 
 const RoomContext = createContext<RoomContextValue>({
@@ -40,6 +44,8 @@ const RoomContext = createContext<RoomContextValue>({
   setMemberOnline: () => {},
   setControlMode: () => {},
   setControllerId: () => {},
+  renameVideo: () => {},
+  removeVideo: () => {},
 });
 
 export function RoomProvider({ children }: { children: ReactNode }) {
@@ -146,6 +152,25 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     setRoomState((prev) => prev ? { ...prev, controllerId: userId } : prev);
   });
 
+  const renameVideo = useMemoizedFn((videoId: string, displayName: string) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        videos: prev.videos.map((v) =>
+          v.id === videoId ? { ...v, displayName } : v
+        ),
+      };
+    });
+  });
+
+  const removeVideo = useMemoizedFn((videoId: string) => {
+    setRoomState((prev) => {
+      if (!prev) return prev;
+      return { ...prev, videos: prev.videos.filter((v) => v.id !== videoId) };
+    });
+  });
+
   return (
     <RoomContext.Provider
       value={{
@@ -159,6 +184,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
         setMemberOnline,
         setControlMode,
         setControllerId,
+        renameVideo,
+        removeVideo,
       }}
     >
       {children}

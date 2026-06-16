@@ -109,6 +109,32 @@ export async function getTagsApi(roomId: string, videoId: string): Promise<Tag[]
 }
 
 /**
+ * 更新视频的自定义展示名称
+ * 权限：上传者 或 房间管理员
+ */
+export async function renameVideoApi(
+  roomId: string,
+  videoId: string,
+  displayName: string,
+): Promise<void> {
+  await request.patch(
+    `/rooms/${roomId}/videos/${videoId}/name`,
+    { displayName },
+  );
+}
+
+/**
+ * 删除视频及其所有 tags
+ * 权限：上传者 或 房间管理员
+ */
+export async function deleteVideoApi(
+  roomId: string,
+  videoId: string,
+): Promise<void> {
+  await request.delete(`/rooms/${roomId}/videos/${videoId}`);
+}
+
+/**
  * 下载转码脚本（.bat）
  * 按 CRF 数字档位返回对应的静态脚本文件，无需鉴权。
  * 使用原生 axios 而非封装的 request，避免业务拦截器对 Blob 响应做 code 校验导致误报错。

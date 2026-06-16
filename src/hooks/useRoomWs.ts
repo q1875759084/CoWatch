@@ -21,6 +21,8 @@ import type {
   DrawClearData,
   DrawClearColorData,
   NoteUpdateData,
+  VideoRenamedData,
+  VideoDeletedData,
 } from '@/types/room';
 
 interface UseRoomWsOptions {
@@ -60,6 +62,10 @@ interface UseRoomWsOptions {
   onDrawClearColor?: (color: string) => void;
   /** 收到 NOTE_UPDATE 时通知调用方更新笔记内容 */
   onNoteUpdate?: (content: string) => void;
+  /** 收到 VIDEO_RENAMED 时通知调用方更新视频展示名（RoomContext 已直接处理，此回调供额外业务使用） */
+  onVideoRenamed?: (videoId: string, displayName: string) => void;
+  /** 收到 VIDEO_DELETED 时通知调用方（RoomContext 已直接处理，此回调供 Lobby 处理激活视频被删的播放器重置） */
+  onVideoDeleted?: (videoId: string) => void;
 }
 
 export function useRoomWs({
@@ -78,6 +84,8 @@ export function useRoomWs({
   onDrawClear,
   onDrawClearColor,
   onNoteUpdate,
+  onVideoRenamed,
+  onVideoDeleted,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -88,6 +96,8 @@ export function useRoomWs({
     setControllerId,
     setActiveVideoUrl,
     addVideo,
+    renameVideo,
+    removeVideo,
   } = useRoom();
 
   /**
@@ -107,6 +117,8 @@ export function useRoomWs({
   const stableOnDrawClear      = useMemoizedFn(onDrawClear      ?? (() => {}));
   const stableOnDrawClearColor = useMemoizedFn(onDrawClearColor ?? (() => {}));
   const stableOnNoteUpdate     = useMemoizedFn(onNoteUpdate     ?? (() => {}));
+  const stableOnVideoRenamed   = useMemoizedFn(onVideoRenamed   ?? (() => {}));
+  const stableOnVideoDeleted   = useMemoizedFn(onVideoDeleted   ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -275,6 +287,24 @@ export function useRoomWs({
         case 'NOTE_UPDATE': {
           const d = msg.data as unknown as NoteUpdateData | undefined;
           if (d) stableOnNoteUpdate(d.content);
+          break;
+        }
+
+        case 'VIDEO_RENAMED': {
+          const d = msg.data as unknown as VideoRenamedData | undefined;
+          if (d) {
+            renameVideo(d.videoId, d.displayName);
+            stableOnVideoRenamed(d.videoId, d.displayName);
+          }
+          break;
+        }
+
+        case 'VIDEO_DELETED': {
+          const d = msg.data as unknown as VideoDeletedData | undefined;
+          if (d) {
+            removeVideo(d.videoId);
+            stableOnVideoDeleted(d.videoId);
+          }
           break;
         }
 

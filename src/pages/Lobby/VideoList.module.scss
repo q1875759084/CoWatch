@@ -100,18 +100,101 @@
   min-width: 0;
 }
 
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .fileName {
   font-size: 13px;
   color: #e2e8f0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 300px;
+  max-width: 260px;
+}
+
+.editIcon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: #718096;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.item:hover .editIcon {
+  opacity: 1;
+}
+
+.nameInput {
+  width: 100%;
+  max-width: 260px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(99, 179, 237, 0.5);
+  border-radius: 4px;
+  color: #e2e8f0;
+  font-size: 13px;
+  padding: 1px 6px;
+  outline: none;
+
+  &:focus {
+    border-color: rgba(99, 179, 237, 0.8);
+    background: rgba(255, 255, 255, 0.1);
+  }
 }
 
 .uploadTime {
   font-size: 11px;
   color: #4a5568;
+}
+
+.itemActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.deleteBtn {
+  display: none;
+  flex-shrink: 0;
+  padding: 5px 14px;
+  background: rgba(197, 48, 48, 0.08);
+  border: 1px solid rgba(197, 48, 48, 0.25);
+  border-radius: 6px;
+  color: #fc8181;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover:not(:disabled) {
+    background: rgba(197, 48, 48, 0.18);
+    border-color: rgba(197, 48, 48, 0.5);
+    color: #feb2b2;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.06);
+    color: #4a5568;
+  }
+}
+
+.item:hover .deleteBtn:not(:disabled) {
+  display: block;
 }
 
 .playBtn {
