@@ -13,6 +13,8 @@ interface VideoListProps {
   activeObjectKey: string | null;
   /** 仅主控可点击播放按钮切换视频 */
   isController: boolean;
+  /** 非主控处于自由模式时也展示播放按钮（本地切换，不广播 WS） */
+  canPlayInFreeMode?: boolean;
   onPlay: (objectKey: string, videoId: string) => void;
   /** 当前登录用户 id，用于判断是否为上传者（有改名权限） */
   currentUserId: string;
@@ -30,6 +32,7 @@ export default function VideoList({
   videos,
   activeObjectKey,
   isController,
+  canPlayInFreeMode,
   onPlay,
   currentUserId,
   isAdmin,
@@ -269,7 +272,7 @@ export default function VideoList({
                         </button>
                       </Tooltip>
                     )}
-                    {isController && (
+                    {(isController || canPlayInFreeMode) && (
                       <button
                         className={`${styles.playBtn} ${isActive ? styles.playBtnActive : ''}`}
                         onClick={() => onPlay(v.objectKey, v.id)}

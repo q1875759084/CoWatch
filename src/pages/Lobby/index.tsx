@@ -50,6 +50,8 @@ export default function RoomPage() {
      * 用于 VideoList 高亮当前播放项，以及切换视频时发送 SWITCH_VIDEO WS 消息
      */
     const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
+    /** 始终保持最新的 activeObjectKey，供 useMemoizedFn 闭包内读取（避免 stale closure） */
+    const activeObjectKeyRef = useRef<string | null>(null);
 
     /**
      * 暂存 ROOM_STATE 下发的播放初始化参数。
@@ -200,6 +202,58 @@ export default function RoomPage() {
         });
     });
 
+    // ── 复盘模式（跟随复盘开关） ────────────────────────────────────────────────
+    /**
+     * 非主控专属状态：是否追随主控的播放操作。
+     *   true（默认）：响应 SYNC_STATE / SYNC_PROGRESS / SWITCH_VIDEO
+     *   false：自由查看模式，静默忽略上述消息
+     */
+    const [followMode, setFollowMode] = useState(true);
+    /** 始终保持最新的 followMode，供 useMemoizedFn 闭包内读取（避免 stale closure） */
+    const followModeRef = useRef(true);
+    /**
+     * 非主控切换跟随开关：
+     *   false → true：发送 FORCE_SYNC，单播回当前完整状态，立即对齐
+     *   true → false：仅更新本地开关，进入自由模式
+     */
+    const handleFollowModeToggle = useMemoizedFn(() => {
+        setFollowMode((prev) => {
+            const next = !prev;
+            followModeRef.current = next;
+            if (next) {
+                // 开启跟随：发送 FORCE_SYNC 让后端单播回当前状态
+                sendMessageRef.current?.('FORCE_SYNC', {});
+            }
+            return next;
+        });
+    });
+    /** 主控一键拉回：发送 FORCE_SYNC，后端广播完整状态给所有非主控 */
+    const handleForceSync = useMemoizedFn(() => {
+        sendMessageRef.current?.('FORCE_SYNC', {});
+    });
+
+    /**
+     * 收到 CONTROL_CHANGED：控制权发生转移。
+     * 若自己从主控变为非主控，重置 followMode 为 false（自由模式）。
+     * 理由：转移控制权是管理员的主动行为，原主控无需立即跟随新主控，
+     * 应默认进入自由状态，由用户自行决定是否开启跟随。
+     */
+    const handleControlChanged = useMemoizedFn((newControllerId: string) => {
+        const myUserId = userInfo?.userId;
+        if (!myUserId) return;
+        // 仅在自己从主控变为非主控时处理（其他人的身份变化不影响自己的 followMode）
+        const wasController = newControllerId !== myUserId;
+        if (wasController) {
+            // 注：此时 roomState.controllerId 已由 useRoomWs 更新为 newControllerId，
+            // 但 isController 是 render 阶段派生的局部变量，在闭包里不可靠。
+            // 通过对比 newControllerId != myUserId 来判断"我不再是主控"。
+            // 只有当我之前确实是主控时才需要重置，但由于 followMode 对主控无意义，
+            // 即使冗余置为 false 也没有副作用，直接重置即可。
+            followModeRef.current = false;
+            setFollowMode(false);
+        }
+    });
+
     /**
      * 收到 ROOM_STATE：保存播放初始化参数，等 VideoPlayer 就绪后执行。
      * 同时初始化当前激活视频的 tag 列表：
@@ -214,6 +268,7 @@ export default function RoomPage() {
         activeObjectKey?: string | null,
         strokes?: Array<{ color: string; points: Array<{ x: number; y: number }> }>,
         noteContentFromRoom?: string,
+        forceSynced?: boolean,
     ) => {
         if (videoRef.current) {
             videoRef.current.initPlayback(isPlaying, currentTime);
@@ -224,6 +279,7 @@ export default function RoomPage() {
         // 不用 videoUrl 匹配：videos 列表里的 videoUrl 均为 null（播放时按需签名），永远匹配不到。
         // 后端 ROOM_STATE 的 tags 字段始终为空数组，tags 由 fetchTags 按需拉取。
         if (activeObjectKey) {
+            activeObjectKeyRef.current = activeObjectKey;
             setActiveObjectKey(activeObjectKey);
             const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
             if (matched) {
@@ -251,12 +307,19 @@ export default function RoomPage() {
     if (noteContentFromRoom !== undefined) {
       setNoteContent(noteContentFromRoom);
     }
+    // 主控一键拉回触发的强制同步：重置 followMode 开关为 true
+    if (forceSynced) {
+      followModeRef.current = true;
+      setFollowMode(true);
+    }
     });
 
     /**
      * 收到 SYNC_PROGRESS：仅在严重失步时才兜底 seek，正常播放不干预。
+     * 自由模式（followMode=false）时静默忽略。
      */
     const handleSyncProgress = useMemoizedFn((currentTime: number) => {
+        if (!followModeRef.current) return;
         const handle = videoRef.current;
         if (!handle) return;
         if (Math.abs(handle.getCurrentTime() - currentTime) >= SYNC_PROGRESS_THRESHOLD_SEC) {
@@ -279,6 +342,7 @@ export default function RoomPage() {
      * VideoPlayer 内部用 seq 大小判断异步回调（onSeeked）是否过期。
      */
     const handleSyncState = useMemoizedFn((isPlaying: boolean, currentTime: number, seq: number) => {
+        if (!followModeRef.current) return;
         const handle = videoRef.current;
         if (!handle) return;
         if (isPlaying) {
@@ -307,14 +371,23 @@ export default function RoomPage() {
     /**
      * 收到远端 SWITCH_VIDEO 广播：同步 activeObjectKey / activeVideoId 并拉取 tags。
      *
-     * 主控本地点击（handlePlayVideo）已经主动处理了 tag 拉取，
-     * 且在发送 SWITCH_VIDEO 前已设置 activeObjectKey/activeVideoId，
-     * 因此主控收到自己的广播时，objectKey 和当前状态一致，不会重复触发。
-     *
-     * 非主控则通过此回调完成状态同步。
+     * 职责分支：
+     *   1. 主控自身广播（objectKey 与当前一致）：仅更新 videoUrl（后端签名），跳过元数据
+     *   2. 非主控 · 跟随模式：更新所有状态，完整同步
+     *   3. 非主控 · 自由模式：忽略，不响应
      */
-    const handleSwitchVideo = useMemoizedFn((objectKey: string, videoId: string | undefined) => {
-        if (objectKey === activeObjectKey) return; // 主控自身广播，忽略
+    const handleSwitchVideo = useMemoizedFn((objectKey: string, videoId: string | undefined, videoUrl: string) => {
+        // 场景 1：主控收到自己发出的广播（objectKey 与当前一致）
+        // 仅需更新签名后的 videoUrl，元数据（activeObjectKey/tags 等）已在本地点击时处理
+        if (objectKey === activeObjectKeyRef.current) {
+            setActiveVideoUrl(videoUrl);
+            return;
+        }
+        // 场景 3：非主控处于自由模式，静默忽略
+        if (!followModeRef.current) return;
+        // 场景 2：非主控跟随模式，完整同步
+        setActiveVideoUrl(videoUrl);
+        activeObjectKeyRef.current = objectKey;
         setActiveObjectKey(objectKey);
         setTags([]);
         setDuration(0);
@@ -501,6 +574,7 @@ export default function RoomPage() {
         onTagAdded: handleTagAdded,
         onTagDeleted: handleTagDeleted,
         onSwitchVideo: handleSwitchVideo,
+        onControlChanged: handleControlChanged,
         onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
 onVideoDeleted: (deletedVideoId) => {
     // 删除的是当前激活视频：重置播放器和相关状态
@@ -573,11 +647,19 @@ onVideoDeleted: (deletedVideoId) => {
     });
 
     const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
+        activeObjectKeyRef.current = objectKey;
         setActiveObjectKey(objectKey);
         setActiveVideoId(videoId);
         setTags([]);
         setDuration(0);
-        sendMessage('SWITCH_VIDEO', { objectKey, videoId });
+        if (!followModeRef.current && !isController) {
+            // 自由模式下非主控切换视频：本地拼接 m3u8 路径，不广播 WS
+            const localUrl = `/api/rooms/${roomId}/videos/${videoId}/m3u8`;
+            setActiveVideoUrl(localUrl);
+        } else {
+            // 主控（或非主控追随模式下点播放）：发 WS 让后端广播并返回签名 URL
+            sendMessage('SWITCH_VIDEO', { objectKey, videoId });
+        }
         fetchTags(videoId);
     });
 
@@ -623,6 +705,7 @@ onVideoDeleted: (deletedVideoId) => {
                             videos={roomState.videos}
                             activeObjectKey={activeObjectKey}
                             isController={isController}
+                            canPlayInFreeMode={!isController && !followMode}
                             onPlay={handlePlayVideo}
                             currentUserId={userInfo?.userId ?? ''}
                             isAdmin={isAdmin}
@@ -646,38 +729,47 @@ onVideoDeleted: (deletedVideoId) => {
            * - 出了视频区鼠标自动恢复默认样式，tag区/上传区不受影响
            */}
                     <div className={styles.playerRatio}>
-            <PainterLayer
-              ref={(handle) => {
-                (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
-                if (handle && pendingStrokesRef.current) {
-                  const pending = pendingStrokesRef.current;
-                  pendingStrokesRef.current = null;
-                  handle.clearStrokes();
-                  pending.forEach((s) => handle.addStroke(s));
-                }
-              }}
-                            cursorStyleActive={cursorStyleActive}
-                            enabled={cursorEnabled}
-                            drawingMode={drawingMode}
-                            cursors={cursorsRef.current}
-                            drawColor={drawColor}
-                            onCursorMove={handleSelfCursorMove}
-                            // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
-                            onCursorEnter={() => { /* no-op */ }}
-                            onCursorLeave={handleSelfCursorLeave}
-                            onStrokeComplete={handleStrokeComplete}
-                        />
+            {/* 自由模式下非主控不渲染画布：避免显示其他人的笔迹/鼠标（与当前自选视频无关） */}
+            {(isController || followMode) && (
+              <PainterLayer
+                ref={(handle) => {
+                  (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
+                  if (handle && pendingStrokesRef.current) {
+                    const pending = pendingStrokesRef.current;
+                    pendingStrokesRef.current = null;
+                    handle.clearStrokes();
+                    pending.forEach((s) => handle.addStroke(s));
+                  }
+                }}
+                cursorStyleActive={cursorStyleActive}
+                enabled={cursorEnabled}
+                drawingMode={drawingMode}
+                cursors={cursorsRef.current}
+                drawColor={drawColor}
+                onCursorMove={handleSelfCursorMove}
+                // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
+                onCursorEnter={() => { /* no-op */ }}
+                onCursorLeave={handleSelfCursorLeave}
+                onStrokeComplete={handleStrokeComplete}
+              />
+            )}
                         {roomState.activeVideoUrl ? (
                             <VideoPlayer
                                 ref={setVideoRef}
                                 src={roomState.activeVideoUrl}
-                                disabled={!isController}
+                                disabled={
+                                    // 主控始终可操作
+                                    // 非主控：跟随模式（followMode=true）→ 禁用（观看）；自由模式（false）→ 可操作
+                                    !isController && followMode
+                                }
                                 cursorLocked={cursorEnabled && !isController}
                                 onProgressChange={(currentTime) => {
-                                    sendMessage('SYNC_PROGRESS', { currentTime });
+                                    // 只有主控才广播进度（非主控自由模式操作不对外同步）
+                                    if (isController) sendMessage('SYNC_PROGRESS', { currentTime });
                                 }}
                                 onPlayStateChange={(isPlaying, currentTime) => {
-                                    sendMessage('SYNC_STATE', { isPlaying, currentTime });
+                                    // 只有主控才广播播放状态
+                                    if (isController) sendMessage('SYNC_STATE', { isPlaying, currentTime });
                                 }}
                                 onDurationChange={setDuration}
                             />
@@ -730,6 +822,10 @@ onVideoDeleted: (deletedVideoId) => {
                         onTransferControl={(targetUserId) => {
                             sendMessage('TRANSFER_CONTROL', { targetUserId });
                         }}
+                        isController={isController}
+                        followMode={followMode}
+                        onFollowModeToggle={handleFollowModeToggle}
+                        onForceSync={handleForceSync}
                         cursorEnabled={cursorEnabled}
                         selectedStyleId={selectedStyleId}
                         cursorStyleActive={cursorStyleActive}

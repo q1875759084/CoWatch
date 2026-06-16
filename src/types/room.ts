@@ -83,6 +83,7 @@ export type WsMessageType =
   | 'VIDEO_RENAMED'
   | 'VIDEO_DELETED'
   | 'VIDEO_LABELS_UPDATED'
+  | 'FORCE_SYNC'
   | 'ERROR';
 
 export interface WsMessage<T = Record<string, unknown>> {
@@ -158,6 +159,8 @@ export interface RoomStateData {
   strokes?: Array<{ color: string; points: DrawStrokePoint[] }>;
   /** 当前房间的共享笔记内容，新成员加入时初始化 */
   noteContent?: string;
+  /** 由主控「一键拉回」触发的强制同步，前端收到后重置 followMode = true */
+  forceSynced?: boolean;
 }
 
 export interface VideoAddedData {

@@ -201,7 +201,11 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
 
         const doInit = () => {
           video.currentTime = currentTime;
-          if (!isPlaying) return;
+          if (!isPlaying) {
+            // 目标状态是暂停：确保视频停止播放（视频可能当前正在播放）
+            video.pause();
+            return;
+          }
 
           const onSeeked = () => {
             video.removeEventListener('seeked', onSeeked);

@@ -69,3 +69,5 @@
 - **RoomContext 状态管理迁移**：`RoomContext` 中实时更新的业务状态（`members`、`videos`、`controllerId`、`activeVideoUrl`）迁移到 Zustand 或 Jotai，`UserContext` 保持不变，消除不必要的全树重渲染
 
 - **鼠标位置共享（全屏支持）**：一期鼠标共享仅支持非全屏模式。全屏支持需将全屏目标从 `<video>` 元素改为播放器父容器（`.playerRatio`），光标覆盖层作为容器子节点随之进入全屏层，才能在全屏画面中渲染他人光标。具体改动：隐藏原生 `<video controls>` 的全屏按钮（CSS `::-webkit-media-controls-fullscreen-button`），在 `VideoPlayer` 外层叠加自定义全屏按钮，调用容器的 `requestFullscreen()`；全屏状态通过 `document.fullscreenchange` 事件同步，光标坐标百分比逻辑不变。
+
+- **【Bug】自由模式下控制权交接后新主控画布空白**：b 处于自由模式（`PainterLayer` 未挂载，未接收实时笔迹）→ a 画了笔迹 → a 将控制权交给 b → b 成为主控后 `PainterLayer` 重新挂载，但历史笔迹丢失，画布空白。根因：`TRANSFER_CONTROL` 只广播 `CONTROL_CHANGED`，不携带历史笔迹。**修复方案**：引入独立的 `STROKES_SYNC` 消息（只携带 `strokes`，不含 `videoUrl/isPlaying` 等播放状态），在 `TRANSFER_CONTROL` 和断线自动交接两处，给新主控单播此消息；前端 `useRoomWs.ts` 新增 `STROKES_SYNC` case，`types/room.ts` 新增对应类型。**注意不能复用 `ROOM_STATE`**：`ROOM_STATE` 含 `videoUrl/activeObjectKey/isPlaying/currentTime`，会触发切视频和 seek，破坏新主控当前的播放状态。

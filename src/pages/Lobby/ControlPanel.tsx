@@ -49,6 +49,14 @@ interface ControlPanelProps {
   onClearStrokes: () => void;
   /** 清除指定颜色的笔迹（广播给所有人） */
   onClearStrokesByColor: (color: string) => void;
+  /** 是否为主控（区分显示一键拉回 or 跟随开关） */
+  isController: boolean;
+  /** 非主控：是否处于跟随复盘模式 */
+  followMode: boolean;
+  /** 非主控：切换跟随模式 */
+  onFollowModeToggle: () => void;
+  /** 主控：一键拉回 */
+  onForceSync: () => void;
 }
 
 export default function ControlPanel({
@@ -69,6 +77,10 @@ export default function ControlPanel({
   onDrawColorChange,
   onClearStrokes,
   onClearStrokesByColor,
+  isController,
+  followMode,
+  onFollowModeToggle,
+  onForceSync,
 }: ControlPanelProps) {
   const [copied, setCopied] = useState(false);
   const handleCopy = useMemoizedFn(() => {
@@ -123,6 +135,30 @@ export default function ControlPanel({
           </Tooltip>
         </div>
       </CollapseSection>
+
+      {/* 当前模式：主控显示「一键同步」按钮，非主控显示跟随/自由切换开关 */}
+      <div className={styles.modeRow}>
+        <span className={styles.modeRowLabel}>当前模式</span>
+        {isController ? (
+          <button
+            type="button"
+            className={styles.forceSyncBtn}
+            onClick={onForceSync}
+            title="将所有成员同步到当前播放进度和画布状态"
+          >
+            一键同步
+          </button>
+        ) : (
+          <Switch
+            size="small"
+            checked={followMode}
+            onChange={onFollowModeToggle}
+            checkedChildren="跟随"
+            unCheckedChildren="自由"
+            title={followMode ? '关闭跟随，进入自由模式' : '开启跟随，同步主控操作'}
+          />
+        )}
+      </div>
 
       {/* 鼠标设置 */}
       <CollapseSection title="鼠标设置" collapsible>

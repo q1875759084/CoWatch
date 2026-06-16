@@ -30,8 +30,8 @@ interface UseRoomWsOptions {
   roomId: string;
   /** accessToken，通过 WS 连接参数传给后端鉴权 */
   token: string;
-  /** 收到 ROOM_STATE 时通知调用方初始化播放状态，附带 tags、videoUrl、activeObjectKey、strokes 和 noteContent */
-  onRoomState?: (isPlaying: boolean, currentTime: number, tags?: Tag[], videoUrl?: string | null, activeObjectKey?: string | null, strokes?: RoomStateData['strokes'], noteContent?: string) => void;
+  /** 收到 ROOM_STATE 时通知调用方初始化播放状态，附带 tags、videoUrl、activeObjectKey、strokes、noteContent 和 forceSynced */
+  onRoomState?: (isPlaying: boolean, currentTime: number, tags?: Tag[], videoUrl?: string | null, activeObjectKey?: string | null, strokes?: RoomStateData['strokes'], noteContent?: string, forceSynced?: boolean) => void;
   /** 收到 SYNC_PROGRESS 时通知播放器同步（防回环由调用方负责） */
   onSyncProgress?: (currentTime: number) => void;
   /** 收到 SYNC_STATE 时通知播放器同步，seq 由后端分配，用于非主控过期判断 */
@@ -69,6 +69,11 @@ interface UseRoomWsOptions {
   onVideoDeleted?: (videoId: string) => void;
   /** 收到 VIDEO_LABELS_UPDATED 时通知调用方（RoomContext 已直接处理，此回调供额外业务使用） */
   onVideoLabelsUpdated?: (videoId: string, labels: string[]) => void;
+  /**
+   * 收到 CONTROL_CHANGED 时通知调用方（RoomContext 已更新 controllerId，此回调供 Lobby 处理身份切换）。
+   * newControllerId：新主控的 userId
+   */
+  onControlChanged?: (newControllerId: string) => void;
 }
 
 export function useRoomWs({
@@ -90,6 +95,7 @@ export function useRoomWs({
   onVideoRenamed,
   onVideoDeleted,
   onVideoLabelsUpdated,
+  onControlChanged,
 }: UseRoomWsOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const {
@@ -125,6 +131,7 @@ export function useRoomWs({
   const stableOnVideoRenamed      = useMemoizedFn(onVideoRenamed      ?? (() => {}));
   const stableOnVideoDeleted      = useMemoizedFn(onVideoDeleted      ?? (() => {}));
   const stableOnVideoLabelsUpdated = useMemoizedFn(onVideoLabelsUpdated ?? (() => {}));
+  const stableOnControlChanged      = useMemoizedFn(onControlChanged      ?? (() => {}));
 
   // 发送消息的稳定引用
   const sendMessage = useMemoizedFn((type: string, data?: Record<string, unknown>) => {
@@ -175,7 +182,7 @@ export function useRoomWs({
               setActiveVideoUrl(d.videoUrl);
             }
             console.log('[WS] ROOM_STATE received', { isPlaying: d.isPlaying, currentTime: d.currentTime, videoUrl: d.videoUrl });
-            stableOnRoomState(d.isPlaying ?? false, d.currentTime ?? 0, d.tags, d.videoUrl, d.activeObjectKey, d.strokes, d.noteContent);
+            stableOnRoomState(d.isPlaying ?? false, d.currentTime ?? 0, d.tags, d.videoUrl, d.activeObjectKey, d.strokes, d.noteContent, d.forceSynced);
           }
           break;
         }
@@ -194,7 +201,10 @@ export function useRoomWs({
 
         case 'CONTROL_CHANGED': {
           const d = msg.data as unknown as ControlChangedData | undefined;
-          if (d) setControllerId(d.controllerId);
+          if (d) {
+            setControllerId(d.controllerId);
+            stableOnControlChanged(d.controllerId);
+          }
           break;
         }
 
@@ -241,9 +251,7 @@ export function useRoomWs({
         case 'SWITCH_VIDEO': {
           const d = msg.data as unknown as SwitchVideoData | undefined;
           if (!d?.videoUrl) break;
-          // 后端广播带签名的 videoUrl，更新激活视频 URL
-          setActiveVideoUrl(d.videoUrl);
-          // 通知调用方（非主控需要拉取对应视频的 tags）
+          // 将 videoUrl 透传给调用方，由调用方决定是否更新（自由模式下拦截）
           stableOnSwitchVideo(d.objectKey, d.videoId, d.videoUrl);
           break;
         }
