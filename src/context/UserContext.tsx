@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import { setAccessToken, clearAccessToken, getAccessToken } from '@/utils/token';
 import { saveUserInfo, loadUserInfo, clearUserInfo, type StoredUserInfo } from '@/utils/storage';
@@ -77,9 +77,8 @@ export function UserProvider({ children }: { children: ReactNode }) {
    * 判断当前用户是否持有某 plan
    * 用 useCallback 保持引用稳定，userInfo 变化时自动更新
    */
-  const hasPlan = useCallback(
+  const hasPlan = useMemoizedFn(
     (plan: string): boolean => userInfo?.plans?.includes(plan) ?? false,
-    [userInfo],
   );
 
   return (

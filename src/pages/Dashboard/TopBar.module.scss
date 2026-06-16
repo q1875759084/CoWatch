@@ -168,8 +168,7 @@
 // ── Popover 深色主题覆写 ───────────────────────────────────────────────────────
 // overlayClassName 绑定此 class，限定覆写范围避免污染其他 Popover
 .darkPopover {
-  // antd v6 内容容器类名为 ant-popover-container（v5 是 ant-popover-inner）
-  :global(.ant-popover-container) {
+  :global(.ant-popover-inner) {
     // CSS 变量覆写（antd v6 通过变量注入颜色，直接写 background 会被变量覆盖）
     // 变量用渐变中间色兜底（不支持渐变），background 用渐变覆盖
     --ant-color-bg-elevated: #1a1e24;

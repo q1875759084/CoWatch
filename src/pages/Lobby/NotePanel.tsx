@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef } from 'react';
+import { useMemoizedFn } from 'ahooks';
 import styles from './NotePanel.module.scss';
 
 interface NotePanelProps {
@@ -24,7 +25,7 @@ export default function NotePanel({ content, isController, roomId, onChange }: N
   const [open, setOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const handleSave = useCallback(() => {
+  const handleSave = useMemoizedFn(() => {
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -32,7 +33,7 @@ export default function NotePanel({ content, isController, roomId, onChange }: N
     a.download = `cowatch-note-${roomId}.txt`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [content, roomId]);
+  });
 
   return (
     <div className={styles.root}>

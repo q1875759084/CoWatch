@@ -1,6 +1,6 @@
-# CarryHub 代码质量审查
+# CoWatch 代码质量审查
 
-> 对指定文件或目录执行 CarryHub 项目规范的后置代码质量审查。先做 Skill 诊断按需加载专业规范，再执行通用规范检查，输出分级问题报告和重构建议。
+> 对指定文件或目录执行 CoWatch 项目规范的后置代码质量审查。先做 Skill 诊断按需加载专业规范，再执行通用规范检查，输出分级问题报告和重构建议。
 >
 > **触发方式**：用户输入 `/code-review [路径]` 时激活本流程。
 
@@ -21,8 +21,7 @@
 
 | 检测到的代码模式 | 激活 Skill | 读取路径 |
 |----------------|-----------|---------|
-| 使用 `bizAxios` / `axios` / `useRequest` / `fetch` 发起请求 | carry-hub-request | `.claude/skills/carry-hub-request/SKILL.md` |
-| 使用 `permissions` / `hasPermission` / `useAuthStore` / `PermissionRoute` | carry-hub-auth | `.claude/skills/carry-hub-auth/SKILL.md` |
+| 使用 `request` / `axios` / `useRequest` / `fetch` 发起请求 | cowatch-request | `.claude/skills/carry-hub-request/SKILL.md` |
 | 多维布尔状态组合（≥3个布尔维度的 if-else 组合判断） | ⚠️ 标记为位掩码重构候选 | 在报告中说明 |
 | 超长条件分支链（单文件 if/else/case > 5 个） | ⚠️ 标记为 Map/策略模式重构候选 | 在报告中说明 |
 
@@ -81,18 +80,16 @@ else if (!isA && isB) { ... }
 | 使用 `any`（无注释说明原因） | 🔴 必须处理 |
 | 使用 `@ts-ignore` | 🔴 必须处理 |
 | 公共类型未在 `types/` 目录定义 | 🟡 建议处理 |
-| API 响应未用 `ApiResponse<T>` 约束 | 🟡 建议处理 |
 | 类型转换无默认值（如 `Number(x)` 未加 `\|\| 0`） | 🟡 建议处理 |
 
 ### E. 依赖与架构规范
 
 | 检查项 | 级别 |
 |--------|------|
-| 子包间直接互相 import（绕过 `@carry/shared`） | 🔴 必须处理 |
-| 直接使用 `axios`（绕过 `bizAxios`） | 🔴 必须处理 |
-| 权限判断未使用 `usePermission` / `PermissionRoute` | 🟡 建议处理 |
+| 直接使用原生 `axios`（未走封装的 `request`） | 🔴 必须处理 |
 | 组件内直接写请求逻辑（应封装到 `api/` 目录） | 🟡 建议处理 |
-| 常量未在 `constants/` 维护（魔法数字/字符串） | 🟡 建议处理 |
+| WS 消息类型未定义在 `src/types/room.ts` | 🟡 建议处理 |
+| 常量未在合适位置维护（魔法数字/字符串） | 🟡 建议处理 |
 | Mock 数据硬编码在业务代码中 | 🔴 必须处理 |
 
 ### F. 错误处理
@@ -101,12 +98,10 @@ else if (!isA && isB) { ... }
 |--------|------|
 | 异步操作无 `try/catch`（静默失败） | 🔴 必须处理 |
 | 错误未用 `message.error()` 展示给用户 | 🟡 建议处理 |
-| 4xx 与 5xx 错误未分类处理 | 🟡 建议处理 |
 
 ### G. Skill 专项审查（仅对激活了对应 Skill 的文件执行）
 
-- **carry-hub-request 已激活**：对文件中的请求相关代码，按 Skill 规范逐条核查（bizAxios 使用、响应类型、错误分类处理、重试场景）
-- **carry-hub-auth 已激活**：对文件中的权限相关代码，按 Skill 规范逐条核查（三层权限控制、权限码来源、usePermission 用法）
+- **cowatch-request 已激活**：对文件中的请求相关代码，按 Skill 规范逐条核查（`request` 封装使用、响应类型、错误处理）
 
 ---
 
@@ -114,23 +109,23 @@ else if (!isA && isB) { ... }
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 CarryHub 代码质量审查报告
-审查文件：N 个 | 激活 Skill：carry-hub-request, carry-hub-auth
+📋 CoWatch 代码质量审查报告
+审查文件：N 个 | 激活 Skill：cowatch-request
 发现问题：🔴 X 个 | 🟡 Y 个
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-【packages/enterprise/src/api/enterprise.ts】
-🔴 [carry-hub-request] 直接使用 axios，未经 bizAxios（第 3 行）
-   → import bizAxios from '@carry/shared/utils/bizAxios'
-🟡 [carry-hub-request] 响应未用 ApiResponse<T> 约束（第 12 行）
+【src/api/room.ts】
+🔴 [cowatch-request] 直接使用原生 axios，未走封装的 request（第 8 行）
+   → 改用 import request from '@/utils/request'
+🟡 [通用] 公共类型 RoomInfo 应提取到 src/types/ 目录（第 24 行）
 
-【packages/enterprise/src/pages/List/index.tsx】
-🔴 [通用] 条件分支 9 个（第 45-120 行）
+【src/pages/Lobby/index.tsx】
+🔴 [通用] 条件分支 7 个（第 60-140 行）
    → 状态码映射建议改为 STATUS_MAP 对象
-🟡 [通用] 行数 287 行（接近 300 行上限）
+🟡 [通用] 行数 312 行（超出 300 行上限）
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔴 必须处理（4项）
+🔴 必须处理（3项）
 🟡 建议处理（2项）
 
 是否立即处理 🔴 问题？[Y 开始逐个修复 / N 仅记录]
