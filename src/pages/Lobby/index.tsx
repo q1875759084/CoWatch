@@ -21,7 +21,7 @@ import PainterLayer, {
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './cursorStyles';
 import NotePanel from './NotePanel';
-import { LeftOutlined, RightOutlined } from '@ant-design/icons';
+import { CaretLeftOutlined, CaretRightOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
 /** 默认画笔颜色 */
@@ -718,7 +718,7 @@ onVideoDeleted: (deletedVideoId) => {
                         onClick={() => setPanelCollapsed((v) => !v)}
                         title={panelCollapsed ? '展开面板' : '收起面板'}
                     >
-                        {panelCollapsed ? <LeftOutlined /> : <RightOutlined />}
+                        {panelCollapsed ? <CaretLeftOutlined /> : <CaretRightOutlined />}
                     </button>
                     <div className={`${styles.panelContent} ${panelCollapsed ? styles.panelContentHidden : ''}`}>
                     <ControlPanel

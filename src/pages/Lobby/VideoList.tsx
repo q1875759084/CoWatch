@@ -56,11 +56,9 @@ export default function VideoList({
     setLabelInput('');
   };
 
-  /** 取消：回滚 draft，退出编辑态 */
-  const cancelEdit = (v: VideoItem) => {
+  /** 取消：退出编辑态，清空输入框控制状态（draft 值会在 startEdit 时重新初始化，无需回滚） */
+  const cancelEdit = () => {
     setEditingId(null);
-    setDraftName(v.displayName ?? v.fileName);
-    setDraftLabels([...(v.labels ?? [])]);
     setAddingLabel(false);
     setLabelInput('');
   };
@@ -136,7 +134,7 @@ export default function VideoList({
                         autoFocus
                         onChange={(e) => setDraftName(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === 'Escape') cancelEdit(v);
+                          if (e.key === 'Escape') cancelEdit();
                           if (e.key === 'Enter') confirmEdit(v);
                         }}
                         onClick={(e) => e.stopPropagation()}
@@ -241,7 +239,7 @@ export default function VideoList({
                     <button
                       className={styles.cancelBtn}
                       onMouseDown={(e) => e.preventDefault()}
-                      onClick={(e) => { e.stopPropagation(); cancelEdit(v); }}
+                       onClick={(e) => { e.stopPropagation(); cancelEdit(); }}
                     >
                       取消
                     </button>

@@ -116,7 +116,7 @@ export function TopBar() {
           >
             <Avatar size={40} src={userInfo.avatarUrl} />
             <div className={`${styles.avatarOverlay} ${uploading ? styles.avatarUploading : ''}`}>
-              {uploading ? '…' : '换'}
+              {uploading ? '…' : <EditOutlined />}
             </div>
           </div>
 
