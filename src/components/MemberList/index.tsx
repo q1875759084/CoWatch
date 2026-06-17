@@ -26,8 +26,9 @@ export default function MemberList({
     <ul className={styles.list}>
       {sortedMembers.map((member) => {
         const isController = member.userId === controllerId;
+        // 管理员 或 主控 均可点击其他成员进行控制权转让
         const canClick =
-          isAdmin &&
+          (isAdmin || isController) &&
           onSelectController &&
           !isController;
 

@@ -272,13 +272,13 @@ export default function ControlPanel({
       {/* 成员列表 */}
       <CollapseSection
         title="成员"
-        subtitle={isAdmin ? '点击成员可使其成为控制者' : undefined}
+        subtitle={isAdmin || isController ? '点击成员可使其成为控制者' : undefined}
         collapsible
       >
         <MemberList
           members={members}
           controllerId={controllerId}
-          isAdmin={isAdmin}
+          isAdmin={isAdmin || isController}
           onSelectController={onTransferControl}
         />
       </CollapseSection>
