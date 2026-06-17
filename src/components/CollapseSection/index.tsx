@@ -5,6 +5,8 @@ import styles from './index.module.scss';
 interface CollapseSectionProps {
   /** 标题文字 */
   title: ReactNode;
+  /** 标题旁的补充说明（小字，灰色），用于状态提示等场景 */
+  subtitle?: ReactNode;
   /**
    * 是否可折叠。
    * - true：标题行可点击展开/折叠，右侧显示 ▼ 箭头
@@ -30,6 +32,7 @@ interface CollapseSectionProps {
  */
 export default function CollapseSection({
   title,
+  subtitle,
   collapsible = false,
   defaultOpen = true,
   children,
@@ -39,6 +42,7 @@ export default function CollapseSection({
   const titleContent = (
     <span className={styles.titleRow}>
       <span className={styles.title}>{title}</span>
+      {subtitle && <span className={styles.subtitle}>{subtitle}</span>}
     </span>
   );
 

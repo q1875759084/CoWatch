@@ -219,6 +219,17 @@ export default function RoomPage() {
         if (next) {
             // 开启跟随：发送 FORCE_SYNC 让后端单播回当前状态
             sendMessageRef.current?.('FORCE_SYNC', {});
+        } else {
+            // 切到自由模式：重置所有鼠标相关状态
+            // 自由模式本意是脱离共享，不应继续影响他人画布/光标
+            setCursorEnabled(false);
+            setCursorStyleActive(false);
+            setSelectedStyleId(DEFAULT_STYLE_ID);
+            setDrawingMode(false);
+            // 清空自己的光标 Map 条目并重绘（不再广播，本地也不显示）
+            const uid = userInfo?.userId ?? '__self__';
+            cursorsRef.current.delete(uid);
+            painterRef.current?.redraw();
         }
     });
     /** 主控一键拉回：发送 FORCE_SYNC，后端广播完整状态给所有非主控 */
@@ -745,11 +756,11 @@ onVideoDeleted: (deletedVideoId) => {
                                 ref={setVideoRef}
                                 src={roomState.activeVideoUrl}
                                 disabled={
-                                    // 主控始终可操作
-                                    // 非主控：跟随模式（followMode=true）→ 禁用（观看）；自由模式（false）→ 可操作
-                                    !isController && followMode
+                                    // 非主控跟随模式：禁用（观看）
+                                    // 主控绘制模式：禁用（防止绘制点击穿透触发播放/暂停）
+                                    // 其余情况（主控正常模式 / 非主控自由模式）均可操作
+                                    (!isController && followMode) || (isController && drawingMode)
                                 }
-                                cursorLocked={cursorEnabled && !isController}
                                 onProgressChange={(currentTime) => {
                                     // 只有主控才广播进度（非主控自由模式操作不对外同步）
                                     if (isController) sendMessage('SYNC_PROGRESS', { currentTime });
@@ -813,17 +824,20 @@ onVideoDeleted: (deletedVideoId) => {
                         followMode={followMode}
                         onFollowModeToggle={handleFollowModeToggle}
                         onForceSync={handleForceSync}
-                        cursorEnabled={cursorEnabled}
-                        selectedStyleId={selectedStyleId}
-                        cursorStyleActive={cursorStyleActive}
-                        drawingMode={drawingMode}
-                        drawColor={drawColor}
-                        onCursorToggle={handleCursorToggle}
-                        onCursorStyleSelect={handleCursorStyleSelect}
-                        onDrawingModeToggle={handleDrawingModeToggle}
-                        onDrawColorChange={setDrawColor}
-                        onClearStrokes={handleClearStrokes}
-                        onClearStrokesByColor={handleClearStrokesByColor}
+                        cursorSettings={{
+                            disabled: !isController && !followMode,
+                            cursorEnabled,
+                            selectedStyleId,
+                            cursorStyleActive,
+                            drawingMode,
+                            drawColor,
+                            onCursorToggle: handleCursorToggle,
+                            onCursorStyleSelect: handleCursorStyleSelect,
+                            onDrawingModeToggle: handleDrawingModeToggle,
+                            onDrawColorChange: setDrawColor,
+                            onClearStrokes: handleClearStrokes,
+                            onClearStrokesByColor: handleClearStrokesByColor,
+                        }}
                     />
                     </div>
                 </aside>
