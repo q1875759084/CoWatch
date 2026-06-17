@@ -16,7 +16,7 @@
  *   - 不拦截：.m3u8 请求（由后端动态生成，含实时签名，不适合缓存）
  *
  * cache key：
- *   - 剥离 CDN TypeA 签名（sign 参数）和 COS 直连签名（q-sign-* 参数）
+ *   - 剥离 CDN TypeA 签名（sign 参数）和 COS SDK 签名（q-sign-* 参数）
  *   - 同一片段无论签名如何轮换，始终命中同一缓存条目
  *
  * 缓存收益：
@@ -47,13 +47,13 @@ function isHlsSegment(request: Request): boolean {
  *
  * 兼容两种签名模式：
  *   - CDN TypeA 鉴权：sign={timestamp}-{rand}-{uid}-{md5}，剥离 sign 参数
- *   - COS 直连签名（本地开发 / 未配置 CDN 鉴权）：q-sign-* 系列参数，一并剥离
+ *   - 本地模式 COS SDK 签名：q-sign-* 系列参数，一并剥离
  */
 function stripSignature(url: string): string {
   const u = new URL(url);
   // CDN TypeA 鉴权参数
   u.searchParams.delete('sign');
-  // COS 直连签名参数
+  // COS SDK 签名参数（本地模式）
   [
     'q-sign-algorithm',
     'q-ak',

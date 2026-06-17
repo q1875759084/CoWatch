@@ -85,7 +85,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
        *   以前的方案是先 fetch m3u8 文本再转 Blob URL，但 hls.js 用 Blob URL 作为 base
        *   解析 m3u8 里的相对路径（如 /uploads/...），会拼出非法的 blob:http:/uploads/...。
        *   直接传真实 URL，hls.js 以 http://host/api/... 为 base，相对路径解析完全正确，
-       *   本地模式（/uploads/）和 COS 模式（https://...）行为一致。
+       *   本地模式（/uploads/）和线上模式（https://...）行为一致。
        *
        * Bearer Token 注入：
        *   hls.js 默认用 XMLHttpRequest 请求，通过 xhrSetup 钩子为每个请求注入 Authorization 头。

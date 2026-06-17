@@ -11,19 +11,13 @@ type UploadStatus = 'idle' | 'uploading' | 'slicing' | 'error';
 interface VideoUploaderProps {
   roomId: string;
   /**
-   * 当前用户是否为主控。
-   * - 空闲态：主控可点击上传，非主控只读展示（禁用交互）
-   * - 上传中 / 切片中：全员均为纯展示，无区别
-   */
-  isController: boolean;
-  /**
    * WS VIDEO_ADDED 事件透传——由父组件（Lobby）在 useRoomWs 收到 VIDEO_ADDED 时调用。
    * 切片完成信号，全员统一回归空闲态，不区分上传者与旁观者。
    */
   lastVideoAddedName?: string;
 }
 
-export default function VideoUploader({ roomId, isController, lastVideoAddedName }: VideoUploaderProps) {
+export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState('');
@@ -72,7 +66,7 @@ export default function VideoUploader({ roomId, isController, lastVideoAddedName
 
     try {
       // 1. 向后端请求上传地址
-      //    - OSS 模式：mode: 'proxy'，后端代理上传，完成后异步切片
+      //    - 线上模式：mode: 'proxy'，后端代理上传，完成后异步切片
       //    - 本地模式：mode: 'local'，直接发给后端落盘，完成后异步切片
       const { uploadUrl, mode } = await getUploadUrlApi(
         roomId,
@@ -81,10 +75,10 @@ export default function VideoUploader({ roomId, isController, lastVideoAddedName
       );
 
       if (mode === 'local') {
-        // ── 本地开发模式 ──────────────────────────────────────────────────
+        // ── 本地模式 ────────────────────────────────────────────────────────
         await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct));
       } else {
-        // ── 代理上传模式（所有 OSS 用户统一走此路径）────────────────────
+        // ── 线上模式：代理上传 ──────────────────────────────────────────────
         await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct), 'POST');
       }
 
@@ -104,22 +98,17 @@ export default function VideoUploader({ roomId, isController, lastVideoAddedName
   return (
     <div className={styles.wrapper}>
       {status === 'idle' || status === 'error' ? (
-        <label className={`${styles.idleBox} ${!isController ? styles.idleBoxDisabled : ''}`}>
-          {/* 非主控：不挂 onChange，点击不触发文件选择 */}
-          {isController && (
-            <input
-              ref={inputRef}
-              type="file"
-              accept="video/*"
-              hidden
-              onChange={handleFileChange}
-            />
-          )}
+        <label className={styles.idleBox}>
+          <input
+            ref={inputRef}
+            type="file"
+            accept="video/*"
+            hidden
+            onChange={handleFileChange}
+          />
           <span className={styles.idleText}>
-            {isController ? '点击选择录屏文件' : '等待主控上传视频...'}
-            {isController && (
-              <span className={styles.idleHint}>&ensp;支持 mp4、mov、avi 等常见格式</span>
-            )}
+            点击选择录屏文件
+            <span className={styles.idleHint}>&ensp;支持 mp4、mov、avi 等常见格式</span>
           </span>
           {status === 'error' && <span className={styles.errorText}>{errorMsg}</span>}
         </label>

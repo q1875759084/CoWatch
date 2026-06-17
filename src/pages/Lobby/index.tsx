@@ -727,11 +727,10 @@ onVideoDeleted: (deletedVideoId) => {
                             onUpdateLabels={handleUpdateLabels}
                         />
                     </CollapseSection>
-                    {/* 上传区（全员可见；空闲态下仅主控可操作） */}
+                    {/* 上传区（全员可见可操作） */}
                     <CollapseSection title="上传视频" collapsible defaultOpen={false}>
                         <VideoUploader
                             roomId={roomId!}
-                            isController={isController}
                             lastVideoAddedName={lastVideoAddedName}
                         />
                     </CollapseSection>

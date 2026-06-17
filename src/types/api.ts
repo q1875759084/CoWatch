@@ -57,8 +57,8 @@ export interface UploadUrlResponse {
   fileName: string;
   /**
    * 上传模式：
-   * - 'proxy'： OSS 模式，文件经后端中转上传（已废弃白名单直传）
-   * - 'local'：本地开发模式，文件落盘到后端本地
+   * - 'proxy'：线上模式，文件经后端中转上传到 COS
+   * - 'local'：本地模式，文件落盘到后端本地
    */
   mode: 'local' | 'proxy';
 }
