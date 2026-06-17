@@ -7,7 +7,7 @@ import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
 import { useSyncedState } from '@/hooks/useSyncedState';
 import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi, updateVideoLabelsApi } from '@/api/room';
-import type { Tag, CursorMoveDownData, DrawStrokeData, RoomStateData } from '@/types/room';
+import type { Tag, CursorMoveDownData, DrawStrokeData, RoomStateData, ChatMessageData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
@@ -110,6 +110,8 @@ export default function RoomPage() {
     const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
     /** 共享笔记内容（由 WS 同步） */
     const [noteContent, setNoteContent] = useState('');
+    /** 房间聊天消息列表（由 WS 广播维护，不落库） */
+    const [chatMessages, setChatMessages] = useState<ChatMessageData[]>([]);
     /** 节流发送 NOTE_UPDATE 的定时器 ref */
     const noteThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     /**
@@ -307,6 +309,10 @@ export default function RoomPage() {
         // 初始化共享笔记
         if (noteContent !== undefined) {
             setNoteContent(noteContent);
+        }
+        // 初始化聊天历史消息（新成员加入时由服务端下发最近 50 条）
+        if (d.chatMessages?.length) {
+            setChatMessages(d.chatMessages);
         }
         // 主控一键拉回触发的强制同步：重置 followMode 开关为 true
         if (forceSynced) {
@@ -591,6 +597,7 @@ onVideoDeleted: (deletedVideoId) => {
         onDrawClear: handleDrawClear,
         onDrawClearColor: handleDrawClearColor,
         onNoteUpdate: (content) => setNoteContent(content),
+        onChatMessage: (msg) => setChatMessages((prev) => [...prev, msg]),
     });
 
     // 将最新 sendMessage 同步到 ref，供节流函数闭包读取
@@ -606,6 +613,14 @@ onVideoDeleted: (deletedVideoId) => {
         noteThrottleRef.current = setTimeout(() => {
             sendMessageRef.current?.('NOTE_UPDATE', { content });
         }, 1000);
+    });
+
+    /**
+     * 居民发送聊天消息：通过 WS 向后端发送 CHAT_MESSAGE，
+     * 后端补充 userId/nickname/timestamp 后广播给所有成员（含自身）。
+     */
+    const handleSendChat = useMemoizedFn((content: string) => {
+        sendMessageRef.current?.('CHAT_MESSAGE', { content });
     });
 
     /**
@@ -843,12 +858,15 @@ onVideoDeleted: (deletedVideoId) => {
                 </aside>
             </div>
 
-            {/* 共享笔记浮层：绝对定位在 .page 右上角，bar 下方 12px，右侧 20px */}
+            {/* 共享笔记 + 聊天浮层：绝对定位在 .page 右上角， bar 下方 12px，右侧 20px */}
             <NotePanel
                 content={noteContent}
                 isController={isController}
                 roomId={roomState.roomId}
                 onChange={handleNoteChange}
+                messages={chatMessages}
+                currentUserId={userInfo?.userId ?? ''}
+                onSendChat={handleSendChat}
             />
         </div>
     );

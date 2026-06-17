@@ -82,6 +82,7 @@ export type WsMessageType =
   | 'DRAW_CLEAR'
   | 'DRAW_CLEAR_COLOR'
   | 'NOTE_UPDATE'
+  | 'CHAT_MESSAGE'
   | 'VIDEO_RENAMED'
   | 'VIDEO_DELETED'
   | 'VIDEO_LABELS_UPDATED'
@@ -161,6 +162,8 @@ export interface RoomStateData {
   strokes?: Array<{ color: string; points: DrawStrokePoint[] }>;
   /** 当前房间的共享笔记内容，新成员加入时初始化 */
   noteContent?: string;
+  /** 最近聊天消息列表，新成员加入时初始化（最多 50 条） */
+  chatMessages?: ChatMessageData[];
   /** 由主控「一键拉回」触发的强制同步，前端收到后重置 followMode = true */
   forceSynced?: boolean;
 }
@@ -286,4 +289,21 @@ export interface NoteUpdateData {
   content: string;
   /** 下行时由服务端补充 */
   fromUserId?: string;
+}
+
+// ─── Chat WS data 类型 ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 上行 & 下行：房间聊天消息。
+ * 上行只需传 content，服务端补充 userId/nickname/timestamp 后广播。
+ * 下行为完整结构，全员均会收到（含发送者自身）。
+ */
+export interface ChatMessageData {
+  userId: string;
+  /** 成员显示昵称 */
+  nickname: string;
+  /** 消息内容 */
+  content: string;
+  /** 服务端生成的发送时刻，unix ms */
+  timestamp: number;
 }

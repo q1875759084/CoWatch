@@ -21,6 +21,7 @@ import type {
   DrawClearData,
   DrawClearColorData,
   NoteUpdateData,
+  ChatMessageData,
   VideoRenamedData,
   VideoDeletedData,
   VideoLabelsUpdatedData,
@@ -63,6 +64,8 @@ interface UseRoomWsOptions {
   onDrawClearColor?: (color: string) => void;
   /** 收到 NOTE_UPDATE 时通知调用方更新笔记内容 */
   onNoteUpdate?: (content: string) => void;
+  /** 收到 CHAT_MESSAGE 时通知调用方新增聊天消息（包括自己发送的） */
+  onChatMessage?: (data: ChatMessageData) => void;
   /** 收到 VIDEO_RENAMED 时通知调用方更新视频展示名（RoomContext 已直接处理，此回调供额外业务使用） */
   onVideoRenamed?: (videoId: string, displayName: string) => void;
   /** 收到 VIDEO_DELETED 时通知调用方（RoomContext 已直接处理，此回调供 Lobby 处理激活视频被删的播放器重置） */
@@ -92,6 +95,7 @@ export function useRoomWs({
   onDrawClear,
   onDrawClearColor,
   onNoteUpdate,
+  onChatMessage,
   onVideoRenamed,
   onVideoDeleted,
   onVideoLabelsUpdated,
@@ -128,6 +132,7 @@ export function useRoomWs({
   const stableOnDrawClear      = useMemoizedFn(onDrawClear      ?? (() => {}));
   const stableOnDrawClearColor = useMemoizedFn(onDrawClearColor ?? (() => {}));
   const stableOnNoteUpdate     = useMemoizedFn(onNoteUpdate     ?? (() => {}));
+  const stableOnChatMessage    = useMemoizedFn(onChatMessage    ?? (() => {}));
   const stableOnVideoRenamed      = useMemoizedFn(onVideoRenamed      ?? (() => {}));
   const stableOnVideoDeleted      = useMemoizedFn(onVideoDeleted      ?? (() => {}));
   const stableOnVideoLabelsUpdated = useMemoizedFn(onVideoLabelsUpdated ?? (() => {}));
@@ -303,6 +308,12 @@ export function useRoomWs({
         case 'NOTE_UPDATE': {
           const d = msg.data as unknown as NoteUpdateData | undefined;
           if (d) stableOnNoteUpdate(d.content);
+          break;
+        }
+
+        case 'CHAT_MESSAGE': {
+          const d = msg.data as unknown as ChatMessageData | undefined;
+          if (d) stableOnChatMessage(d);
           break;
         }
 
