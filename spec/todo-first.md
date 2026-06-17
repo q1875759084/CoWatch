@@ -1,85 +1,63 @@
-# 重构：消除 state + ref 双写模式
+# 待处理：useRoomWs 职责混乱 & Context 架构
 
-## 问题描述
+## 问题一：useRoomWs 职责混乱
 
-`src/pages/Lobby/index.tsx` 中存在 3 组 `state + ref` 必须同步双写的状态：
+`useRoomWs.ts` 的 `switch` 里两类职责混在一起：
 
-```typescript
-const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
-const activeObjectKeyRef = useRef<string | null>(null);
+1. **Context 层操作**：`setControllerId`、`addMember`、`renameVideo` 等全局状态维护
+2. **Lobby 层回调**：`stableOnXxx` 具体页面业务
 
-const [activeVideoId, setActiveVideoId] = useState<string>('');
-const activeVideoIdRef = useRef<string>('');
+导致 `useRoomWs` 既依赖 `RoomContext` 内部方法，又依赖调用方的业务回调，两种职责耦合在同一个 `switch case` 里。
 
-const [followMode, setFollowMode] = useState(true);
-const followModeRef = useRef(true);
+### 具体混乱的 case
+
+| case | Context 操作 | Lobby 回调 |
+|---|---|---|
+| `ROOM_STATE` | `setControllerId` / `syncMembersOnlineStatus` / `addVideo` / `setActiveVideoUrl` | `stableOnRoomState` |
+| `CONTROL_CHANGED` | `setControllerId` | `stableOnControlChanged` |
+| `VIDEO_ADDED` | `addVideo` | `stableOnVideoAdded` |
+| `VIDEO_RENAMED` | `renameVideo` | `stableOnVideoRenamed` |
+| `VIDEO_DELETED` | `removeVideo` | `stableOnVideoDeleted` |
+| `VIDEO_LABELS_UPDATED` | `updateVideoLabels` | `stableOnVideoLabelsUpdated` |
+
+纯透传回调、无 Context 操作的 case 不受影响：`SYNC_PROGRESS`、`SYNC_STATE`、`SWITCH_VIDEO`、`TAG_ADDED/DELETED`、`CURSOR_*`、`DRAW_*`、`NOTE_UPDATE`。
+
+---
+
+## 问题二：RoomContext 大而全，所有领域状态集中在一处
+
+当前 `RoomContext` 包含成员管理、控制权、视频列表、播放状态四个领域，更新频率差异大但全部放在同一个 state 对象里，导致任意字段变化都会触发所有消费方重渲染。
+
+### 切片方向（洋葱圈 Provider）
+
+```
+<RoomMetaProvider>       ← roomId / roomName / controlMode（几乎不变）
+  <MemberProvider>       ← members / online status（中频）
+    <VideoListProvider>  ← videos 列表（低频）
+      <PlayerProvider>   ← activeVideoUrl / controllerId（高频）
+        <App />
+      </PlayerProvider>
+    </VideoListProvider>
+  </MemberProvider>
+</RoomMetaProvider>
 ```
 
-**每次写入必须同时更新 state 和 ref，否则 useMemoizedFn 闭包读到的是旧值，引发 bug。**
-这个约束没有语言层面的强制，完全靠人工记忆，每次改动 WS handler 都有漏写风险。
+每层 Provider 只暴露自己领域的数据和操作，WS 消息分发后由各自 Provider 消化，`useRoomWs` 不再直接调用任何 Context 方法（同步解决问题一）。
 
-## 历史已发的 bug
+### 切片抽离顺序
 
-- `handleSwitchVideo` 中 `objectKey === activeObjectKey` 永远不成立（stale closure），导致主控切换视频无反应
-- 控制权转移后，新主控的当前视频未同步到后端，原因是 `activeVideoIdRef` 漏写
+| 顺序 | 切片 | 理由 |
+|---|---|---|
+| 1 | **MemberProvider** | 独立性最强，只有 `MemberList` 消费，影响面最小 |
+| 2 | **VideoListProvider** | `videos` 跨多组件但只读居多，接口清晰 |
+| 3 | **PlayerProvider** | 与 `Lobby` 耦合最深，放最后 |
 
-## 解决方案
+### 前置条件
 
-新建 `src/hooks/useSyncedState.ts`：
+**切片 Context 需配合 Lobby 拆子组件一起做，否则 Lobby 本身订阅多个 Context 收益有限。**
+建议先拆 `Lobby/index.tsx`（当前 842 行），再做 Context 切片，收益更直接。
 
-```typescript
-import { useState, useRef, useCallback } from 'react';
+### 风险评估
 
-/**
- * 将 state 和 ref 的同步写封装为单一入口。
- * 解决 useMemoizedFn 闭包只能读到初始 state 的 stale closure 问题。
- *
- * 返回：[value, ref, setter]
- *   - value：用于 JSX 渲染（响应式）
- *   - ref：用于 useMemoizedFn 闭包内读取（始终最新）
- *   - setter：同时更新 value 和 ref，不可能遗漏
- */
-export function useSyncedState<T>(initial: T) {
-    const [value, setValue] = useState<T>(initial);
-    const ref = useRef<T>(initial);
-    const set = useCallback((next: T) => {
-        ref.current = next;
-        setValue(next);
-    }, []);
-    return [value, ref, set] as const;
-}
-```
-
-## 改动范围
-
-### 1. 新建 `src/hooks/useSyncedState.ts`
-
-### 2. 修改 `src/pages/Lobby/index.tsx`
-
-替换三组双写为：
-
-```typescript
-const [activeObjectKey, activeObjectKeyRef, setActiveObjectKey] = useSyncedState<string | null>(null);
-const [activeVideoId, activeVideoIdRef, setActiveVideoId] = useSyncedState('');
-const [followMode, followModeRef, setFollowMode] = useSyncedState(true);
-```
-
-删除所有 `xxxRef.current = ...` 的手动同步行（这些调用变成多余的，全部可以删除），
-只保留单一的 `setXxx(value)` 调用即可。
-
-**需要删除的手动 ref 写入（共约 15 处）：**
-
-- `activeObjectKeyRef.current = objectKey` → 删除，改为只调 `setActiveObjectKey(objectKey)`
-- `activeObjectKeyRef.current = activeObjectKey` → 删除
-- `activeObjectKeyRef.current = null` → 删除
-- `activeVideoIdRef.current = matched.id` → 删除（所有 4 处）
-- `activeVideoIdRef.current = videoId` → 删除（所有 2 处）
-- `activeVideoIdRef.current = ''` → 删除
-- `followModeRef.current = next` → 删除（handleFollowModeToggle 内）
-- `followModeRef.current = false` → 删除（handleControlChanged 内两处）
-- `followModeRef.current = true` → 删除（handleRoomState forceSynced 处）
-
-## 注意事项
-
-- `useSyncedState` 的 setter 内部调用 `setValue` 和同步写 `ref.current`，和之前手动双写语义完全一致
-- `followMode` 的 `handleFollowModeToggle` 里用了 `setFollowMode((prev) => ...)` 函数式更新，改造时需改为先算出 `next` 再调 `set(next)`（`useSyncedState` 的 setter 不接受函数，只接受值）
+低。每个切片独立可验证，不影响其他切片。
+顺带可修复现有 `setControllerId` 在 `roomState=null` 时静默丢弃的边界问题（各 Provider 独立管理自身状态，不依赖统一 `roomState` 是否初始化）。

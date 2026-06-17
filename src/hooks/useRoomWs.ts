@@ -30,8 +30,8 @@ interface UseRoomWsOptions {
   roomId: string;
   /** accessToken，通过 WS 连接参数传给后端鉴权 */
   token: string;
-  /** 收到 ROOM_STATE 时通知调用方初始化播放状态，附带 tags、videoUrl、activeObjectKey、strokes、noteContent 和 forceSynced */
-  onRoomState?: (isPlaying: boolean, currentTime: number, tags?: Tag[], videoUrl?: string | null, activeObjectKey?: string | null, strokes?: RoomStateData['strokes'], noteContent?: string, forceSynced?: boolean) => void;
+  /** 收到 ROOM_STATE 时通知调用方，直接透传完整 data 对象，由调用方按需解构 */
+  onRoomState?: (data: RoomStateData) => void;
   /** 收到 SYNC_PROGRESS 时通知播放器同步（防回环由调用方负责） */
   onSyncProgress?: (currentTime: number) => void;
   /** 收到 SYNC_STATE 时通知播放器同步，seq 由后端分配，用于非主控过期判断 */
@@ -184,7 +184,7 @@ export function useRoomWs({
               setActiveVideoUrl(d.videoUrl);
             }
             console.log('[WS] ROOM_STATE received', { isPlaying: d.isPlaying, currentTime: d.currentTime, videoUrl: d.videoUrl });
-            stableOnRoomState(d.isPlaying ?? false, d.currentTime ?? 0, d.tags, d.videoUrl, d.activeObjectKey, d.strokes, d.noteContent, d.forceSynced);
+            stableOnRoomState(d);
           }
           break;
         }

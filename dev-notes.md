@@ -1342,6 +1342,57 @@ const handleControlChanged = useMemoizedFn((newControllerId: string) => {
 
 ---
 
+### 上传头像后界面头像不更新（CDN 缓存 + objectKey 固定）
+
+**现象：** 用户上传头像后，页面头像无变化；接口 `POST /api/auth/avatar` 返回 200 且 `avatarUrl` 有值，但与上次完全相同。
+
+**根因（两个叠加）：**
+
+1. **objectKey 固定**：后端生成路径为 `avatar/{userId}.jpg`，同一用户反复上传永远是同一 URL。CDN 以 URL 为 key 命中旧缓存，即使 COS 上的文件已替换，前端拿到的 URL 也完全没变。
+2. **缺乏用户级目录隔离**：所有用户头像平铺在 `avatar/` 下，无法按用户维度列举或管理历史版本。
+
+**解决：** 后端 objectKey 改为 `avatar/{userId}/{userId}-{ts}.jpg`（`ts = Date.now()`）：
+- 时间戳后缀保证每次上传 URL 唯一，CDN 必然回源，彻底绕过缓存
+- 用户子目录实现文件级隔离，方便未来按用户维度管理
+- 旧文件不主动删除（头像文件极小，存储成本忽略不计）
+
+**通用规则：** 凡是后端返回的"可更新静态资源 URL"（头像、封面图、二维码等），objectKey 都不能固定为用户维度的唯一路径。只要路径不变，CDN 就会永久命中旧缓存，无论文件内容是否已替换。解法统一：在文件名中加入时间戳或内容 hash。
+
+---
+
+### `useMemoizedFn` 闭包读到旧 state（stale closure）
+
+**现象：** `useMemoizedFn` 包裹的函数内读取 React state，值永远是初始值（如 `activeObjectKey` 始终为 `null`），导致条件判断永远不成立。历史实际 bug：`handleSwitchVideo` 中 `objectKey === activeObjectKey` 永远 false，主控切换视频无反应；`handleControlChanged` 里 `activeVideoIdRef` 漏写，控制权转移后新主控同步视频失败。
+
+**根因：** `useMemoizedFn` 的核心特性是返回引用稳定的函数，函数引用不随渲染更新。代价是内部闭包只在初始化时捕获一次外部变量，后续 state 更新触发重渲染时函数不重建，闭包里的 state 值永远是旧的。
+
+**解决：** 凡是需要在 `useMemoizedFn` 闭包里读取最新值、同时又需要驱动渲染的状态，必须同时维护 state（服务渲染）和 ref（服务闭包命令式读取）：
+- **state**：驱动 JSX 重渲染，通过 `useState` 管理
+- **ref**：在 `useMemoizedFn` 闭包内命令式读取，`ref.current` 每次读取都是当时最新值，不受闭包捕获时机影响
+
+原始写法需要在每次写入时手动同步双写（`setXxx(val)` + `xxxRef.current = val`），漏写即产生 bug。封装 `useSyncedState` hook 将两者合并为单一 setter：
+
+```ts
+// src/hooks/useSyncedState.ts
+export function useSyncedState<T>(initial: T) {
+    const [value, setValue] = useState<T>(initial);
+    const ref = useRef<T>(initial);
+    const set = useCallback((next: T) => {
+        ref.current = next;
+        setValue(next);
+    }, []);
+    return [value, ref, set] as const;
+    // 用法：const [activeObjectKey, activeObjectKeyRef, setActiveObjectKey] = useSyncedState<string | null>(null);
+    //   value  → JSX 渲染（响应式）
+    //   ref    → useMemoizedFn 闭包内读取（始终最新）
+    //   setter → 同时更新两者，不可能遗漏
+}
+```
+
+**注意：** `useSyncedState` 的 setter 只接受值，不接受函数式更新 `(prev) => next`。若原逻辑用了函数式更新，改为从 `ref.current` 读当前值再计算：`const next = !xxxRef.current; setXxx(next)`。
+
+---
+
 ## 待了解
 
 - **WebSocket 心跳 + 随机抖动指数退避重连**

@@ -5,8 +5,9 @@ import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
+import { useSyncedState } from '@/hooks/useSyncedState';
 import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi, updateVideoLabelsApi } from '@/api/room';
-import type { Tag, CursorMoveDownData, DrawStrokeData } from '@/types/room';
+import type { Tag, CursorMoveDownData, DrawStrokeData, RoomStateData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
 import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
@@ -49,9 +50,7 @@ export default function RoomPage() {
      * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
      * 用于 VideoList 高亮当前播放项，以及切换视频时发送 SWITCH_VIDEO WS 消息
      */
-    const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
-    /** 始终保持最新的 activeObjectKey，供 useMemoizedFn 闭包内读取（避免 stale closure） */
-    const activeObjectKeyRef = useRef<string | null>(null);
+    const [activeObjectKey, activeObjectKeyRef, setActiveObjectKey] = useSyncedState<string | null>(null);
 
     /**
      * 暂存 ROOM_STATE 下发的播放初始化参数。
@@ -82,9 +81,7 @@ export default function RoomPage() {
      *   - 空字符串 → 初始状态，ROOM_STATE 下发时会通过 handleRoomState 初始化
      *   - 非空 → 已由本地点击或远端广播设置
      */
-    const [activeVideoId, setActiveVideoId] = useState<string>('');
-    /** 始终保持最新的 activeVideoId，供 useMemoizedFn 闭包内读取（避免 stale closure） */
-    const activeVideoIdRef = useRef<string>('');
+    const [activeVideoId, activeVideoIdRef, setActiveVideoId] = useSyncedState<string>('');
 
     /**
      * 最近一次收到 VIDEO_ADDED 的文件名。
@@ -189,7 +186,6 @@ export default function RoomPage() {
                 pendingActiveObjectKeyRef.current = null;
                 const matched = videos.find((v) => v.objectKey === pendingKey);
                 if (matched) {
-                    activeVideoIdRef.current = matched.id;
                     setActiveVideoId(matched.id);
                     fetchTags(matched.id);
                 }
@@ -211,24 +207,19 @@ export default function RoomPage() {
      *   true（默认）：响应 SYNC_STATE / SYNC_PROGRESS / SWITCH_VIDEO
      *   false：自由查看模式，静默忽略上述消息
      */
-    const [followMode, setFollowMode] = useState(true);
-    /** 始终保持最新的 followMode，供 useMemoizedFn 闭包内读取（避免 stale closure） */
-    const followModeRef = useRef(true);
+    const [followMode, followModeRef, setFollowMode] = useSyncedState(true);
     /**
      * 非主控切换跟随开关：
      *   false → true：发送 FORCE_SYNC，单播回当前完整状态，立即对齐
      *   true → false：仅更新本地开关，进入自由模式
      */
     const handleFollowModeToggle = useMemoizedFn(() => {
-        setFollowMode((prev) => {
-            const next = !prev;
-            followModeRef.current = next;
-            if (next) {
-                // 开启跟随：发送 FORCE_SYNC 让后端单播回当前状态
-                sendMessageRef.current?.('FORCE_SYNC', {});
-            }
-            return next;
-        });
+        const next = !followModeRef.current;
+        setFollowMode(next);
+        if (next) {
+            // 开启跟随：发送 FORCE_SYNC 让后端单播回当前状态
+            sendMessageRef.current?.('FORCE_SYNC', {});
+        }
     });
     /** 主控一键拉回：发送 FORCE_SYNC，后端广播完整状态给所有非主控 */
     const handleForceSync = useMemoizedFn(() => {
@@ -257,7 +248,6 @@ export default function RoomPage() {
         } else {
             // 自己从主控变为非主控：重置为自由模式，由用户自行决定是否开启跟随。
             // 即使之前不是主控，决置为 false 也没有副作用（followMode 对主控无意义）。
-            followModeRef.current = false;
             setFollowMode(false);
         }
     });
@@ -268,30 +258,21 @@ export default function RoomPage() {
      *   - 服务端已在 ROOM_STATE 里附带 tags → 直接 setTags，无需 HTTP 拉取
      *   - 服务端未附带（旧数据兜底）→ 不拉取，等用户切换视频时再拉
      */
-    const handleRoomState = useMemoizedFn((
-        isPlaying: boolean,
-        currentTime: number,
-        roomTags?: Tag[],
-        _videoUrl?: string | null,
-        activeObjectKey?: string | null,
-        strokes?: Array<{ color: string; points: Array<{ x: number; y: number }> }>,
-        noteContentFromRoom?: string,
-        forceSynced?: boolean,
-    ) => {
+    const handleRoomState = useMemoizedFn((d: RoomStateData) => {
+        const { isPlaying, currentTime, tags, activeObjectKey, strokes, noteContent, forceSynced } = d;
+
         if (videoRef.current) {
-            videoRef.current.initPlayback(isPlaying, currentTime);
+            videoRef.current.initPlayback(isPlaying ?? false, currentTime ?? 0);
         } else {
-            pendingInitRef.current = { isPlaying, currentTime };
+            pendingInitRef.current = { isPlaying: isPlaying ?? false, currentTime: currentTime ?? 0 };
         }
         // 用 activeObjectKey（稳定标识）匹配视频列表，找到 videoId 后拉取 tags。
         // 不用 videoUrl 匹配：videos 列表里的 videoUrl 均为 null（播放时按需签名），永远匹配不到。
         // 后端 ROOM_STATE 的 tags 字段始终为空数组，tags 由 fetchTags 按需拉取。
         if (activeObjectKey) {
-            activeObjectKeyRef.current = activeObjectKey;
             setActiveObjectKey(activeObjectKey);
             const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
             if (matched) {
-                activeVideoIdRef.current = matched.id;
                 setActiveVideoId(matched.id);
                 fetchTags(matched.id);
             } else {
@@ -300,27 +281,26 @@ export default function RoomPage() {
                 pendingActiveObjectKeyRef.current = activeObjectKey;
             }
         }
-        if (roomTags?.length) {
-            setTags(roomTags);
+        if (tags?.length) {
+            setTags(tags);
         }
-    // 恢复历史笔迹：如果 PainterLayer 已挂载则直接应用，否则暂存到 ref 等待挂载
-    if (strokes?.length) {
-      if (painterRef.current) {
-        painterRef.current.clearStrokes();
-        strokes.forEach((s) => painterRef.current?.addStroke(s));
-      } else {
-        pendingStrokesRef.current = strokes;
-      }
-    }
-    // 初始化共享笔记
-    if (noteContentFromRoom !== undefined) {
-      setNoteContent(noteContentFromRoom);
-    }
-    // 主控一键拉回触发的强制同步：重置 followMode 开关为 true
-    if (forceSynced) {
-      followModeRef.current = true;
-      setFollowMode(true);
-    }
+        // 恢复历史笔迹：如果 PainterLayer 已挂载则直接应用，否则暂存到 ref 等待挂载
+        if (strokes?.length) {
+            if (painterRef.current) {
+                painterRef.current.clearStrokes();
+                strokes.forEach((s: { color: string; points: Array<{ x: number; y: number }> }) => painterRef.current?.addStroke(s));
+            } else {
+                pendingStrokesRef.current = strokes;
+            }
+        }
+        // 初始化共享笔记
+        if (noteContent !== undefined) {
+            setNoteContent(noteContent);
+        }
+        // 主控一键拉回触发的强制同步：重置 followMode 开关为 true
+        if (forceSynced) {
+            setFollowMode(true);
+        }
     });
 
     /**
@@ -396,19 +376,16 @@ export default function RoomPage() {
         if (!followModeRef.current) return;
         // 场景 2：非主控跟随模式，完整同步
         setActiveVideoUrl(videoUrl);
-        activeObjectKeyRef.current = objectKey;
         setActiveObjectKey(objectKey);
         setTags([]);
         setDuration(0);
         if (videoId) {
-            activeVideoIdRef.current = videoId;
             setActiveVideoId(videoId);
             fetchTags(videoId);
         } else {
             // 兜底：后端未下发 videoId 时，从视频列表里用 objectKey 查找
             const matched = videosRef.current.find((v) => v.objectKey === objectKey);
             if (matched) {
-                activeVideoIdRef.current = matched.id;
                 setActiveVideoId(matched.id);
                 fetchTags(matched.id);
             }
@@ -590,8 +567,6 @@ export default function RoomPage() {
 onVideoDeleted: (deletedVideoId) => {
     // 删除的是当前激活视频：重置播放器和相关状态
     if (deletedVideoId === activeVideoId) {
-        activeObjectKeyRef.current = null;
-        activeVideoIdRef.current = '';
         setActiveObjectKey(null);
         setActiveVideoId('');
         setTags([]);
@@ -660,8 +635,6 @@ onVideoDeleted: (deletedVideoId) => {
     });
 
     const handlePlayVideo = useMemoizedFn((objectKey: string, videoId: string) => {
-        activeObjectKeyRef.current = objectKey;
-        activeVideoIdRef.current = videoId;
         setActiveObjectKey(objectKey);
         setActiveVideoId(videoId);
         setTags([]);
