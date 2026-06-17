@@ -830,6 +830,7 @@ onVideoDeleted: (deletedVideoId) => {
                         roomName={roomState.roomName}
                         members={roomState.members}
                         controllerId={roomState.controllerId}
+                        currentUserId={userInfo?.userId ?? ''}
                         isAdmin={isAdmin}
                         onTransferControl={(targetUserId) => {
                             sendMessage('TRANSFER_CONTROL', { targetUserId });

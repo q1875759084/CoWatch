@@ -161,6 +161,8 @@ interface ControlPanelProps {
   roomName: string;
   members: Member[];
   controllerId: string | null;
+  /** 当前登录用户 ID，用于成员列表置顶自己 */
+  currentUserId: string;
   isAdmin: boolean;
   onTransferControl: (targetUserId: string) => void;
   /** 是否为主控（区分显示一键拉回 or 跟随开关） */
@@ -180,6 +182,7 @@ export default function ControlPanel({
   roomName,
   members,
   controllerId,
+  currentUserId,
   isAdmin,
   onTransferControl,
   isController,
@@ -278,6 +281,7 @@ export default function ControlPanel({
         <MemberList
           members={members}
           controllerId={controllerId}
+          currentUserId={currentUserId}
           isAdmin={isAdmin || isController}
           onSelectController={onTransferControl}
         />

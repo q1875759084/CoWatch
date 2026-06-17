@@ -5,6 +5,8 @@ import styles from './index.module.scss';
 interface MemberListProps {
   members: Member[];
   controllerId?: string | null;
+  /** 当前登录用户 ID，用于将自己置顶 */
+  currentUserId?: string;
   /** 管理员可点击指定控制者 */
   onSelectController?: (userId: string) => void;
   isAdmin?: boolean;
@@ -13,13 +15,20 @@ interface MemberListProps {
 export default function MemberList({
   members,
   controllerId,
+  currentUserId,
   onSelectController,
   isAdmin,
 }: MemberListProps) {
-  // 在线成员排前，离线排后；同状态内保持原有顺序（稳定排序）
+  // 自己排第一，在线其他人次之，离线排最后；同层内保持原有顺序（稳定排序）
   const sortedMembers = useMemo(
-    () => [...members].sort((a, b) => Number(b.isOnline) - Number(a.isOnline)),
-    [members],
+    () =>
+      [...members].sort((a, b) => {
+        const aIsSelf = a.userId === currentUserId ? 1 : 0;
+        const bIsSelf = b.userId === currentUserId ? 1 : 0;
+        if (aIsSelf !== bIsSelf) return bIsSelf - aIsSelf;
+        return Number(b.isOnline) - Number(a.isOnline);
+      }),
+    [members, currentUserId],
   );
 
   return (

@@ -765,6 +765,27 @@ ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
 
 ---
 
+### 主控权限体系重构（自动分配 + 扩展转让权 + 离线兜底）
+
+**背景：** 原设计存在三个问题：
+1. 管理员不在线时，房间从一开始就无人可成为主控（所有人均无法使用任何功能）
+2. 只有管理员能转让主控，管理员中途离开后主控无法更换
+3. 主控离线后如果管理员也不在线，房间陷入无人控制状态
+
+**结论：** 三条规则彻底解决上述问题：
+1. **第一人自动成主控**：`ws.on('message')` 中 `addClient` 之后检测 `getOnlineUserIds(roomId).size === 1`，成立则调用 `setControllerId` 并广播 `CONTROL_CHANGED`
+2. **主控和管理员均可转让**：`TRANSFER_CONTROL` 鉴权由 `member.is_admin !== 1` 扩展为 `!canControl(userId, room) && member.is_admin !== 1`（`canControl` 为主控判断函数）
+3. **离线时优先级转让**：`ws.on('close')` 主控离线处理按顺序取：在线管理员 → `remainingClients` 第一个在线成员 → null（仅房间已清空时）
+
+**实现位置：**
+- 后端：`CoWatch-backend/src/ws/wsServer.ts`（自动分配、鉴权扩展、离线兜底）
+- 前端：`src/components/MemberList/index.tsx`（`canClick = (isAdmin || isController) && !isController`）
+- 前端：`src/pages/Lobby/ControlPanel.tsx`（`isAdmin` prop 传入改为 `isAdmin || isController`）
+
+**为什么不用"第一个注册用户成为管理员"方案：** 管理员是数据库级别的角色（`is_admin = 1`），与房间在线状态无关；主控是运行时的房间控制权，两者职责不同，不应合并。
+
+---
+
 ## 踩坑记录
 
 ### 宿主机 nginx 默认 1MB 限制导致大文件上传 413
@@ -1219,11 +1240,42 @@ hls.loadSource(`/api/rooms/${roomId}/video/${videoId}/playlist.m3u8`);
 
 ```tsx
 // VideoPlayer.tsx
-// cursorLocked：鼠标共享开启且非主控时为 true
-style={{ pointerEvents: (disabled || cursorLocked) ? 'none' : 'auto' }}
+style={{ pointerEvents: disabled ? 'none' : 'auto' }}
 ```
 
-**注意：** 主控不能设 `cursorLocked=true`，否则无法操作播放/进度条。条件为 `cursorEnabled && !isController`。
+**`disabled` 的判断逻辑（`Lobby/index.tsx` 传入）：**
+```ts
+const videoDisabled =
+  (!isController && !freeMode) ||   // 跟随模式 + 非主控 → 不可操作
+  (isController && drawingMode);    // 主控绘制模式 → 防止绘制点击触发播放/暂停
+```
+
+**注意：** `cursorEnabled`（鼠标共享）与 `disabled`（视频操作权限）职责分离——鼠标共享只发送 WS 位置/样式，不影响视频控件的可操作性。自由模式（`freeMode=true`）下鼠标功能区全部禁用，`disabled` 始终为 false（用户可自由操作视频）。
+
+---
+
+### 鼠标共享与视频可操作性职责混淆（`cursorLocked` 反模式）
+
+**现象：** 非主控用户在自由模式下开启"鼠标共享"后，无法拖动进度条或点击播放/暂停；但自由模式的语义是"用户可自由操作视频"，两者相互矛盾。
+
+**根因：** `cursorEnabled`（是否开启鼠标共享）被错误地与"是否能操作视频"绑定：`cursorLocked = cursorEnabled && !isController`，导致非主控一旦开启鼠标共享，视频控件就被 `pointer-events: none` 封锁。实际上鼠标共享只应管"发送 WS 位置 + 隐藏原生光标"，与视频交互权限无关。
+
+**解决：** 移除 `cursorLocked` prop，将 `disabled` 判断统一收口到父组件，只依赖两个正交条件：
+
+```ts
+// Lobby/index.tsx
+const videoDisabled =
+  (!isController && !freeMode) ||   // 跟随模式 + 非主控 → 不可操作
+  (isController && drawingMode);    // 主控绘制模式 → 防止绘制点击触发播放/暂停
+```
+
+**职责边界总结：**
+| 状态 | 含义 | 影响 |
+|------|------|------|
+| `cursorEnabled` | 是否开启鼠标共享 | 只影响：① 隐藏原生光标；② 发送 WS 鼠标位置 |
+| `drawingMode` | 是否开启绘制模式 | 影响绘制 Canvas 交互；主控时额外置 `disabled=true` 防意外点击 |
+| `freeMode` | 是否切换至自由模式 | 鼠标功能区全部 disabled（不可开鼠标共享/画笔）；视频操作不受限 |
+| `disabled` | 视频控件是否禁用 | 只由上方逻辑决定，与 `cursorEnabled` 完全解耦 |
 
 ---
 
