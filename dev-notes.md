@@ -1460,6 +1460,82 @@ export function useSyncedState<T>(initial: T) {
 
 ---
 
+### daibao-dashboard 多段端口与跨 Compose 网格设计
+
+**背景：** daibao-dashboard（大盘网）需要访问运行在不同 Docker Compose 网格中的 cowatch-backend 和 monitor-backend，同时要保证 backend 端口不暴露到公网。
+
+**端口段约定（用分段避免冲突，便于扩展）：**
+
+| 段 | 用途 |
+|----|------|
+| `3070~3079` | CoWatch 前端对外入口（3070 生产，3071 测试） |
+| `3100~3109` | monitor-backend（3100 生产，3101 测试） |
+| `6000~6009` | daibao-dashboard 对外入口（6000 生产，6001 测试） |
+| `8000~8009` | 仅本机可达的 backend 内部通道（8000 cowatch 生产，8001 测试） |
+| 容器内统一 | `3002`（Node.js）/ `80`（Nginx） |
+
+**`127.0.0.1:PORT` vs `0.0.0.0:PORT` 的安全语义：**
+
+```yaml
+# ✅ 仅本机可达，不对公网开放
+- "127.0.0.1:8000:3002"
+
+# ❌ 等价于 0.0.0.0:8000，公网可直连后端，绕过所有 Nginx 防护
+- "8000:3002"
+```
+
+cowatch-backend 的 8000/8001 端口用 `127.0.0.1` 绑定，安全组不需要额外开规则；daibao-dashboard 自身的 6000/6001 用 `0.0.0.0` 绑定，供内网/VPN 访问。
+
+**跨 Compose 网格：`host-gateway` 机制：**
+
+daibao 与 cowatch 是独立 Compose 网格，不共享内部 DNS，容器间无法通过服务名互访。通过 `extra_hosts: host-gateway:host-gateway` 将宿主机 IP 注入容器 `/etc/hosts`，容器内 Nginx 用 `http://host-gateway:8000` 穿透 Compose 边界访问 cowatch-backend。
+
+**两段 Nginx 的职责：**
+
+```
+宿主机 Nginx → SSL 终止 + 子域名分发（daibao 不绑域名，此层直接跳过）
+容器内 Nginx → 静态资源服务 + /api/* 代理到 cowatch-backend + /monitor-api/* 代理到 monitor-backend
+```
+
+**后端 URL 注入方式（envsubst）：** `nginx.conf` 用 `${COWATCH_BACKEND_URL}` 占位，镜像启动时 `envsubst` 将 Docker Compose `environment` 变量替换为实际 URL，无需重新构建镜像即可切换生产/测试指向。
+
+**当前耦合的临时性：** daibao 借用 cowatch 的 8000 端口是因为 SQLite 进程绑定导致无法独立 admin-backend。未来第二个子产品上线时，改为独立 admin-backend 聚合层，daibao 只需修改 `COWATCH_BACKEND_URL` 环境变量，nginx.conf 和对外端口（6000/6001）不变。
+
+---
+
+### `useRequest` + 不稳定 deps 导致 Monitor 页面无限请求风暴
+
+**现象：** 切换到 Monitor 页面后，接口在本地无 `monitor-backend` 时进入无限循环——请求失败 → 触发重试 → deps 变化 → 再次发起请求，Network 面板持续刷新，无法自然停止。
+
+**根因（三个叠加）：**
+
+1. **`useDateRange` 返回值不稳定：** `startTime` / `endTime` 在每次渲染时通过 `dayjs().subtract(...)` 重新生成，对象引用每次都是新的。`useRequest` 的 `refreshDeps` 检测引用相等，引用变化 → 触发重新请求 → 组件渲染 → 又生成新引用 → 死循环。
+
+2. **`useRequest` 默认开启重试：** ahooks `useRequest` 默认 `retryCount: 3`，请求失败后自动重试 3 次，叠加上面的循环效果放大了请求数量。
+
+3. **超时过长（30s）：** 每次请求失败要等 30 秒才进入重试，循环可以持续很长时间。
+
+**解决（三处同步修复）：**
+
+```ts
+// 1. useDateRange.ts：用 useMemo 稳定引用
+const startTime = useMemo(() => dayjs().subtract(days - 1, 'day').startOf('day').valueOf(), [days]);
+const endTime   = useMemo(() => dayjs().endOf('day').valueOf(), [days]);
+
+// 2. monitorRequest 超时从 30s 降到 8s，更快暴露不可达问题
+timeout: 8000,
+
+// 3. Monitor 页面 useRequest 调用，显式禁止重试
+useRequest(fetchPerfStats, {
+  refreshDeps: [startTime, endTime],
+  retryCount: 0,   // ← 明确禁用，防止不可达时的雪崩重试
+});
+```
+
+**通用规则：** 凡是作为 `useRequest` refreshDeps 的时间范围值，必须用 `useMemo`（或 `useRef`）保证引用稳定，否则任何触发渲染的操作都会导致无意义的重新请求。
+
+---
+
 ## 待了解
 
 - **WebSocket 心跳 + 随机抖动指数退避重连**
