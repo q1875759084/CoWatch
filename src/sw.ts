@@ -61,6 +61,8 @@ function stripSignature(url: string): string {
   const u = new URL(url);
   // CDN TypeA 鉴权参数
   u.searchParams.delete('sign');
+  // 流量归因参数（不参与验签，但需从 cache key 中剥离，否则同一片段因 uid 不同产生多条缓存）
+  u.searchParams.delete('uid');
   // COS SDK 签名参数（本地模式）
   [
     'q-sign-algorithm',
@@ -75,22 +77,18 @@ function stripSignature(url: string): string {
 }
 
 /**
- * 从 CDN TypeA 签名参数中提取 uid 字段（即生成签名时写入的 userId）。
+ * 从 URL 的 uid query 参数中读取 userId（后端生成 m3u8 时附加，不参与 CDN 签名）。
  *
- * TypeA sign 格式：{timestamp}-{rand}-{uid}-{md5hash}
- * 取第三段（index=2）即为 userId。
- * 若解析失败（本地模式无此签名），返回 'anonymous'。
+ * 设计说明：
+ *   CDN TypeA sign 的 uid 字段固定为 '0'，不承担业务语义。
+ *   userId 作为独立的 &uid={userId} 参数附加在 URL 上，CDN 透传不干扰验签。
+ *   SW 直接读取，逻辑清晰，无需任何字符串解析。
+ *
+ * 若参数不存在（本地模式）返回 'anonymous'。
  */
-function extractUserIdFromSign(url: string): string {
+function extractUserId(url: string): string {
   try {
-    const sign = new URL(url).searchParams.get('sign');
-    if (!sign) return 'anonymous';
-    const parts = sign.split('-');
-    // 格式：timestamp(0) - rand(1) - uid(2) - md5hash(3)
-    // rand 为 8 位，uid 可能含任意字符，md5hash 为 32 位
-    // 但 uid 本身不含 '-'，所以可以直接按顺序取
-    const uid = parts[2] ?? 'anonymous';
-    return uid || 'anonymous';
+    return new URL(url).searchParams.get('uid') ?? 'anonymous';
   } catch {
     return 'anonymous';
   }
@@ -120,22 +118,64 @@ function parseSegmentMeta(url: string): {
   }
 }
 
+// ─── 批量上报队列 ─────────────────────────────────────────────────────────────
+
+interface SegmentViewItem {
+  roomId: string;
+  videoId: string;
+  segmentName: string;
+  userId: string;
+  bytes: number;
+}
+
 /**
- * 异步上报一次 HLS 片段的真实 CDN 下载（缓存未命中触发）。
- * fire-and-forget，不 await，不影响播放主流程。
+ * 待上报队列，满 10 条或超过 3 秒自动 flush。
+ *
+ * 为什么批量上报：
+ *   HLS 首次播放 / seek 时会短时间内连续触发多个片段请求，
+ *   批量合并为单次 POST，减少 SQLite 事务数（写锁竞争），
+ *   对播放体验零影响（fire-and-forget）。
+ */
+const reportQueue: SegmentViewItem[] = [];
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+const QUEUE_MAX = 10;    // 满 10 条立即 flush
+const FLUSH_DELAY = 3000; // 最长等待 3 秒
+
+function flushReportQueue(): void {
+  if (flushTimer !== null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (reportQueue.length === 0) return;
+
+  const items = reportQueue.splice(0, reportQueue.length);
+  fetch(REPORT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  }).catch(() => {
+    // 上报失败静默忽略，不影响播放体验
+  });
+}
+
+/**
+ * 将一条片段下载记录入队，达到阈值或超时后批量上报。
  */
 function reportSegmentView(
   meta: { roomId: string; videoId: string; segmentName: string },
   userId: string,
   bytes: number,
 ): void {
-  fetch(REPORT_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...meta, userId, bytes }),
-  }).catch(() => {
-    // 上报失败静默忽略，不影响播放体验
-  });
+  reportQueue.push({ ...meta, userId, bytes });
+
+  if (reportQueue.length >= QUEUE_MAX) {
+    // 队列已满，立即 flush
+    flushReportQueue();
+  } else if (flushTimer === null) {
+    // 启动定时器，最多等待 FLUSH_DELAY 后 flush
+    flushTimer = setTimeout(flushReportQueue, FLUSH_DELAY);
+  }
 }
 
 // ─── install ─────────────────────────────────────────────────────────────────
@@ -195,8 +235,8 @@ self.addEventListener('fetch', (event) => {
         // 上报真实 CDN 下载记录（fire-and-forget，不影响播放）
         const meta = parseSegmentMeta(event.request.url);
         if (meta) {
-          // userId：从 CDN TypeA sign 参数第三段提取（由后端生成 m3u8 时写入）
-          const userId = extractUserIdFromSign(event.request.url);
+          // userId：从 URL 的 uid 参数读取（由后端生成 m3u8 时附加）
+          const userId = extractUserId(event.request.url);
           // bytes：从 Content-Length 响应头读取（CDN 通常会返回此头）
           const bytes = parseInt(response.headers.get('content-length') ?? '0', 10);
           reportSegmentView(meta, userId, bytes);
