@@ -31,6 +31,14 @@
 const CACHE_NAME = 'cowatch-hls-v1';
 
 /**
+ * 后端上报地址（与主应用同源，SW 无法访问 localStorage，通过此接口写 DB）
+ *
+ * SW 运行在独立线程，拿不到 HttpOnly cookie，
+ * 上报接口特意设计为无鉴权，安全风险在注释中说明。
+ */
+const REPORT_URL = '/api/rooms/segment-view';
+
+/**
  * 判断是否为需要 SW 缓存的 HLS 片段请求。
  *
  * 基于路径特征：
@@ -64,6 +72,70 @@ function stripSignature(url: string): string {
     'q-signature',
   ].forEach((p) => u.searchParams.delete(p));
   return u.toString();
+}
+
+/**
+ * 从 CDN TypeA 签名参数中提取 uid 字段（即生成签名时写入的 userId）。
+ *
+ * TypeA sign 格式：{timestamp}-{rand}-{uid}-{md5hash}
+ * 取第三段（index=2）即为 userId。
+ * 若解析失败（本地模式无此签名），返回 'anonymous'。
+ */
+function extractUserIdFromSign(url: string): string {
+  try {
+    const sign = new URL(url).searchParams.get('sign');
+    if (!sign) return 'anonymous';
+    const parts = sign.split('-');
+    // 格式：timestamp(0) - rand(1) - uid(2) - md5hash(3)
+    // rand 为 8 位，uid 可能含任意字符，md5hash 为 32 位
+    // 但 uid 本身不含 '-'，所以可以直接按顺序取
+    const uid = parts[2] ?? 'anonymous';
+    return uid || 'anonymous';
+  } catch {
+    return 'anonymous';
+  }
+}
+
+/**
+ * 从 HLS 片段 URL 的路径中解析 roomId、videoId、segmentName。
+ *
+ * COS/CDN 路径格式：/cowatch/{roomId}/{videoId}/{segmentName}.ts
+ * 本地路径格式：   /uploads/cowatch/{roomId}/{videoId}/{segmentName}.ts
+ *
+ * 返回 null 表示解析失败（不上报）。
+ */
+function parseSegmentMeta(url: string): {
+  roomId: string;
+  videoId: string;
+  segmentName: string;
+} | null {
+  try {
+    const { pathname } = new URL(url);
+    // 匹配 /cowatch/{roomId}/{videoId}/{segmentName}.ts
+    const match = pathname.match(/\/cowatch\/([^/]+)\/([^/]+)\/([^/]+\.ts)$/);
+    if (!match) return null;
+    return { roomId: match[1], videoId: match[2], segmentName: match[3] };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 异步上报一次 HLS 片段的真实 CDN 下载（缓存未命中触发）。
+ * fire-and-forget，不 await，不影响播放主流程。
+ */
+function reportSegmentView(
+  meta: { roomId: string; videoId: string; segmentName: string },
+  userId: string,
+  bytes: number,
+): void {
+  fetch(REPORT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...meta, userId, bytes }),
+  }).catch(() => {
+    // 上报失败静默忽略，不影响播放体验
+  });
 }
 
 // ─── install ─────────────────────────────────────────────────────────────────
@@ -116,8 +188,19 @@ self.addEventListener('fetch', (event) => {
       const response = await fetch(event.request);
       if (response.ok) {
         // 仅缓存 200 响应（HLS 片段均为完整 200，无需处理 206）
-        await cache.put(cacheKey, response.clone());
+        const cloned = response.clone();
+        await cache.put(cacheKey, cloned);
         console.log('[SW] 已缓存：', cacheKeyUrl);
+
+        // 上报真实 CDN 下载记录（fire-and-forget，不影响播放）
+        const meta = parseSegmentMeta(event.request.url);
+        if (meta) {
+          // userId：从 CDN TypeA sign 参数第三段提取（由后端生成 m3u8 时写入）
+          const userId = extractUserIdFromSign(event.request.url);
+          // bytes：从 Content-Length 响应头读取（CDN 通常会返回此头）
+          const bytes = parseInt(response.headers.get('content-length') ?? '0', 10);
+          reportSegmentView(meta, userId, bytes);
+        }
       }
       return response;
     } catch (err) {
