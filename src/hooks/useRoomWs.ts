@@ -180,11 +180,7 @@ export function useRoomWs({
                 d.members.map((m) => ({ userId: m.userId, isOnline: m.isOnline }))
               );
             }
-            // 初始化视频列表
-            if (d.videos?.length) {
-              d.videos.forEach((v) => addVideo(v));
-            }
-            // 初始化当前激活视频
+            // 初始化当前激活视频播放地址
             if (d.videoUrl) {
               setActiveVideoUrl(d.videoUrl);
             }

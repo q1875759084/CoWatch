@@ -5,7 +5,11 @@ import type { Member, ControlMode, VideoItem } from '@/types/room';
 export interface RoomState {
   roomId: string;
   roomName: string;
-  /** 当前激活（正在播放）的视频 URL，由 SWITCH_VIDEO 更新 */
+  /**
+   * 当前激活（正在播放）的视频 URL。
+   * 完全由 WS 管理（ROOM_STATE / SWITCH_VIDEO），HTTP initRoom 不写这个字段。
+   * 初始值为 null，VideoPlayer 在此有值时才渲染。
+   */
   activeVideoUrl: string | null;
   /** 房间内所有视频列表 */
   videos: VideoItem[];
@@ -14,9 +18,14 @@ export interface RoomState {
   controllerId: string | null;
 }
 
+/**
+ * initRoom 只接收 HTTP 能提供的字段，不含 activeVideoUrl（HTTP 接口不返回播放 URL）。
+ */
+export type InitRoomPayload = Omit<RoomState, 'activeVideoUrl'>;
+
 interface RoomContextValue {
   roomState: RoomState | null;
-  initRoom: (state: RoomState) => void;
+  initRoom: (state: InitRoomPayload) => void;
   setActiveVideoUrl: (url: string) => void;
   addVideo: (video: VideoItem) => void;
   /**
@@ -58,40 +67,59 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
 
   /**
-   * WS ROOM_STATE / setActiveVideoUrl 可能早于 HTTP initRoom 到达。
-   * 此时 roomState 为 null，setState 的 prev 为 null 会直接丢弃数据。
-   * 用 ref 暂存，initRoom 执行时合并进初始 state。
+   * 两个 pending ref，用于 WS 比 HTTP 先到的场景：
+   *
+   * pendingActiveVideoUrlRef：WS setActiveVideoUrl 在 roomState=null 时存入，
+   *   initRoom 执行时读取并写入初始 state。
+   *   注意：initRoom 使用函数式更新，读取 prev（此时可能已由 WS 的 setState 更新过）。
+   *   若 prev.activeVideoUrl 已有值（WS 的 setState 先于 initRoom 的 setState 执行），
+   *   则直接使用 prev 的值；否则使用 pendingUrl。
+   *
+   * pendingOnlineStatusRef：WS syncMembersOnlineStatus 在 roomState=null 时存入，
+   *   initRoom 执行时合并到成员列表。
    */
   const pendingActiveVideoUrlRef = useRef<string | null>(null);
-  /**
-   * WS ROOM_STATE 比 HTTP 先到时，暂存在线状态列表（{ userId, isOnline }[]）。
-   * initRoom 执行后合并到成员列表里的 isOnline 字段。
-   */
   const pendingOnlineStatusRef = useRef<Pick<Member, 'userId' | 'isOnline'>[] | null>(null);
 
-  const initRoom = useMemoizedFn((state: RoomState) => {
+  /**
+   * initRoom：仅由 HTTP 初始化调用，只写 HTTP 能提供的字段。
+   * activeVideoUrl 取值优先级：
+   *   1. prev.activeVideoUrl（WS 的函数式更新已执行时）
+   *   2. pendingActiveVideoUrlRef（WS 存入 pending 但其 setState 还未执行时）
+   *   3. null（房间当前没有激活视频）
+   * 这样无论 HTTP 和 WS 哪个先到，activeVideoUrl 都不会被覆盖为 undefined。
+   */
+  const initRoom = useMemoizedFn((payload: InitRoomPayload) => {
     const pendingUrl = pendingActiveVideoUrlRef.current;
     const pendingOnlineStatus = pendingOnlineStatusRef.current;
     pendingActiveVideoUrlRef.current = null;
     pendingOnlineStatusRef.current = null;
-    // 合并在线状态：HTTP 成员列表 + WS 带来的 isOnline
+
     const members = pendingOnlineStatus
-      ? state.members.map((m) => {
+      ? payload.members.map((m) => {
           const matched = pendingOnlineStatus.find((s) => s.userId === m.userId);
           return matched ? { ...m, isOnline: matched.isOnline } : m;
         })
-      : state.members;
-    setRoomState({
-      ...state,
+      : payload.members;
+
+    setRoomState((prev) => ({
+      // activeVideoUrl 优先保留 WS 已设置的值（prev?.activeVideoUrl），
+      // 其次用 pendingUrl，最后 fallback null。
+      // 绝不用 payload 里的值（HTTP 接口不返回播放 URL，永远是 undefined）。
+      activeVideoUrl: prev?.activeVideoUrl ?? pendingUrl ?? null,
+      ...payload,
       members,
-      ...(pendingUrl ? { activeVideoUrl: pendingUrl } : {}),
-    });
+    }));
   });
 
+  /**
+   * setActiveVideoUrl：完全由 WS 调用（ROOM_STATE / SWITCH_VIDEO）。
+   * - roomState 已初始化：直接更新
+   * - roomState 为 null（WS 早于 HTTP）：存入 pending，initRoom 执行时消费
+   */
   const setActiveVideoUrl = useMemoizedFn((url: string) => {
     setRoomState((prev) => {
       if (!prev) {
-        // roomState 尚未初始化（WS 早于 HTTP 到达），暂存等 initRoom 消费
         pendingActiveVideoUrlRef.current = url;
         return prev;
       }
@@ -104,10 +132,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       if (!prev) return prev;
       const idx = prev.videos.findIndex((v) => v.id === video.id);
       if (idx === -1) {
-        // 新视频：追加到列表末尾
         return { ...prev, videos: [...prev.videos, video] };
       }
-      // 已存在：合并更新（ROOM_STATE 下发的含签名 videoUrl，覆盖 HTTP 初始化时的 null）
       const updated = [...prev.videos];
       updated[idx] = { ...updated[idx], ...video };
       return { ...prev, videos: updated };
@@ -117,11 +143,9 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const syncMembersOnlineStatus = useMemoizedFn((onlineList: Pick<Member, 'userId' | 'isOnline'>[]) => {
     setRoomState((prev) => {
       if (!prev) {
-        // WS 早于 HTTP 到达：roomState 尚未初始化，暂存在线状态等 initRoom 消费
         pendingOnlineStatusRef.current = onlineList;
         return prev;
       }
-      // 只更新 isOnline，保留 HTTP 带来的 avatarUrl / nickname 等完整信息
       return {
         ...prev,
         members: prev.members.map((m) => {
@@ -135,8 +159,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const addMember = useMemoizedFn((member: Member) => {
     setRoomState((prev) => {
       if (!prev) return prev;
-      // 已存在则更新 isOnline：HTTP 名单里的成员 isOnline 为 undefined，
-      // MEMBER_JOINED 到达时补上 isOnline: true（成员重新连上 WS）
       if (prev.members.some((m) => m.userId === member.userId)) {
         return {
           ...prev,

@@ -1474,17 +1474,18 @@ export function useSyncedState<T>(initial: T) {
 | `8000~8009` | 仅本机可达的 backend 内部通道（8000 cowatch 生产，8001 测试） |
 | 容器内统一 | `3002`（Node.js）/ `80`（Nginx） |
 
-**`127.0.0.1:PORT` vs `0.0.0.0:PORT` 的安全语义：**
+**`127.0.0.1:PORT` vs `0.0.0.0:PORT` 的安全语义（含踩坑修正）：**
 
 ```yaml
-# ✅ 仅本机可达，不对公网开放
+# ❌ 看似安全，实际上 Docker 容器经 host-gateway 访问时会被拒绝
+# 127.0.0.1 只有宿主机本地进程可达，容器走 172.17.0.1 不经过 loopback
 - "127.0.0.1:8000:3002"
 
-# ❌ 等价于 0.0.0.0:8000，公网可直连后端，绕过所有 Nginx 防护
-- "8000:3002"
+# ✅ 正确做法：绑定 0.0.0.0，安全性靠云服务器安全组不开放该端口来保证
+- "8000:3002"  # 等价于 0.0.0.0:8000:3002
 ```
 
-cowatch-backend 的 8000/8001 端口用 `127.0.0.1` 绑定，安全组不需要额外开规则；daibao-dashboard 自身的 6000/6001 用 `0.0.0.0` 绑定，供内网/VPN 访问。
+cowatch-backend 的 8000/8001 端口用 `0.0.0.0` 绑定（省略 IP 前缀），安全组不开放这两个端口，外网无法直连；daibao-dashboard 自身的 6000/6001 同样 `0.0.0.0` 绑定，供内网/VPN 访问。
 
 **跨 Compose 网格：`host-gateway` 机制：**
 
@@ -1500,6 +1501,18 @@ daibao 与 cowatch 是独立 Compose 网格，不共享内部 DNS，容器间无
 **后端 URL 注入方式（envsubst）：** `nginx.conf` 用 `${COWATCH_BACKEND_URL}` 占位，镜像启动时 `envsubst` 将 Docker Compose `environment` 变量替换为实际 URL，无需重新构建镜像即可切换生产/测试指向。
 
 **当前耦合的临时性：** daibao 借用 cowatch 的 8000 端口是因为 SQLite 进程绑定导致无法独立 admin-backend。未来第二个子产品上线时，改为独立 admin-backend 聚合层，daibao 只需修改 `COWATCH_BACKEND_URL` 环境变量，nginx.conf 和对外端口（6000/6001）不变。
+
+---
+
+### daibao-dashboard 502 — 容器经 host-gateway 无法访问 127.0.0.1 绑定的端口
+
+**现象：** dashboard 部署后登录请求返回 502 Bad Gateway，cowatch-backend 容器正常运行。
+
+**根因：** cowatch-backend 端口绑定为 `127.0.0.1:8001:3002`。`127.0.0.1` 是 loopback 地址，只有宿主机本地进程可达。Docker 容器有独立网络命名空间，经 `host-gateway`（即宿主机 docker0 网桥 IP `172.17.0.1`）访问宿主机时，不经过 loopback 接口，因此被拒绝。
+
+**解决：** 改为 `8001:3002`（绑定 `0.0.0.0`），外网安全性靠云服务器安全组不开放 8000/8001 端口来保证。
+
+**规律：** 凡是需要让 Docker 容器经 `host-gateway` 访问的宿主机端口，绝对不能用 `127.0.0.1` 绑定，必须用 `0.0.0.0`（或省略 IP 前缀）。
 
 ---
 

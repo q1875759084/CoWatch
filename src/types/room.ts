@@ -147,17 +147,16 @@ export interface MemberOfflineData {
 
 export interface RoomStateData {
   videoUrl: string | null;
-  /** 当前激活视频的 objectKey（稳定标识，不含签名），用于匹配视频列表找到 videoId */
+  /** 当前激活视频的 objectKey（稳定标识，不含签名） */
   activeObjectKey: string | null;
+  /** 当前激活视频的数据库 id，后端直接查出下发，前端无需本地匹配 */
+  activeVideoId?: string | null;
   controlMode: ControlMode;
   controllerId: string | null;
-  videos: VideoItem[];
   members?: Member[];
   /** 当前房间播放状态，供新加入成员初始化（后端内存维护） */
   isPlaying?: boolean;
   currentTime?: number;
-  /** 当前激活视频的 tag 列表 */
-  tags?: Tag[];
   /** 当前房间的历史笔迹快照，供新加入成员初始化画布 */
   strokes?: Array<{ color: string; points: DrawStrokePoint[] }>;
   /** 当前房间的共享笔记内容，新成员加入时初始化 */

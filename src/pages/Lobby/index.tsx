@@ -58,16 +58,7 @@ export default function RoomPage() {
      * 用 ref 暂存，在 VideoPlayer 挂载时（callback ref 触发）立即消费。
      */
     const pendingInitRef = useRef<{ isPlaying: boolean; currentTime: number } | null>(null);
-    /**
-     * 暂存 ROOM_STATE 下发的 activeObjectKey。
-     * WS 和 HTTP 是并行路径：若 ROOM_STATE 先到而视频列表未加载，
-     * 此时 videosRef 为空，无法匹配 videoId 拉取 tags。
-     * 在 HTTP 完成、videosRef 有数据后，消费此暂存值补发 fetchTags。
-     */
-    const pendingActiveObjectKeyRef = useRef<string | null>(null);
     const videoRef = useRef<VideoPlayerHandle>(null);
-    /** 始终保持最新的 videos 列表，供 useMemoizedFn 回调内查询 videoId */
-    const videosRef = useRef(roomState?.videos ?? []);
 
     // ── 右侧面板折叠状态 ──────────────────────────────────────────────────────
     const [panelCollapsed, setPanelCollapsed] = useState(false);
@@ -149,8 +140,6 @@ export default function RoomPage() {
         }
     });
 
-    // 每次 roomState.videos 变化时同步 ref，供 useMemoizedFn 回调内读取
-    videosRef.current = roomState?.videos ?? [];
 
     // 初始化房间状态 + 视频列表
     useEffect(() => {
@@ -170,28 +159,15 @@ export default function RoomPage() {
                 createdAt: v.createdAt,
                 labels: v.labels ?? [],
             }));
-            videosRef.current = videos;
             initRoom({
                 roomId: info.roomId,
                 roomName: info.roomName,
-                activeVideoUrl: info.videoUrl,
+                // activeVideoUrl 不由 HTTP 初始化（接口不返回播放 URL），完全由 WS 管理
                 videos,
                 members: info.members,
                 controlMode: info.controlMode,
                 controllerId: info.controllerId,
             });
-            // 消费 WS 比 HTTP 先到时暂存的 activeObjectKey：
-            // ROOM_STATE 到来时视频列表还未就绪，无法匹配 videoId；
-            // 现在 videosRef 已有数据，补发 fetchTags。
-            const pendingKey = pendingActiveObjectKeyRef.current;
-            if (pendingKey) {
-                pendingActiveObjectKeyRef.current = null;
-                const matched = videos.find((v) => v.objectKey === pendingKey);
-                if (matched) {
-                    setActiveVideoId(matched.id);
-                    fetchTags(matched.id);
-                }
-            }
         });
     }, [roomId]);
 
@@ -267,35 +243,23 @@ export default function RoomPage() {
 
     /**
      * 收到 ROOM_STATE：保存播放初始化参数，等 VideoPlayer 就绪后执行。
-     * 同时初始化当前激活视频的 tag 列表：
-     *   - 服务端已在 ROOM_STATE 里附带 tags → 直接 setTags，无需 HTTP 拉取
-     *   - 服务端未附带（旧数据兜底）→ 不拉取，等用户切换视频时再拉
+     * activeVideoId 由后端直接下发，无需前端在本地视频列表中做 objectKey→videoId 匹配。
      */
     const handleRoomState = useMemoizedFn((d: RoomStateData) => {
-        const { isPlaying, currentTime, tags, activeObjectKey, strokes, noteContent, forceSynced } = d;
+        const { isPlaying, currentTime, activeObjectKey, activeVideoId, strokes, noteContent, forceSynced } = d;
 
         if (videoRef.current) {
             videoRef.current.initPlayback(isPlaying ?? false, currentTime ?? 0);
         } else {
             pendingInitRef.current = { isPlaying: isPlaying ?? false, currentTime: currentTime ?? 0 };
         }
-        // 用 activeObjectKey（稳定标识）匹配视频列表，找到 videoId 后拉取 tags。
-        // 不用 videoUrl 匹配：videos 列表里的 videoUrl 均为 null（播放时按需签名），永远匹配不到。
-        // 后端 ROOM_STATE 的 tags 字段始终为空数组，tags 由 fetchTags 按需拉取。
         if (activeObjectKey) {
             setActiveObjectKey(activeObjectKey);
-            const matched = videosRef.current.find((v) => v.objectKey === activeObjectKey);
-            if (matched) {
-                setActiveVideoId(matched.id);
-                fetchTags(matched.id);
-            } else {
-                // 视频列表尚未通过 HTTP 加载（WS 比 HTTP 先到），暂存 objectKey，
-                // 等 HTTP 完成后在 initRoom 流程里消费。
-                pendingActiveObjectKeyRef.current = activeObjectKey;
-            }
         }
-        if (tags?.length) {
-            setTags(tags);
+        // 后端直接下发 activeVideoId，无需查本地 videosRef，与 HTTP 是否完成无关
+        if (activeVideoId) {
+            setActiveVideoId(activeVideoId);
+            fetchTags(activeVideoId);
         }
         // 恢复历史笔迹：如果 PainterLayer 已挂载则直接应用，否则暂存到 ref 等待挂载
         if (strokes?.length) {
@@ -399,13 +363,6 @@ export default function RoomPage() {
         if (videoId) {
             setActiveVideoId(videoId);
             fetchTags(videoId);
-        } else {
-            // 兜底：后端未下发 videoId 时，从视频列表里用 objectKey 查找
-            const matched = videosRef.current.find((v) => v.objectKey === objectKey);
-            if (matched) {
-                setActiveVideoId(matched.id);
-                fetchTags(matched.id);
-            }
         }
     });
 
