@@ -146,27 +146,10 @@
   letter-spacing: 0.5px;
 }
 
-// 一键同步按钮（主控专用，行内紧凑尺寸）
+// 一键同步按钮（主控专用，行内紧凑尺寸覆盖）
 .forceSyncBtn {
   padding: 2px 10px;
   height: 24px;
-  background: rgba(99, 179, 237, 0.08);
-  border: 1px solid rgba(99, 179, 237, 0.3);
-  border-radius: 4px;
-  color: #63b3ed;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s, border-color 0.15s;
-
-  &:hover:not(:disabled) {
-    background: rgba(99, 179, 237, 0.16);
-    border-color: rgba(99, 179, 237, 0.6);
-  }
-
-  &:active {
-    background: rgba(99, 179, 237, 0.24);
-  }
 }
 
 // 清除此色 + 清空画布 同行容器
@@ -177,42 +160,10 @@
   margin-top: 10px;
 }
 
-// 清除此色按钮
-.clearColorBtn {
-  width: calc(50% - 3px);
-  padding: 2px 8px;
-  background: none;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 4px;
-  color: #a0aec0;
-  font-size: 11px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: border-color 0.15s, color 0.15s;
-
-  &:hover {
-    border-color: rgba(239, 68, 68, 0.5);
-    color: #fc8181;
-  }
-}
-
-// 清空画布按钮
+// 清除此色 / 清空画布：宽度各占一半，padding 由 size="sm" 提供
+.clearColorBtn,
 .clearStrokesBtn {
   width: calc(50% - 3px);
-  padding: 6px 0;
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.25);
-  border-radius: 4px;
-  color: #fc8181;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
-
-  &:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.16);
-    border-color: rgba(239, 68, 68, 0.5);
-  }
-
 }
 
 // ── 编码设置区 ────────────────────────────────────────────────────────────────

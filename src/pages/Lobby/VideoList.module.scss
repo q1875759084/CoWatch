@@ -141,34 +141,26 @@
   color: #ed8936;
   font-size: 11px;
   white-space: nowrap;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
-
-  &:hover {
-    background: rgba(237, 137, 54, 0.08);
-    border-color: rgba(237, 137, 54, 0.65);
-    color: #f6ad55;
-  }
 }
 
 // ── 新增 label 内联输入框 ──────────────────────────────────────────────────────
 .labelInput {
   width: 72px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(99, 179, 237, 0.5);
+  background: none;
+  border: 1px dashed rgba(237, 137, 54, 0.4);
   border-radius: 4px;
-  color: #e2e8f0;
+  color: #ed8936;
   font-size: 11px;
   padding: 1px 5px;
   outline: none;
   flex-shrink: 0;
 
   &::placeholder {
-    color: #4a5568;
+    color: rgba(237, 137, 54, 0.45);
   }
 
   &:focus {
-    border-color: rgba(99, 179, 237, 0.8);
-    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(237, 137, 54, 0.7);
   }
 }
 
@@ -201,99 +193,13 @@
   flex-shrink: 0;
 }
 
+// deleteBtn 只控制显示逻辑，颜色样式由 Button variant="danger" 提供
 .deleteBtn {
   display: none;
-  flex-shrink: 0;
-  padding: 5px 14px;
-  background: rgba(197, 48, 48, 0.08);
-  border: 1px solid rgba(197, 48, 48, 0.25);
-  border-radius: 6px;
-  color: #fc8181;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-
-  &:hover:not(:disabled) {
-    background: rgba(197, 48, 48, 0.18);
-    border-color: rgba(197, 48, 48, 0.5);
-    color: #feb2b2;
-  }
-
-  &:disabled {
-    cursor: not-allowed;
-    background: rgba(255, 255, 255, 0.03);
-    border-color: rgba(255, 255, 255, 0.06);
-    color: #4a5568;
-  }
 }
 
 .item:hover .deleteBtn:not(:disabled) {
   display: block;
 }
 
-// ── 编辑态确定按钮 ────────────────────────────────────────────────────────────
-.confirmBtn {
-  flex-shrink: 0;
-  padding: 5px 14px;
-  background: rgba(99, 179, 237, 0.12);
-  border: 1px solid rgba(99, 179, 237, 0.35);
-  border-radius: 6px;
-  color: #63b3ed;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
 
-  &:hover {
-    background: rgba(99, 179, 237, 0.22);
-    border-color: rgba(99, 179, 237, 0.6);
-    color: #90cdf4;
-  }
-}
-
-// ── 编辑态取消按钮 ────────────────────────────────────────────────────────────
-.cancelBtn {
-  flex-shrink: 0;
-  padding: 5px 14px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
-  color: #718096;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.18);
-    color: #a0aec0;
-  }
-}
-
-.playBtn {
-  flex-shrink: 0;
-  padding: 5px 14px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 6px;
-  color: #a0aec0;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-
-  &:hover {
-    background: rgba(99, 179, 237, 0.15);
-    border-color: rgba(99, 179, 237, 0.4);
-    color: #63b3ed;
-  }
-
-  &.playBtnActive {
-    background: rgba(99, 179, 237, 0.15);
-    border-color: rgba(99, 179, 237, 0.4);
-    color: #63b3ed;
-    cursor: default;
-  }
-}

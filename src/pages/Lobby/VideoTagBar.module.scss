@@ -162,23 +162,6 @@
   text-overflow: ellipsis;
 }
 
-.deleteBtn {
-  flex-shrink: 0;
-  padding: 2px 8px;
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 5px;
-  color: #4a5568;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-
-  &:hover {
-    background: rgba(252, 129, 129, 0.12);
-    border-color: rgba(252, 129, 129, 0.3);
-    color: #fc8181;
-  }
-}
 
 // ── 输入行 ──────────────────────────────────────────────────────────────────
 
@@ -228,38 +211,6 @@
   }
 }
 
-.confirmBtn {
-  flex-shrink: 0;
-  padding: 4px 12px;
-  background: rgba(99, 179, 237, 0.2);
-  border: 1px solid rgba(99, 179, 237, 0.4);
-  border-radius: 5px;
-  color: #63b3ed;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s;
-
-  &:hover {
-    background: rgba(99, 179, 237, 0.3);
-  }
-}
-
-.cancelBtn {
-  flex-shrink: 0;
-  padding: 4px 10px;
-  background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 5px;
-  color: #4a5568;
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.05);
-    color: #718096;
-  }
-}
 
 .errorHint {
   font-size: 11px;

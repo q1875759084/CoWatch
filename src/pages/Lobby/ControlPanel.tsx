@@ -7,6 +7,7 @@ import MemberList from '@/components/MemberList';
 import CollapseSection from '@/components/CollapseSection';
 import { downloadBatApi } from '@/api/room';
 import { CURSOR_STYLES } from './cursorStyles';
+import { Button } from '@/components/Button';
 import styles from './ControlPanel.module.scss';
 
 /** 固定使用 CRF 30 档位 */
@@ -131,24 +132,24 @@ export function CursorSettings({
 
       {/* 清除此色 + 清空画布 */}
       <div className={styles.clearBtnRow}>
-        <button
-          type="button"
+        <Button
+          variant="ghost-danger"
           className={styles.clearColorBtn}
           title={`清除所有${DRAW_COLORS.find(c => c.color === drawColor)?.label ?? ''}色笔迹`}
           onClick={() => onClearStrokesByColor(drawColor)}
           disabled={disabled}
         >
           清除此色
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="danger"
           className={styles.clearStrokesBtn}
           onClick={onClearStrokes}
           title="清空所有人的画布笔迹"
           disabled={disabled}
         >
           清空画布
-        </button>
+        </Button>
       </div>
     </CollapseSection>
   );
@@ -249,14 +250,14 @@ export default function ControlPanel({
       <div className={styles.modeRow}>
         <span className={styles.modeRowLabel}>当前模式</span>
         {isController ? (
-          <button
-            type="button"
+          <Button
+            variant="primary"
             className={styles.forceSyncBtn}
             onClick={onForceSync}
             title="将所有成员同步到当前播放进度和画布状态"
           >
             一键同步
-          </button>
+          </Button>
         ) : (
           <Switch
             size="small"

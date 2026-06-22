@@ -1,6 +1,7 @@
 import { useState, useId } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import type { Tag } from '@/types/room';
+import { Button } from '@/components/Button';
 import styles from './VideoTagBar.module.scss';
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
@@ -157,15 +158,15 @@ export default function VideoTagBar({
             <span className={styles.tagTime}>{formatTime(tag.time)}</span>
             <span className={styles.tagLabel}>{tag.label}</span>
             {isController && (
-              <button
-                className={styles.deleteBtn}
+              <Button
+                variant="ghost-danger"
                 onClick={(e) => {
-                  e.stopPropagation(); // 阻止冒泡触发 onSeek
+                  e.stopPropagation();
                   onDelete(tag.id);
                 }}
               >
                 删除
-              </button>
+              </Button>
             )}
           </li>
         ))}
@@ -193,12 +194,8 @@ export default function VideoTagBar({
             {draft.error && (
               <span className={styles.errorHint}>{draft.error}</span>
             )}
-            <button className={styles.confirmBtn} onClick={handleConfirm}>
-              确认
-            </button>
-            <button className={styles.cancelBtn} onClick={handleCancel}>
-              取消
-            </button>
+            <Button variant="primary" onClick={handleConfirm}>确认</Button>
+            <Button variant="default" onClick={handleCancel}>取消</Button>
           </li>
         )}
       </ul>

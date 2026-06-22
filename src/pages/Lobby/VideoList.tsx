@@ -3,6 +3,7 @@ import { EditOutlined } from '@ant-design/icons';
 import { Tag, Modal, Tooltip } from 'antd';
 import type { VideoItem } from '@/types/room';
 import { EmptyState } from '@/components/EmptyState';
+import { Button } from '@/components/Button';
 import styles from './VideoList.module.scss';
 
 interface VideoListProps {
@@ -228,27 +229,28 @@ export default function VideoList({
                 {isEditing ? (
                   /* 编辑态：确定 / 取消 */
                   <>
-                    <button
-                      className={styles.confirmBtn}
+                    <Button
+                      variant="primary"
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={(e) => { e.stopPropagation(); confirmEdit(v); }}
                     >
                       确定
-                    </button>
-                    <button
-                      className={styles.cancelBtn}
+                    </Button>
+                    <Button
+                      variant="default"
                       onMouseDown={(e) => e.preventDefault()}
-                       onClick={(e) => { e.stopPropagation(); cancelEdit(); }}
+                      onClick={(e) => { e.stopPropagation(); cancelEdit(); }}
                     >
                       取消
-                    </button>
+                    </Button>
                   </>
                 ) : (
                   /* 普通态：删除 / 播放 */
                   <>
                     {canEdit && (
                       <Tooltip title={isActive ? '视频正在播放中，无法删除' : ''}>
-                        <button
+                        <Button
+                          variant="danger"
                           className={styles.deleteBtn}
                           disabled={isActive}
                           onMouseDown={(e) => e.preventDefault()}
@@ -265,16 +267,17 @@ export default function VideoList({
                           }}
                         >
                           删除
-                        </button>
+                        </Button>
                       </Tooltip>
                     )}
                     {(isController || canPlayInFreeMode) && (
-                      <button
-                        className={`${styles.playBtn} ${isActive ? styles.playBtnActive : ''}`}
+                      <Button
+                        variant="default"
+                        active={isActive}
                         onClick={() => onPlay(v.objectKey, v.id)}
                       >
                         {isActive ? '播放中' : '播放'}
-                      </button>
+                      </Button>
                     )}
                   </>
                 )}
