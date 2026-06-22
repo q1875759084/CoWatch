@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { EditOutlined } from '@ant-design/icons';
 import { Tag, Modal, Tooltip } from 'antd';
 import type { VideoItem } from '@/types/room';
+import { EmptyState } from '@/components/EmptyState';
 import styles from './VideoList.module.scss';
 
 interface VideoListProps {
@@ -107,12 +108,7 @@ export default function VideoList({
   };
 
   if (videos.length === 0) {
-    return (
-      <div className={styles.empty}>
-        <span className={styles.emptyIcon}>📂</span>
-        <p>暂无视频，请上传录屏文件</p>
-      </div>
-    );
+    return <EmptyState description="暂无视频，请上传录屏文件" />;
   }
 
   return (

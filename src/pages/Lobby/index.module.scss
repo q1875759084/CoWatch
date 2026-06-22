@@ -22,7 +22,7 @@
   overflow-y: auto;
   min-width: 0;
   padding-top: 8px;
-  background: #161b22;
+  background: $bg-surface;
 }
 
 // 16:9 视频容器。
@@ -39,7 +39,7 @@
   flex-shrink: 0;
   overflow: hidden;
   position: relative;
-  background: #000;
+  background: $bg-surface;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -53,28 +53,13 @@
   }
 }
 
-.noVideo {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  color: #4a5568;
-  font-size: 14px;
-
-  p { margin: 0; }
-}
-
-.noVideoIcon {
-  font-size: 40px;
-}
-
 // ── 右侧控制面板 ────────────────────────────────────────────────────────────
 
 .panel {
   position: relative;
   width: 280px;
   flex-shrink: 0;
-  background: #161b22;
+  background: $bg-surface;
   border-left: 1px solid rgba(255, 255, 255, 0.06);
   overflow-y: auto;
   overflow-x: hidden;
@@ -112,7 +97,7 @@
   height: 48px;
   border: none;
   border-radius: 6px 0 0 6px;
-  background: #161b22;
+  background: $bg-surface;
   color: #718096;
   cursor: pointer;
   transition: color 0.15s;

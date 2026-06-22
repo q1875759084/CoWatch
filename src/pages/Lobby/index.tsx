@@ -9,6 +9,7 @@ import { useSyncedState } from '@/hooks/useSyncedState';
 import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi, updateVideoLabelsApi } from '@/api/room';
 import type { Tag, CursorMoveDownData, DrawStrokeData, RoomStateData, ChatMessageData } from '@/types/room';
 import LoadingSpinner from '@/components/LoadingSpinner';
+import { EmptyState } from '@/components/EmptyState';
 import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
 import ControlPanel from './ControlPanel';
@@ -743,10 +744,7 @@ onVideoDeleted: (deletedVideoId) => {
                                 onDurationChange={setDuration}
                             />
                         ) : (
-                            <div className={styles.noVideo}>
-                                <span className={styles.noVideoIcon}>🎬</span>
-                                <p>从下方选择或上传视频开始复盘</p>
-                            </div>
+                            <EmptyState description="选择或上传视频" />
                         )}
                     </div>
 

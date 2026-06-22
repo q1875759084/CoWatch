@@ -60,7 +60,7 @@ export default function AuthPage() {
       <div className={styles.card}>
         <div className={styles.logo}>
           <h1>CoWatch</h1>
-          <p>游戏<span style={{ textDecoration: 'line-through', textDecorationStyle: 'double' }}>复盘</span>开庭平台</p>
+          <p><span style={{ textDecoration: 'line-through', textDecorationStyle: 'double' }}>复盘</span>开庭平台</p>
         </div>
 
         <div className={styles.tabs}>
@@ -120,10 +120,6 @@ export default function AuthPage() {
                 required
               />
             </div>
-          )}
-
-          {tab === 'register' && (
-            <p className={styles.hint}>注册后账号名即为默认昵称</p>
           )}
 
           {error && <p className={styles.error}>{error}</p>}

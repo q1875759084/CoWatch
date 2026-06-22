@@ -67,11 +67,11 @@ $sidebar-width: 150px;
   margin-bottom: 2px;
 
   &:hover {
-    background: #161b22;
+    background: $bg-surface;
   }
 
   &.active {
-    background: #161b22;
+    background: $bg-surface;
   }
 }
 
