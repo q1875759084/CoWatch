@@ -21,7 +21,6 @@ interface VideoUploaderProps {
 export default function VideoUploader({ roomId, lastVideoAddedId }: VideoUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [progress, setProgress] = useState(0);
-  const [fileName, setFileName] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -42,7 +41,6 @@ export default function VideoUploader({ roomId, lastVideoAddedId }: VideoUploade
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setFileName(file.name);
     setErrorMsg('');
     setStatus('uploading');
     setProgress(0);
@@ -109,7 +107,7 @@ export default function VideoUploader({ roomId, lastVideoAddedId }: VideoUploade
         </label>
       ) : status === 'uploading' ? (
         <div className={styles.progressBox}>
-          <p className={styles.uploadingFile}>正在上传：{fileName}</p>
+          <p className={styles.uploadingFile}>上传中...</p>
           <div className={styles.progressTrack}>
             <div className={styles.progressBar} style={{ width: `${progress}%` }} />
           </div>
@@ -118,8 +116,7 @@ export default function VideoUploader({ roomId, lastVideoAddedId }: VideoUploade
       ) : status === 'slicing' ? (
         <div className={styles.slicingBox}>
           <span className={styles.slicingSpinner}>⏳</span>
-          <p className={styles.slicingText}>服务器切片中，请稍候...</p>
-          <p className={styles.slicingFile}>{fileName}</p>
+          <p className={styles.slicingText}>服务器处理中，请稍候...</p>
         </div>
       ) : null}
     </div>

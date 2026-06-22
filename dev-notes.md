@@ -1579,6 +1579,67 @@ useRequest(fetchPerfStats, {
 
 ---
 
+### 日志型表不设外键（以 segment_views 为例）
+
+**背景/踩坑：** `segment_views.video_id` 原本有 `FOREIGN KEY REFERENCES room_videos(id)`。删除视频时后端报 `SQLITE_CONSTRAINT_FOREIGNKEY`（500），日志指向 `deleteRoomVideo`。根因是删视频前未清理 `segment_views` 子记录，而直接清理又会导致流量历史数据丢失，无法回溯统计。
+
+**决策：移除 segment_views 的外键约束。**
+
+SQLite 不支持 `DROP CONSTRAINT`，通过"创建无外键新表 → 复制数据 → 删旧表 → 重命名"完成迁移，并在 `initSchema` 中加幂等迁移函数（`PRAGMA foreign_key_list` 检测有无外键，已迁移则跳过）。
+
+**外键的三个作用，对日志表都不适用：**
+
+| 作用 | 业务主数据（适用） | 日志/埋点表（不适用） |
+|------|------|------|
+| 引用完整性（插入时拒绝孤立记录） | room_members 不能引用不存在的 user | 流量已真实发生，视频删除不影响这个事实 |
+| 级联操作（父表删除时处理子表） | 适合"父删子必无意义"的强关联 | 父删后日志应保留，级联删破坏统计回溯 |
+| 查询优化提示 | 有效 | SQLite 优化器弱，实际无效 |
+
+**通用原则：** 流量日志、操作记录、埋点等表，`*_id` 字段只是分组 key，不设外键。外键适合业务主数据之间的强关联（如 `room_members → users/rooms`）。
+
+---
+
+### SQLite → PostgreSQL 迁移：字段名/类型变化导致的不兼容
+
+**本质根因：** SQLite 是弱类型 + 动态列名（`AS` 别名直接命名结果集），postgres.js 是强类型 + 精确返回 PG 原生类型。迁移后两处默认行为改变，需要统一处理。
+
+**问题一：`BIGINT` 列返回 `string` 而非 `number`**
+
+- **现象：** PG 迁移后 API 响应中时间戳字段变成字符串（如 `"1782095216984"`），前端类型校验失败或计算出错。
+- **根因：** postgres.js 对 `BIGINT`（OID 20）默认返回 JS `string`，防止超 2^53 的 64-bit 整数精度丢失。
+- **解决：** 在连接池初始化时配置自定义 type parser，一次性全局生效：
+  ```ts
+  const sql = postgres(DATABASE_URL, {
+    types: {
+      bigint: {
+        to: 20, from: [20],
+        parse: (x: string) => Number(x),   // 时间戳均 < 2^53，安全转换
+        serialize: (x: number) => String(x),
+      },
+    },
+  });
+  ```
+
+**问题二：API 字段名变化导致前端崩溃**
+
+- **现象：** `/rooms/my` 接口原来返回 `{room_id, room_name}`（SQLite 查询用了 `AS` 别名），迁移后直接返回原始列名 `{id, name}`，前端 `room.room_name.slice()` 报 `Cannot read properties of undefined`。
+- **根因：** 早期 SQLite 层用 `SELECT r.id AS room_id, r.name AS room_name` 做了字段重命名，迁移到 PG 时丢失了这些别名。
+- **解决：** 在 controller 层做字段映射，保持 API 契约不变；DB 层保留原始列名，映射逻辑集中在 controller 的 `.map()` 中：
+  ```ts
+  const rooms = rows.map((r) => ({
+    room_id: r.id,
+    room_name: r.name,
+    // ...
+  }));
+  ```
+
+**问题三：sqlite3 导出 NULL 为空字符串导致 `\COPY` 失败**
+
+- **现象：** 数据迁移时 `user_subscriptions.expires_at`（BIGINT 可空）为 NULL，sqlite3 以 `-separator $'\t'` 模式导出时变成空字符串，psql `\COPY` 报 `invalid input syntax for type bigint: ""`。
+- **解决：** sqlite3 查询时显式转换：`COALESCE(CAST(expires_at AS TEXT), '\N')`，psql 配合 `\COPY ... FROM STDIN NULL AS '\N'`。
+
+---
+
 ## 待了解
 
 - **WebSocket 心跳 + 随机抖动指数退避重连**
