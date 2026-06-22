@@ -18,12 +18,12 @@ JavaScript（泛指 JS、TS、JSX、TSX 等都应遵循的）代码生成应遵�
 - 项目开启 `strict` 模式，**禁止使用 `any`**，用 `unknown` + 类型守卫代替
 - 避免使用 @ts-ignore，所有 TypeScript 类型错误必须通过正确定义类型或修正代码逻辑解决
 - TypeScript 的公共类型定义需要放到 `types` 目录以避免重复定义
-- API 响应类型用泛型约束 `ApiResponse<T>`，类型定义从 `@carry/shared` 引入
+- API 响应类型用泛型约束 `ApiResponse<T>`，定义在 `src/types/api.ts`
 
 ## 编码规范
 
 - 避免嵌套三元，提升代码可读性
-- **import 顺序**：第三方库 → `@carry/shared` → 本包内跨目录 → 相对路径；组间空一行，同组内按字母排序
+- **import 顺序**：第三方库 → 本包内跨目录（`@/`）→ 相对路径；组间空一行，同组内按字母排序
 
 ## 模块副作用
 
@@ -38,10 +38,10 @@ JavaScript（泛指 JS、TS、JSX、TSX 等都应遵循的）代码生成应遵�
 ## 代码健壮性要求
 
 - 类型转换时必须设置默认值，如 `Number(a) || 0` 或 `String(a ?? '')` 以防出现不符合预期的结果
-- 网络请求和接口异常处理函数封装在 `api` 目录下，优先使用已封装的 `bizAxios` 调用业务接口
+- 网络请求和接口异常处理函数封装在 `api` 目录下，使用已封装的 `request`（`src/utils/request.ts`）调用业务接口；以下两类场景例外（需在注释中说明原因）：OSS 预签名直传用原生 XHR（不能带自定义 Authorization 头）、后端返回 Blob 时用原生 `axios.get`（业务拦截器会误判）
 - 所有异步操作必须有 `try/catch`，**不允许静默失败**
 - 用户可见的错误统一用 `message.error()` 展示，兜底写法：`message.error((error as Error).message || '操作失败')`；**禁止直接传 error 对象**（会渲染为 `[object Object]`）
-- 网络错误、权限错误、业务错误分类处理；403 已由 bizAxios 拦截器跳页处理，**不要再额外弹 toast**
+- 网络错误、权限错误、业务错误分类处理；401 由 `request` 拦截器自动刷新 Token 或跳转登录页，**不要再额外处理**
 
 ## 样式管理
 

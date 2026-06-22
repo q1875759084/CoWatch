@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import type { ChatMessageData } from '@/types/room';
 import styles from './NotePanel.module.scss';
@@ -87,7 +87,7 @@ export default function NotePanel({
   }, [messages.length, chatOpen]);
 
   // ── 打开聊天：清除红点 + 滚到底 ───────────────────────────────────────────
-  const handleOpenChat = useCallback(() => {
+  const handleOpenChat = useMemoizedFn(() => {
     setChatOpen((v) => {
       if (!v) {
         setUnreadChat(false);
@@ -97,7 +97,7 @@ export default function NotePanel({
       }
       return !v;
     });
-  }, []);
+  });
 
   // ── 保存笔记 ──────────────────────────────────────────────────────────────
   const handleSave = useMemoizedFn(() => {
@@ -118,15 +118,12 @@ export default function NotePanel({
     setChatInput('');
   });
 
-  const handleChatKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        handleSend();
-      }
-    },
-    [handleSend],
-  );
+  const handleChatKeyDown = useMemoizedFn((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  });
 
   const groups = groupMessages(messages, currentUserId);
 

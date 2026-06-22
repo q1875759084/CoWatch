@@ -43,8 +43,6 @@ export interface VideoItem {
   displayName?: string | null;
   uploaderId: string;
   createdAt: number;
-  /** HLS 切片状态：切片完成后才可播放 */
-  hlsStatus?: 'pending' | 'done' | 'error';
   /** 视频标签，最多 3 个，每个最多 8 个字 */
   labels?: string[];
 }
@@ -52,7 +50,6 @@ export interface VideoItem {
 export interface RoomInfo {
   roomId: string;
   roomName: string;
-  videoUrl: string | null;
   controlMode: ControlMode;
   controllerId: string | null;
   members: Member[];

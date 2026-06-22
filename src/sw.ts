@@ -133,7 +133,7 @@ interface SegmentViewItem {
  *
  * 为什么批量上报：
  *   HLS 首次播放 / seek 时会短时间内连续触发多个片段请求，
- *   批量合并为单次 POST，减少 SQLite 事务数（写锁竞争），
+ *   批量合并为单次 POST，减少数据库写入次数，
  *   对播放体验零影响（fire-and-forget）。
  */
 const reportQueue: SegmentViewItem[] = [];

@@ -26,7 +26,7 @@ export type InitRoomPayload = Omit<RoomState, 'activeVideoUrl'>;
 interface RoomContextValue {
   roomState: RoomState | null;
   initRoom: (state: InitRoomPayload) => void;
-  setActiveVideoUrl: (url: string) => void;
+  setActiveVideoUrl: (url: string | null) => void;
   addVideo: (video: VideoItem) => void;
   /**
    * WS ROOM_STATE 到达时，用下发的在线状态列表更新每个成员的 isOnline 字段。
@@ -117,7 +117,7 @@ export function RoomProvider({ children }: { children: ReactNode }) {
    * - roomState 已初始化：直接更新
    * - roomState 为 null（WS 早于 HTTP）：存入 pending，initRoom 执行时消费
    */
-  const setActiveVideoUrl = useMemoizedFn((url: string) => {
+  const setActiveVideoUrl = useMemoizedFn((url: string | null) => {
     setRoomState((prev) => {
       if (!prev) {
         pendingActiveVideoUrlRef.current = url;

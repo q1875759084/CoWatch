@@ -539,16 +539,16 @@ export default function RoomPage() {
         onSwitchVideo: handleSwitchVideo,
         onControlChanged: handleControlChanged,
         onVideoAdded: (videoId) => setLastVideoAddedId(videoId),
-onVideoDeleted: (deletedVideoId) => {
-    // 删除的是当前激活视频：重置播放器和相关状态
-    if (deletedVideoId === activeVideoId) {
-        setActiveObjectKey(null);
-        setActiveVideoId('');
-        setTags([]);
-        setDuration(0);
-        setActiveVideoUrl('');
-    }
-},
+        onVideoDeleted: (deletedVideoId) => {
+            // 删除的是当前激活视频：重置播放器和相关状态
+            if (deletedVideoId === activeVideoId) {
+                setActiveObjectKey(null);
+                setActiveVideoId('');
+                setTags([]);
+                setDuration(0);
+                setActiveVideoUrl(null);
+            }
+        },
         onCursorMove: handleCursorMove,
         onCursorHide: handleCursorHide,
         onDrawStroke: handleDrawStroke,

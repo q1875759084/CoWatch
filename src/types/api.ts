@@ -39,7 +39,7 @@ export interface MyRoom {
   room_id: string;
   room_name: string;
   video_url: string | null;
-  is_admin: 0 | 1;
+  is_admin: boolean;
   joined_at: number;
 }
 

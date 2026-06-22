@@ -77,27 +77,6 @@ export async function getVideosApi(roomId: string): Promise<RoomVideosResponse> 
 }
 
 /**
- * 获取视频的动态 m3u8 内容（HLS 架构，切片完成后可调用）
- *
- * 后端实时签名所有 .ts 片段 URL，返回 m3u8 文本内容。
- * 前端通过 URL.createObjectURL(new Blob([content])) 生成 Blob URL，
- * 再传给 hls.js 的 loadSource()。
- *
- * 签名有效期 2 小时。跨天复盘时重新调用此接口即可刷新签名。
- * 若切片尚未完成，后端返回 425 状态码。
- */
-export async function getVideoM3u8Api(
-  roomId: string,
-  videoId: string,
-): Promise<string> {
-  const res = await request.get<string>(
-    `/rooms/${roomId}/videos/${videoId}/m3u8`,
-    { responseType: 'text' },
-  );
-  return res.data;
-}
-
-/**
  * 获取房间内某视频的 Tag 列表
  */
 export async function getTagsApi(roomId: string, videoId: string): Promise<Tag[]> {
