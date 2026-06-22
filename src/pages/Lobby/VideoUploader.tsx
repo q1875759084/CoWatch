@@ -12,12 +12,13 @@ interface VideoUploaderProps {
   roomId: string;
   /**
    * WS VIDEO_ADDED 事件透传——由父组件（Lobby）在 useRoomWs 收到 VIDEO_ADDED 时调用。
-   * 切片完成信号，全员统一回归空闲态，不区分上传者与旁观者。
+   * 传入 videoId（uuid，每次写入 DB 唯一），用于触发状态重置，避免同名文件重复上传时 useEffect 不触发。
+   * undefined 为初始值，不触发；切片失败由独立的 VIDEO_SLICE_ERROR 消息处理。
    */
-  lastVideoAddedName?: string;
+  lastVideoAddedId?: string;
 }
 
-export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploaderProps) {
+export default function VideoUploader({ roomId, lastVideoAddedId }: VideoUploaderProps) {
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [progress, setProgress] = useState(0);
   const [fileName, setFileName] = useState('');
@@ -25,17 +26,17 @@ export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploa
   const inputRef = useRef<HTMLInputElement>(null);
 
   // VIDEO_ADDED 广播到来：全员统一回归空闲态，并弹窗提示
+  // lastVideoAddedId 为 uuid，每次切片唯一，不会因同名文件导致 useEffect 不触发
+  // 切片失败由独立的 VIDEO_SLICE_ERROR 消息处理，此处不需要异常分支
   useEffect(() => {
-    if (!lastVideoAddedName) return;
-    setFileName('');
-    setProgress(0);
+    if (!lastVideoAddedId) return;  // undefined（初始态）跳过
     setStatus('idle');
     Modal.success({
       title: '视频已就绪',
-      content: `《${lastVideoAddedName}》切片完成，可在视频列表中选择播放。`,
+      content: '切片完成，可在视频列表中选择播放。',
       okText: '知道了',
     });
-  }, [lastVideoAddedName]);
+  }, [lastVideoAddedId]);
 
   const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -74,13 +75,7 @@ export default function VideoUploader({ roomId, lastVideoAddedName }: VideoUploa
         file.type || 'video/mp4',
       );
 
-      if (mode === 'local') {
-        // ── 本地模式 ────────────────────────────────────────────────────────
-        await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct));
-      } else {
-        // ── 线上模式：代理上传 ──────────────────────────────────────────────
-        await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct), 'POST');
-      }
+      await uploadToBackend(uploadUrl, file, (pct) => setProgress(pct), mode === 'proxy' ? 'POST' : 'PUT');
 
       // 上传成功：切换到"切片中"状态，等待后端 ffmpeg 切片完成后广播 VIDEO_ADDED
       setStatus('slicing');

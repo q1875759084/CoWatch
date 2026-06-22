@@ -75,11 +75,11 @@ export default function RoomPage() {
     const [activeVideoId, activeVideoIdRef, setActiveVideoId] = useSyncedState<string>('');
 
     /**
-     * 最近一次收到 VIDEO_ADDED 的文件名。
-     * 传给 VideoUploader 作为 lastVideoAddedName prop，
-     * VideoUploader 内部对比 pendingFileName 判断是否为本次上传完成。
+     * 最近一次收到 VIDEO_ADDED 的 videoId（uuid，每次唯一）。
+     * 传给 VideoUploader 作为 lastVideoAddedId prop，以此触发状态重置。
+     * undefined 为初始值（不触发）；空字符串表示后端写入异常。
      */
-    const [lastVideoAddedName, setLastVideoAddedName] = useState<string | undefined>(undefined);
+    const [lastVideoAddedId, setLastVideoAddedId] = useState<string | undefined>(undefined);
 
     // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
     /** 是否开启鼠标共享（是否发送自己的位置） */
@@ -537,7 +537,7 @@ export default function RoomPage() {
         onTagDeleted: handleTagDeleted,
         onSwitchVideo: handleSwitchVideo,
         onControlChanged: handleControlChanged,
-        onVideoAdded: (addedFileName) => setLastVideoAddedName(addedFileName),
+        onVideoAdded: (videoId) => setLastVideoAddedId(videoId),
 onVideoDeleted: (deletedVideoId) => {
     // 删除的是当前激活视频：重置播放器和相关状态
     if (deletedVideoId === activeVideoId) {
@@ -688,7 +688,7 @@ onVideoDeleted: (deletedVideoId) => {
                     <CollapseSection title="上传视频" collapsible defaultOpen={false}>
                         <VideoUploader
                             roomId={roomId!}
-                            lastVideoAddedName={lastVideoAddedName}
+                            lastVideoAddedId={lastVideoAddedId}
                         />
                     </CollapseSection>
                     {/*

@@ -270,8 +270,14 @@ function isVideoRequest(request: Request): boolean {
 ```ts
 function stripCosSignature(url: string): string {
   const u = new URL(url);
+  // CDN TypeA 鉴权参数（随签名轮换而变化）
+  u.searchParams.delete('sign');
+  // COS 直连签名参数列表（本地开发 / 无 CDN 回退路径）
   ['q-sign-algorithm','q-ak','q-sign-time','q-key-time',
    'q-header-list','q-url-param-list','q-signature'].forEach((p) => u.searchParams.delete(p));
+  // 业务归因参数（如 uid）——不参与验签，但同样必须剥离：
+  // 同一片段因请求用户不同会产生多条独立缓存，命中率归零
+  u.searchParams.delete('uid');
   return u.toString();
 }
 
@@ -282,6 +288,10 @@ const cacheKey = new Request(cacheKeyUrl, { headers: {} });
 const fullRes = await fetch(new Request(request.url, { headers: { 'Cache-Control': 'no-cache' } }));
 await cache.put(cacheKey, fullRes.clone());
 ```
+
+> **规律：** cache key 参数剥离需区分两类，缺一不可：
+> - **鉴权参数**（`sign`、`q-sign-*`）：随签名轮换，不剥离则同一视频每次签名后缓存未命中
+> - **业务归因参数**（`uid` 等）：随请求用户不同，不剥离则同一片段产生 N 条缓存（N = 用户数）
 
 **效果对比：**
 

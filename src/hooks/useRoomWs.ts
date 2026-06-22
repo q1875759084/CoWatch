@@ -49,9 +49,10 @@ interface UseRoomWsOptions {
   onSwitchVideo?: (objectKey: string, videoId: string | undefined, videoUrl: string) => void;
   /**
    * 收到 VIDEO_ADDED 时通知调用方（HLS 切片完成后后端广播）。
-   * 调用方传入文件名，VideoUploader 内部对比 pendingFileName 判断是否为本次上传。
+   * 传入 videoId（uuid），每次写入 DB 唯一，VideoUploader 以此触发状态重置。
+   * videoId 为空时表示写入异常，调用方应展示错误提示。
    */
-  onVideoAdded?: (fileName: string) => void;
+  onVideoAdded?: (videoId: string) => void;
   /** 收到 CURSOR_MOVE 时通知调用方更新他人光标位置 */
   onCursorMove?: (data: CursorMoveDownData) => void;
   /** 收到 CURSOR_HIDE 时通知调用方隐藏对应用户的光标 */
@@ -245,8 +246,9 @@ export function useRoomWs({
               uploaderId: d.uploaderId,
               createdAt: d.createdAt,
             });
-            // 通知 VideoUploader：切片完成，传 fileName 供其对比匹配
-            stableOnVideoAdded(d.fileName);
+            // 通知 VideoUploader：切片完成，传 videoId（uuid，每次写入 DB 唯一）
+            // 切片失败由独立的 VIDEO_SLICE_ERROR 消息处理，此处 d.id 必然有值
+            stableOnVideoAdded(d.id);
           }
           break;
         }

@@ -1149,6 +1149,36 @@ u.searchParams.delete('sign');
 
 ---
 
+### CDN TypeA uid 字段不能放业务参数（流量归因 userId）
+
+**现象：** 将 UUID 格式的 userId（如 `550e8400-e29b-41d4-a716-446655440000`）嵌入 TypeA sign 的 `uid` 字段，CDN 验签失败，浏览器因 403 响应不含 `Access-Control-Allow-Origin` 而报 CORS 错误（误导排查方向，参见"CORS 问题的根因"条目）。
+
+**根因：** TypeA sign 格式为 `{timestamp}-{rand}-{uid}-{md5}`，以连字符为字段分隔符。UUID 本身含 4 个连字符，CDN 解析 sign 时字段错位，md5 校验失败。
+
+**解决：** sign 中 `uid` 字段固定为 `'0'`（TypeA 规范原本就不要求填有意义的值），userId 作为独立 `&uid=` query 参数附加，不参与签名计算，CDN 透传，SW 直接读取用于流量归因：
+
+```ts
+// ossService.ts
+const uid = '0';  // TypeA uid 字段固定为 0，不放业务数据
+const sign = `${timestamp}-${rand}-${uid}-${md5hash}`;
+// userId 独立附加，不参与验签
+const uidParam = userId !== '0' ? `&uid=${encodeURIComponent(userId)}` : '';
+return `${cdnBase}${pathname}?sign=${sign}${uidParam}`;
+```
+
+**SW 处理：** `uid` 需在构建 cache key 时一并剥离，否则同一片段因请求用户不同产生多条缓存：
+
+```ts
+u.searchParams.delete('sign');  // CDN TypeA 鉴权参数
+u.searchParams.delete('uid');   // 流量归因参数（不参与验签，但会破坏缓存命中率）
+```
+
+SW 用 `searchParams.get('uid')` 读取归因参数，上报流量统计。
+
+**规律：** query 参数剥离策略需区分"鉴权参数"（必须剥离）和"业务参数"（同样必须剥离），两者都会破坏缓存命中率，但原因不同：鉴权参数随签名轮换，业务参数随请求用户不同。
+
+---
+
 ## SW 缓存策略演进：V4 HLS 片段 cache-first（当前）
 
 ### 背景
