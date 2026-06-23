@@ -1,10 +1,12 @@
 import { createContext, useContext, useState, useRef, type ReactNode } from 'react';
 import { useMemoizedFn } from 'ahooks';
-import type { Member, ControlMode, VideoItem } from '@/types/room';
+import type { Member, ControlMode, VideoItem, RoomPlanLevel } from '@/types/room';
 
 export interface RoomState {
   roomId: string;
   roomName: string;
+  /** 房间当前等级：'free' = 已过期不可用，front-end guard 据此渲染过期页 */
+  planLevel: RoomPlanLevel;
   /**
    * 当前激活（正在播放）的视频 URL。
    * 完全由 WS 管理（ROOM_STATE / SWITCH_VIDEO），HTTP initRoom 不写这个字段。
@@ -20,6 +22,7 @@ export interface RoomState {
 
 /**
  * initRoom 只接收 HTTP 能提供的字段，不含 activeVideoUrl（HTTP 接口不返回播放 URL）。
+ * planLevel 由 HTTP getInfo 接口返回，需包含在 payload 中。
  */
 export type InitRoomPayload = Omit<RoomState, 'activeVideoUrl'>;
 

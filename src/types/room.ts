@@ -1,5 +1,7 @@
 export type ControlMode = 'designated';
 
+export type RoomPlanLevel = 'free' | 'vip:basic' | 'vip:pro';
+
 // ─── Tag ─────────────────────────────────────────────────────────────────────
 
 export interface Tag {
@@ -50,6 +52,8 @@ export interface VideoItem {
 export interface RoomInfo {
   roomId: string;
   roomName: string;
+  /** 房间当前等级：'free' = 已过期不可用 */
+  planLevel: RoomPlanLevel;
   controlMode: ControlMode;
   controllerId: string | null;
   members: Member[];

@@ -1,0 +1,26 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  text-align: center;
+  padding: 0 24px;
+}
+
+.icon {
+  font-size: 40px;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.desc {
+  font-size: 13px;
+  line-height: 1.6;
+}

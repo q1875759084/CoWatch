@@ -23,6 +23,7 @@ import PainterLayer, {
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './cursorStyles';
 import NotePanel from './NotePanel';
+import RoomExpired from './RoomExpired';
 import { CaretLeftOutlined, CaretRightOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
@@ -163,6 +164,7 @@ export default function RoomPage() {
             initRoom({
                 roomId: info.roomId,
                 roomName: info.roomName,
+                planLevel: info.planLevel,
                 // activeVideoUrl 不由 HTTP 初始化（接口不返回播放 URL），完全由 WS 管理
                 videos,
                 members: info.members,
@@ -656,6 +658,10 @@ export default function RoomPage() {
 
     if (!roomState) {
         return <LoadingSpinner fullPage text="加载房间..." />;
+    }
+
+    if (roomState.planLevel === 'free') {
+        return <RoomExpired />;
     }
 
     const isAdmin = roomState.members.find((m) => m.userId === userInfo?.userId)?.isAdmin ?? false;
