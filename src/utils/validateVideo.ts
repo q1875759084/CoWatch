@@ -7,7 +7,7 @@
  *  原始录屏（N卡 NVENC 默认 CQP 18）  ≈ 30~80 Mbps  视频流
  *  CRF 23（high）                    ≈  8~14 Mbps  视频流
  *  CRF 26（balanced）                ≈  5~ 9 Mbps  视频流
- *  CRF 28（small）                   ≈  3~ 6 Mbps  视频流  ← 当前上传要求
+ *  CRF 28（small）                   ≈  3~ 6 Mbps  视频流  ← basic 上传要求
  *  CRF 30（smaller）                 ≈  2~ 4 Mbps  视频流
  *  CRF 32（min）                     ≈  1~ 3 Mbps  视频流
  *
@@ -16,18 +16,15 @@
  * 因此实测值会略高于纯视频流码率约 0.1~0.2 Mbps，阈值已留足余量。
  * ══════════════════════════════════════════════════════════════
  *
- * 校验一：moov 索引位置
- *   经过 `-movflags +faststart` 处理的 MP4，moov box 出现在 mdat 之前。
- *   只读文件头部 32KB，扫描 box 顺序，若先遇到 mdat 则拒绝。
+ * 校验策略（按房间等级）：
  *
- * 校验二：平均码率
- *   通过临时 <video> 元素获取时长，结合文件大小计算平均码率。
- *   当前阈值：8 Mbps（对应 CRF 28 上限 6 Mbps + 音频 + 余量）
+ *   vip:basic（默认）
+ *     校验一：moov 索引位置 — moov box 必须在 mdat 之前（faststart 格式）
+ *     校验二：平均码率 ≤ 8 Mbps（对应 CRF 28 压缩要求）
  *
- * TODO: 后续根据房间等级（或用户会员等级）动态调整 MAX_BITRATE_MBPS：
- *   - 普通房间：8 Mbps（对应 CRF 28）
- *   - 高级房间：14 Mbps（对应 CRF 23）
- *   届时将 MAX_BITRATE_MBPS 改为从房间/用户配置中读取。
+ *   vip:pro
+ *     跳过 moov 和码率校验（后端负责转码，会自动添加 faststart + 重新编码）
+ *     只校验文件大小 ≤ 3 GB（防止单文件撑满磁盘/带宽）
  */
 
 export interface VideoValidateResult {
@@ -39,10 +36,13 @@ export interface VideoValidateResult {
 }
 
 /**
- * 允许的最大平均码率，单位 Mbps。
+ * basic 房间允许的最大平均码率，单位 Mbps。
  * 对应 CRF 28 压缩要求：视频流上限 6 Mbps + 音频 0.13 Mbps + 余量 ≈ 8 Mbps。
  */
 const MAX_BITRATE_MBPS = 8;
+
+/** pro 房间允许的最大文件大小：3 GB */
+const MAX_FILE_SIZE_BYTES = 3 * 1024 * 1024 * 1024;
 
 /**
  * 读取文件头部，扫描 MP4 box 顺序。
@@ -114,11 +114,34 @@ function getVideoDuration(file: File): Promise<number> {
 }
 
 /**
- * 对选中文件执行完整校验，顺序：moov 位置 → 码率。
- * @param file 用户选择的视频文件
+ * 对选中文件执行校验。策略由房间等级决定：
+ *
+ *   vip:pro  — 后端负责转码，跳过 moov 和码率校验，只限制文件大小 ≤ 3 GB
+ *   其他      — 顺序执行：moov 位置 → 平均码率 ≤ 8 Mbps
+ *
+ * @param file      用户选择的视频文件
+ * @param planLevel 当前房间等级，来自 useRoomMeta().roomMeta?.planLevel
  */
-export async function validateVideoFile(file: File): Promise<VideoValidateResult> {
-  // ── 校验一：moov 索引位置 ──────────────────────────────────────────────────
+export async function validateVideoFile(
+  file: File,
+  planLevel?: string,
+): Promise<VideoValidateResult> {
+  // ── pro 房间：后端转码，只校验文件大小 ────────────────────────────────────
+  if (planLevel === 'vip:pro') {
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      const sizGb = (file.size / 1024 / 1024 / 1024).toFixed(2);
+      return {
+        ok: false,
+        errorTitle: '文件过大',
+        errorDetail:
+          `文件大小为 ${sizGb} GB，超出单次上传限制（3 GB）。\n\n` +
+          `请将视频裁剪或拆分后再上传。`,
+      };
+    }
+    return { ok: true };
+  }
+
+  // ── basic 及以下：校验一 — moov 索引位置 ─────────────────────────────────
   const HEAD_BYTES = 32 * 1024; // 只读前 32KB
   const slice = file.slice(0, HEAD_BYTES);
   let buffer: ArrayBuffer;
@@ -137,7 +160,7 @@ export async function validateVideoFile(file: File): Promise<VideoValidateResult
     };
   }
 
-  // ── 校验二：平均码率 ───────────────────────────────────────────────────────
+  // ── basic 及以下：校验二 — 平均码率 ──────────────────────────────────────
   let duration: number;
   try {
     duration = await getVideoDuration(file);
@@ -153,7 +176,7 @@ export async function validateVideoFile(file: File): Promise<VideoValidateResult
       errorDetail:
         `检测到视频平均码率约为 ${bitrateMbps.toFixed(1)} Mbps，超出限制（${MAX_BITRATE_MBPS} Mbps）。\n\n` +
         `高码率视频会显著增加 CDN 流量消耗，影响所有成员的观看体验。\n\n` +
-        `请使用压缩工具将视频压缩至 CRF 28 或更低码率后再上传（推荐使用 CoWatch 提供的压缩脚本）。`,
+        `请使用压缩工具将视频压缩至 CRF 30 或更低码率后再上传（推荐使用 CoWatch 提供的压缩脚本）。`,
     };
   }
 

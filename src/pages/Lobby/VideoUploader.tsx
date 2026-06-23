@@ -47,8 +47,10 @@ export default function VideoUploader({ lastVideoAddedId }: VideoUploaderProps) 
     setStatus('uploading');
     setProgress(0);
 
-    // 上传前校验：moov 索引位置 + 平均码率
-    const validateResult = await validateVideoFile(file);
+    // 上传前校验：根据房间等级执行对应策略
+    //   vip:pro  → 只校验文件大小 ≤ 3 GB（后端负责转码）
+    //   其他     → moov 索引位置 + 平均码率 ≤ 8 Mbps
+    const validateResult = await validateVideoFile(file, roomMeta?.planLevel);
     if (!validateResult.ok) {
       setStatus('idle');
       if (inputRef.current) inputRef.current.value = '';
