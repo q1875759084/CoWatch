@@ -1530,6 +1530,37 @@ useRequest(fetchPerfStats, {
 
 ---
 
+### 房间等级体系：功能权限绑定房间而非用户
+
+**背景：** 引入 `vip:pro` 高级会员后，需要决定"功能限制绑在用户等级还是房间上"。
+
+**结论：** 功能权限绑定**房间等级**（`rooms.plan_level`），而非直接绑定用户等级。
+
+**原因：**
+- 若直接绑用户等级，房主会员过期后，所有受邀成员正在使用的房间会立即失效，体验差
+- 房间等级在**创建时**由房主当前最高 plan 决定（继承一次），此后独立存在
+- 房主会员过期 → 每日降级 job 检查 → 若无独立订阅来源则降级为 `free`
+
+**双轨付费架构（`room_subscriptions` 表）：**
+
+| 来源 `source` | 含义 | 受用户会员状态影响 |
+|---|---|---|
+| `user_membership` | 创建房间时由会员等级决定 | ✅ 受影响（会员过期后降级） |
+| `admin_grant` | Admin 手动赋予（永久有效） | ❌ 不受影响 |
+| `room_package` | 房间独立付费包（预留） | ❌ 不受影响 |
+
+**降级判断逻辑（每日凌晨 3:00 `jobs/roomDowngrade.ts`）：**
+1. 查所有 `plan_level != 'free'` 的房间
+2. 查 owner 当前有效 plan → 推导 `ownerMaxLevel`
+3. 若 `ownerMaxLevel < roomLevel`，再查 `room_subscriptions` 是否有 `admin_grant` 或 `room_package` 来源的有效订阅
+4. 有 → 跳过（独立来源不降级）；无 → 降级为 `free`
+
+**前后端拦截层：**
+- 后端：`requireRoomActive()` 中间件挂在操作型接口上（`plan_level=free` 时 403）；`GET /:roomId`（getInfo）**不挂**，前端需要拿到 planLevel 才能显示过期页
+- 前端：Lobby 拿到 `roomState.planLevel === 'free'` 时，渲染 `<RoomExpired />` 遮挡页，不初始化 WS 无关功能
+
+---
+
 ### SQLite → PostgreSQL 迁移注意点
 
 迁移过程中有三处需要注意：
