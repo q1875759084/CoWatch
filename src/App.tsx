@@ -1,5 +1,6 @@
 import { RouterProvider } from 'react-router-dom';
 import { UserProvider } from '@/context/UserContext';
+import { RoomMetaProvider } from '@/context/RoomMetaContext';
 import { RoomProvider } from '@/context/RoomContext';
 import router from '@/router';
 import '@/styles/index.scss';
@@ -13,17 +14,20 @@ import '@/styles/index.scss';
  *   - App.tsx 负责业务 Provider + RouterProvider（业务层）
  *
  * Provider 层次（由外到内）：
- *   UserProvider  → 用户身份（userId、昵称、roomId、isAdmin）
- *   RoomProvider  → 房间状态（成员、控制权、播放状态）
- *   RouterProvider → 路由
+ *   UserProvider     → 用户身份（userId、昵称、roomId、isAdmin）
+ *   RoomMetaProvider → 房间元信息（roomId、roomName、planLevel）
+ *   RoomProvider     → 房间业务状态（成员、控制权、播放状态、视频列表）
+ *   RouterProvider   → 路由
  */
 
 export default function App() {
   return (
     <UserProvider>
-      <RoomProvider>
-        <RouterProvider router={router} />
-      </RoomProvider>
+      <RoomMetaProvider>
+        <RoomProvider>
+          <RouterProvider router={router} />
+        </RoomProvider>
+      </RoomMetaProvider>
     </UserProvider>
   );
 }

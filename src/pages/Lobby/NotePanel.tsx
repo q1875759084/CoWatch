@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import type { ChatMessageData } from '@/types/room';
+import { useRoomMeta } from '@/context/RoomMetaContext';
 import styles from './NotePanel.module.scss';
 
 // ─── 聊天消息分组 ─────────────────────────────────────────────────────────────
@@ -32,8 +33,6 @@ interface NotePanelProps {
   content: string;
   /** 是否为主控（决定 textarea 是否可编辑） */
   isController: boolean;
-  /** 当前房间 ID（用于保存文件名） */
-  roomId: string;
   /** 主控输入时回调，父组件负责节流后广播 WS */
   onChange: (content: string) => void;
   /** 聊天消息列表（由父组件维护） */
@@ -54,12 +53,14 @@ interface NotePanelProps {
 export default function NotePanel({
   content,
   isController,
-  roomId,
   onChange,
   messages,
   currentUserId,
   onSendChat,
 }: NotePanelProps) {
+  const { roomMeta } = useRoomMeta();
+  const roomId = roomMeta?.roomId ?? '';
+
   const [noteOpen, setNoteOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);

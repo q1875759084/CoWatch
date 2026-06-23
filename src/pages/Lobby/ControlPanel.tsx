@@ -3,6 +3,7 @@ import { Modal, Switch, Tooltip } from 'antd';
 import { CopyOutlined, CheckOutlined } from '@ant-design/icons';
 import { useMemoizedFn, useRequest } from 'ahooks';
 import type { Member } from '@/types/room';
+import { useRoomMeta } from '@/context/RoomMetaContext';
 import MemberList from '@/components/MemberList';
 import CollapseSection from '@/components/CollapseSection';
 import { downloadBatApi } from '@/api/room';
@@ -158,8 +159,6 @@ export function CursorSettings({
 // ─── ControlPanel ─────────────────────────────────────────────────────────────
 
 interface ControlPanelProps {
-  roomId: string;
-  roomName: string;
   members: Member[];
   controllerId: string | null;
   /** 当前登录用户 ID，用于成员列表置顶自己 */
@@ -179,8 +178,6 @@ interface ControlPanelProps {
 }
 
 export default function ControlPanel({
-  roomId,
-  roomName,
   members,
   controllerId,
   currentUserId,
@@ -192,6 +189,10 @@ export default function ControlPanel({
   onForceSync,
   cursorSettings,
 }: ControlPanelProps) {
+  const { roomMeta } = useRoomMeta();
+  const roomId = roomMeta?.roomId ?? '';
+  const roomName = roomMeta?.roomName ?? '';
+
   const [copied, setCopied] = useState(false);
   const handleCopy = useMemoizedFn(() => {
     void navigator.clipboard.writeText(roomId).then(() => {

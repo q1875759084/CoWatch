@@ -3,13 +3,13 @@ import { Modal } from 'antd';
 import { getUploadUrlApi } from '@/api/room';
 import request, { ApiError } from '@/utils/request';
 import { validateVideoFile } from '@/utils/validateVideo';
+import { useRoomMeta } from '@/context/RoomMetaContext';
 import styles from './VideoUploader.module.scss';
 
 /** 上传状态机：idle → uploading → slicing → idle | error */
 type UploadStatus = 'idle' | 'uploading' | 'slicing' | 'error';
 
 interface VideoUploaderProps {
-  roomId: string;
   /**
    * WS VIDEO_ADDED 事件透传——由父组件（Lobby）在 useRoomWs 收到 VIDEO_ADDED 时调用。
    * 传入 videoId（uuid，每次写入 DB 唯一），用于触发状态重置，避免同名文件重复上传时 useEffect 不触发。
@@ -18,7 +18,9 @@ interface VideoUploaderProps {
   lastVideoAddedId?: string;
 }
 
-export default function VideoUploader({ roomId, lastVideoAddedId }: VideoUploaderProps) {
+export default function VideoUploader({ lastVideoAddedId }: VideoUploaderProps) {
+  const { roomMeta } = useRoomMeta();
+  const roomId = roomMeta?.roomId ?? '';
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState('');

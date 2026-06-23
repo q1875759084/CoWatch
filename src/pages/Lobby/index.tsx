@@ -4,6 +4,7 @@ import { useParams } from 'react-router-dom';
 import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
+import { useRoomMeta } from '@/context/RoomMetaContext';
 import { useRoomWs } from '@/hooks/useRoomWs';
 import { useSyncedState } from '@/hooks/useSyncedState';
 import { getRoomInfoApi, getVideosApi, getTagsApi, renameVideoApi, deleteVideoApi, updateVideoLabelsApi } from '@/api/room';
@@ -47,6 +48,7 @@ const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
 export default function RoomPage() {
     const { roomId } = useParams<{ roomId: string }>();
     const { userInfo } = useUser();
+    const { roomMeta, setRoomMeta } = useRoomMeta();
     const { roomState, initRoom, setActiveVideoUrl } = useRoom();
     /**
      * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
@@ -155,12 +157,16 @@ export default function RoomPage() {
     useEffect(() => {
         if (!roomId) return;
         getRoomInfoApi(roomId).then(async (info) => {
-            // free 房间：直接写入 state（触发 <RoomExpired /> 渲染），不请求视频列表
+            // 1. 元信息写入 RoomMetaContext（与 RoomContext 解耦，各写各的）
+            setRoomMeta({
+                roomId: info.roomId,
+                roomName: info.roomName,
+                planLevel: info.planLevel,
+            });
+
+            // free 房间：直接写入业务 state（触发 <RoomExpired /> 渲染），不请求视频列表
             if (info.planLevel === 'free') {
                 initRoom({
-                    roomId: info.roomId,
-                    roomName: info.roomName,
-                    planLevel: info.planLevel,
                     videos: [],
                     members: info.members,
                     controlMode: info.controlMode,
@@ -182,10 +188,8 @@ export default function RoomPage() {
                 createdAt: v.createdAt,
                 labels: v.labels ?? [],
             }));
+            // 2. 业务状态写入 RoomContext（不含元信息字段）
             initRoom({
-                roomId: info.roomId,
-                roomName: info.roomName,
-                planLevel: info.planLevel,
                 // activeVideoUrl 不由 HTTP 初始化（接口不返回播放 URL），完全由 WS 管理
                 videos,
                 members: info.members,
@@ -681,7 +685,7 @@ export default function RoomPage() {
         return <LoadingSpinner fullPage text="加载房间..." />;
     }
 
-    if (roomState.planLevel === 'free') {
+    if (roomMeta?.planLevel === 'free') {
         return <RoomExpired />;
     }
 
@@ -715,7 +719,6 @@ export default function RoomPage() {
                     {/* 上传区（全员可见可操作） */}
                     <CollapseSection title="上传视频" collapsible defaultOpen={false}>
                         <VideoUploader
-                            roomId={roomId!}
                             lastVideoAddedId={lastVideoAddedId}
                         />
                     </CollapseSection>
@@ -808,8 +811,6 @@ export default function RoomPage() {
                     </button>
                     <div className={`${styles.panelContent} ${panelCollapsed ? styles.panelContentHidden : ''}`}>
                     <ControlPanel
-                        roomId={roomState.roomId}
-                        roomName={roomState.roomName}
                         members={roomState.members}
                         controllerId={roomState.controllerId}
                         currentUserId={userInfo?.userId ?? ''}
@@ -844,7 +845,6 @@ export default function RoomPage() {
             <NotePanel
                 content={noteContent}
                 isController={isController}
-                roomId={roomState.roomId}
                 onChange={handleNoteChange}
                 messages={chatMessages}
                 currentUserId={userInfo?.userId ?? ''}

@@ -1,12 +1,14 @@
 import { createContext, useContext, useState, useRef, type ReactNode } from 'react';
 import { useMemoizedFn } from 'ahooks';
-import type { Member, ControlMode, VideoItem, RoomPlanLevel } from '@/types/room';
+import type { Member, ControlMode, VideoItem } from '@/types/room';
 
+// ─── 类型 ──────────────────────────────────────────────────────────────────────
+
+/**
+ * RoomState 只保存"动态业务状态"：视频列表、成员列表、控制权、播放 URL。
+ * 元信息（roomId、roomName、planLevel）由 RoomMetaContext 独立管理。
+ */
 export interface RoomState {
-  roomId: string;
-  roomName: string;
-  /** 房间当前等级：'free' = 已过期不可用，front-end guard 据此渲染过期页 */
-  planLevel: RoomPlanLevel;
   /**
    * 当前激活（正在播放）的视频 URL。
    * 完全由 WS 管理（ROOM_STATE / SWITCH_VIDEO），HTTP initRoom 不写这个字段。
@@ -21,8 +23,9 @@ export interface RoomState {
 }
 
 /**
- * initRoom 只接收 HTTP 能提供的字段，不含 activeVideoUrl（HTTP 接口不返回播放 URL）。
- * planLevel 由 HTTP getInfo 接口返回，需包含在 payload 中。
+ * initRoom 只接收动态业务字段。
+ * 元信息（roomId、roomName、planLevel）由调用方在调用 initRoom 前
+ * 单独调用 setRoomMeta 写入 RoomMetaContext，两个 Context 各自独立。
  */
 export type InitRoomPayload = Omit<RoomState, 'activeVideoUrl'>;
 
@@ -50,6 +53,8 @@ interface RoomContextValue {
   updateVideoLabels: (videoId: string, labels: string[]) => void;
 }
 
+// ─── Context ──────────────────────────────────────────────────────────────────
+
 const RoomContext = createContext<RoomContextValue>({
   roomState: null,
   initRoom: () => {},
@@ -65,6 +70,8 @@ const RoomContext = createContext<RoomContextValue>({
   removeVideo: () => {},
   updateVideoLabels: () => {},
 });
+
+// ─── Provider ─────────────────────────────────────────────────────────────────
 
 export function RoomProvider({ children }: { children: ReactNode }) {
   const [roomState, setRoomState] = useState<RoomState | null>(null);
@@ -85,7 +92,10 @@ export function RoomProvider({ children }: { children: ReactNode }) {
   const pendingOnlineStatusRef = useRef<Pick<Member, 'userId' | 'isOnline'>[] | null>(null);
 
   /**
-   * initRoom：仅由 HTTP 初始化调用，只写 HTTP 能提供的字段。
+   * initRoom：仅由 HTTP 初始化调用，只写动态业务状态。
+   * 元信息（roomId、roomName、planLevel）由调用方单独写入 RoomMetaContext，
+   * 两个 Context 完全解耦，RoomProvider 不感知 RoomMetaContext 的存在。
+   *
    * activeVideoUrl 取值优先级：
    *   1. prev.activeVideoUrl（WS 的函数式更新已执行时）
    *   2. pendingActiveVideoUrlRef（WS 存入 pending 但其 setState 还未执行时）
@@ -254,6 +264,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
     </RoomContext.Provider>
   );
 }
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useRoom() {
   return useContext(RoomContext);
