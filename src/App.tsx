@@ -1,7 +1,6 @@
 import { RouterProvider } from 'react-router-dom';
 import { UserProvider } from '@/context/UserContext';
 import { RoomMetaProvider } from '@/context/RoomMetaContext';
-import { RoomProvider } from '@/context/RoomContext';
 import router from '@/router';
 import '@/styles/index.scss';
 
@@ -17,6 +16,7 @@ import '@/styles/index.scss';
  *   UserProvider     → 用户身份（userId、昵称、roomId、isAdmin）
  *   RoomMetaProvider → 房间元信息（roomId、roomName、planLevel）
  *   RoomProvider     → 房间业务状态（成员、控制权、播放状态、视频列表）
+ *                      （下沉至 RoomGuard，key={roomId}，房间级生命周期）
  *   RouterProvider   → 路由
  */
 
@@ -24,9 +24,7 @@ export default function App() {
   return (
     <UserProvider>
       <RoomMetaProvider>
-        <RoomProvider>
           <RouterProvider router={router} />
-        </RoomProvider>
       </RoomMetaProvider>
     </UserProvider>
   );

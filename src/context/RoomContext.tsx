@@ -96,15 +96,12 @@ export function RoomProvider({ children }: { children: ReactNode }) {
    * 元信息（roomId、roomName、planLevel）由调用方单独写入 RoomMetaContext，
    * 两个 Context 完全解耦，RoomProvider 不感知 RoomMetaContext 的存在。
    *
-   * activeVideoUrl 取值优先级（仅针对"本次 initRoom 对应的房间"内的并发）：
-   *   1. pendingActiveVideoUrlRef（WS 比 HTTP 先到，存入 pending 但 setState 还未执行）
-   *   2. null（房间当前没有激活视频）
+   * activeVideoUrl 取值：
+   *   - pendingActiveVideoUrlRef 有值（WS 比 HTTP 先到）→ 使用 pending URL
+   *   - 否则 → null
    *
-   * 注意：不再读取 prev?.activeVideoUrl。
-   * RoomProvider 不随路由切换而卸载，prev 保留的是上一个房间的状态，
-   * 若用 prev.activeVideoUrl 作为 fallback，切换房间后会展示旧房间的视频。
-   * WS 比 HTTP 先到时，setActiveVideoUrl 会将 URL 存入 pendingActiveVideoUrlRef
-   * 而非直接写 prev（prev 为 null 时的分支），故此处读 pendingUrl 而非 prev 即可正确处理。
+   * RoomProvider 由 RoomGuard 以 key={roomId} 渲染，切换房间时完全重建，
+   * 每次调用 initRoom 时 roomState 必然是全新实例的初始 null，无跨房间污染问题。
    */
   const initRoom = useMemoizedFn((payload: InitRoomPayload) => {
     const pendingUrl = pendingActiveVideoUrlRef.current;
@@ -120,8 +117,6 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       : payload.members;
 
     setRoomState({
-      // 切换房间时 prev 保留旧房间数据，不能用 prev.activeVideoUrl 作 fallback。
-      // 只消费本轮 pending（WS 比 HTTP 先到场景），其余情况重置为 null。
       activeVideoUrl: pendingUrl ?? null,
       ...payload,
       members,
