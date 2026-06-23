@@ -990,6 +990,25 @@ req → 写入 /tmp/cowatch-{uuid}.mp4（本地磁盘 I/O）
 
 **注意：** 本地模式（无 COS 配置）直接写 `uploads/{objectKey}`，ffmpeg 从同一本地目录读，切片后 .ts 文件 rename 到 `uploads/{hlsPrefix}/`，无临时文件开销。
 
+**pro 房间转码路径（2026-06-23 新增）：**
+
+pro 房间支持前端直传原始视频（跳过码率/moov 校验），后端在切片前先用 libx264 重新编码，参数与 `compress_30.bat` 对齐：
+
+```
+-c:v libx264 -crf 30 -preset veryfast -pix_fmt yuv420p
+-c:a aac -b:a 128k -movflags +faststart
+-g 300 -keyint_min 300 -sc_threshold 0
+```
+
+- `-pix_fmt yuv420p`：兼容 10bit 源文件（N卡 NVENC 默认输出 10bit）
+- `-g 300 -keyint_min 300 -sc_threshold 0`：固定 GOP 保证 HLS 切片对齐关键帧，避免 seek 花屏
+- 转码任务走**串行队列**（Promise 链），同一时刻只有一个转码任务运行；`-c copy` 切片不走队列，仍并发执行
+
+**资源约束（服务器：4 核，3.6GB 内存，/tmp 在根分区剩余 18GB）：**
+- **内存**：ffmpeg 流式处理，实际占用约数十~几百 MB，与文件大小无关，不会 OOM
+- **CPU**：libx264 veryfast 单任务约占 1-2 核，串行队列保护
+- **磁盘**：排队任务的原始文件在 /tmp 堆积（最大 3GB/个），任务完成后立即清理；当前 18GB 余量支持约 5 个排队任务
+
 ---
 
 ### .bat 压缩脚本分发设计
@@ -1558,6 +1577,44 @@ useRequest(fetchPerfStats, {
 **前后端拦截层：**
 - 后端：`requireRoomActive()` 中间件挂在操作型接口上（`plan_level=free` 时 403）；`GET /:roomId`（getInfo）**不挂**，前端需要拿到 planLevel 才能显示过期页
 - 前端：Lobby 拿到 `roomState.planLevel === 'free'` 时，渲染 `<RoomExpired />` 遮挡页，不初始化 WS 无关功能
+
+---
+
+### req.pipe(writeStream) 不会在客户端断开时自动关闭 writeStream
+
+**现象：** 用户上传视频中途刷新浏览器，TCP 断开，但 `writeStream` 永远不会触发 `finish` 或 `error` 事件。文件句柄泄漏，`/tmp` 下残留不完整的临时文件，且永远不被清理。
+
+**原因：** Node.js `req.pipe(writeStream)` 在 readable stream（req）关闭时，默认行为是 **不自动销毁** writable stream（writeStream）。`finish` 事件只在 writable 正常写完时触发，`error` 只在写入出错时触发；客户端断开属于 readable 侧的事件，writable 侧无感知。
+
+**解决：** 监听 `req` 的 `'close'` 事件，判断 `res.headersSent`（区分「正常完成后关闭」和「中途断开」）：
+
+```ts
+req.on('close', () => {
+  if (res.headersSent) return; // 已正常响应，忽略
+  writeStream.destroy();
+  fs.rm(tmpFile, { force: true }, () => {});
+});
+```
+
+**适用场景：** 所有用 `req.pipe(writeStream)` 接收文件流的接口（`proxyUpload`、`uploadLocal`）。
+
+---
+
+### Provider 洋葱圈：内层不得依赖外层
+
+**背景：** `RoomContext` 的 `initRoom` 需要同时写入 `RoomMetaContext`（外层）和 `RoomContext`（内层），最初实现为在 `RoomProvider` 内部调用 `useRoomMeta()`，造成内层 Context 引用外层。
+
+**问题：** 违反洋葱圈独立原则——内层 Provider 依赖外层 Context，Provider 间产生隐式耦合，测试和复用都困难。
+
+**解决：** 将联动职责上移到调用方（Lobby），两个 Context 各自只管自己的数据：
+
+```ts
+// Lobby 中
+setRoomMeta({ roomId, roomName, planLevel }); // 写外层
+initRoom({ videos, members, controlMode, controllerId }); // 写内层
+```
+
+**通用原则：** 两个 Context 需要联动时，由调用方在同一处理函数中分别调用各自的 setter，而非在 Provider 内部相互 `useContext`。Provider 应当对其他 Context 一无所知。
 
 ---
 

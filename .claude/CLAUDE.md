@@ -53,9 +53,10 @@
 - `__dirname` 在 `tsx` 直接运行时指向源文件目录（`src/`），路径层级与编译后运行不同，写静态文件路径时需注意
 - WebSocket 消息类型定义在 `src/types/room.ts`，增加新消息类型时前后端同步更新；当前已有类型含 `DRAW_STROKE`（笔迹广播，含 `userId`、`color`、`points[]`）和 `DRAW_CLEAR`（清空画布），后端纯内存转发不落库
 - 数据库使用 **PostgreSQL**（postgres.js），schema 变更通过 `migrations/*.sql` 版本化管理（`schema_migrations` 表记录已执行版本），服务启动时 `runMigrations()` 自动幂等执行；新列使用 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`；DB 层默认为 NULL，service 层统一做 fallback（如 `avatar_url ?? DEFAULT_AVATAR_URL`）；postgres.js `BIGINT` 列默认返回 JS `string`，连接池初始化时配置 `types.bigint` 自定义 parser 统一转为 number
-- 视频上传前在前端做两层校验（`src/utils/validateVideo.ts`）：① 读文件头 32KB 扫描 moov/mdat 顺序（moov 必须在 mdat 之前）；② 用临时 `<video>` 获取时长后计算平均码率（当前上限 8 Mbps，对应 CRF 28）；失败时用 antd `Modal.error()` 弹窗告知用户
-- 视频上传链路按白名单分流：白名单用户（`users.is_upload_whitelist = 1`）走 OSS 直传（`getUploadUrl` 返回预签名 URL，`mode` 为空）；非白名单用户走后端代理中转（返回 `mode: 'proxy'`，前端 POST 到 `/upload-proxy`，后端流式 putStream 到 OSS）
-- 后端 `uploadGuard` 中间件挂载在 `POST /upload-proxy` 上（非白名单用户上传路径）：校验 Sec-Fetch 请求头 + 每日中转总字节数上限 5GB（`Content-Length` 预检 + 真实写入后 `addDailyBytes` 计费）；白名单用户不经过此中间件；OSS 服务端的 `content-length-range` Policy 待接入 COS 时对白名单直传启用
+- 视频上传前端校验（`src/utils/validateVideo.ts`）按**房间等级**区分策略：`vip:basic` — ① 读文件头 32KB 扫描 moov/mdat 顺序（moov 必须在 mdat 之前）；② 平均码率 ≤ 8 Mbps（CRF 28）；`vip:pro` — 跳过以上两项，只校验文件大小 ≤ 3 GB（后端负责转码）；失败时用 antd `Modal.error()` 弹窗告知用户
+- 视频上传链路：所有用户统一走后端代理中转（`getUploadUrl` 返回 `mode: 'proxy'`，前端 POST 到后端，后端流式 putStream 到 COS）；本地开发环境返回 `mode: 'local'`，文件直接落盘到 `/uploads`；白名单直传分支（`is_upload_whitelist`）已废弃
+- 后端 `uploadGuard` 中间件挂载在上传路由上：校验 Sec-Fetch 请求头 + 每日中转总字节数上限 5GB（`Content-Length` 预检 + 真实写入后 `addDailyBytes` 计费）
+- **req.pipe 踩坑**：`req.pipe(writeStream)` 在客户端中途断开时不会自动销毁 writeStream，需显式监听 `req.on('close')` 判断 `res.headersSent`，手动 `writeStream.destroy()` + 清理临时文件，防止文件句柄泄漏和 `/tmp` 残留
 - `.bat` 压缩脚本：当前仅开放 `compress_30.bat`（CRF 30），`BatController` 的 `VALID_PRESETS` 仅含 `'30'`，扩展时在数组和 `src/assets/bat/` 目录同步新增对应文件；ffmpeg 下载至 `%LOCALAPPDATA%\CoWatch\ffmpeg-bin\`（与 `.bat` 存放位置无关，用户移动脚本不会触发重复下载）
 - multer 文件上传路由中，`upload.single()` 之后必须挂载专用 4 参数错误中间件（`err, req, res, next`）拦截 `MulterError`（超大文件等）并返回 400；否则会被全局 errorHandler 当成 500 处理。后续内联箭头函数需显式标注 `(req: Request, res: Response)`，否则 TypeScript 推断链断裂报 `implicit any`
 - **RoomGuard 只做轻守卫**：仅校验用户身份（`userInfo`）和 `roomId` 是否存在，不调用任何业务接口（不调 getInfo、不调 initRoom、不写 RoomContext）；房间信息加载、planLevel 判断、过期页渲染等业务逻辑均由 Lobby 内部处理。原则：守卫层不知道业务，业务层不依赖守卫的副作用。
