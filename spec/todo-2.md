@@ -61,7 +61,6 @@
 
 ### 后端
 
-- **COS Policy `content-length-range`**：白名单用户 `getUploadUrl` 中启用，单文件上限 4GB（`ossService.ts`）
 - **视频码率阈值动态化**：当前硬编码 8 Mbps（CRF 28），后续根据房间/会员等级动态调整（14 Mbps 对应 CRF 23）
 
 ### 前端

@@ -59,14 +59,14 @@ ctx.restore();
 
 ---
 
-### OSS 预签名直传的安全边界与上传防护设计
+### 预签名直传安全边界与上传防护设计
 
-**背景：** 采用 OSS 预签名直传后，文件完全绕过后端，后端在上传过程中对文件内容一无所知，无法在服务端校验文件大小、码率等。需要明确各种防护手段的有效边界。
+**背景：** 采用 COS 预签名直传后，文件完全绕过后端，后端在上传过程中对文件内容一无所知，无法在服务端校验文件大小、码率等。需要明确各种防护手段的有效边界。
 
-**OSS 直传链路（关键认知）：**
+**COS 直传链路（关键认知）：**
 ```
 ① GET /api/rooms/:roomId/upload-url  → 后端生成预签名 URL 返回前端（后端不知道文件大小）
-② PUT https://oss.xxx.com/...        → 前端直接上传到 OSS，完全绕过后端
+② PUT https://cos.xxx.com/...        → 前端直接上传到 COS，完全绕过后端
 ③ PUT /api/rooms/:roomId/video       → 前端通知后端 confirm，只传 videoUrl 字符串
 ```
 后端在整个过程中看不到文件，只能在 ① 和 ③ 两个节点做控制。
@@ -80,51 +80,23 @@ ctx.restore();
 | 文件切片 + 时长上报 | ❌ 不可靠 | 同样来自客户端，可任意伪造 |
 | Sec-Fetch 请求头校验 | ⚠️ 增加成本 | 浏览器自动注入且 JS 无法修改，脚本默认不带；但 Postman/Python 可手动添加 |
 | userId 每日调用次数限制 | ✅ 有效（次数维度） | 后端内存计数，可靠；但无法限制单文件大小 |
-| OSS Policy `content-length-range` | ✅ 最可靠 | OSS 服务端强制执行，客户端无法绕过，切换 COS 时启用 |
+| COS Policy `content-length-range` | ✅ 最可靠 | COS 服务端强制执行，客户端无法绕过 |
 | 前端码率校验 | ✅ 覆盖误操作 | 挡住正常用户，定位是"用户教育"而非安全边界 |
-
-**~~当前落地方案（已废弃，见下方「最终落地方案」）~~**
-
-~~挂载在 `GET /upload-url` 上，三层校验：~~
-1. ~~**Sec-Fetch 请求头校验**：两个头都不存在则拒绝~~
-2. ~~**userId 每日调用 `upload-url` 次数限制**：默认 10 次，内存 Map 按日重置~~
-3. ~~**白名单豁免**：`users.is_upload_whitelist = 1` 的用户不受次数限制~~
-
-> **废弃原因：** 次数限制防不住"每次上传小文件"的绕过方式，攻击者可以在 10 次配额内反复上传占满 OSS；同时 `upload-url` 节点后端看不到文件，无法感知真实流量。改为分流架构（见下方）。
-
----
 
 **最终落地方案（`middleware/uploadGuard.ts` + `controller/proxyUpload`）：**
 
-**上传链路按白名单分流：**
-
-| 用户类型 | 上传路径 | 说明 |
-|---------|---------|------|
-| 白名单用户（`is_upload_whitelist = 1`） | COS 直传 | `getUploadUrl` 返回 OSS 预签名 URL，前端直接 PUT，不经后端，`mode` 为空 |
-| 非白名单用户 | 后端代理中转 | `getUploadUrl` 返回 `mode: 'proxy'`，前端 POST 到 `/upload-proxy`，后端流式转发到 OSS |
+所有用户统一走后端代理中转（COS 模式返回 `mode: 'proxy'`，本地模式返回 `mode: 'local'`），不再有直传分支。
 
 **`uploadGuard` 中间件（挂载在 `POST /:roomId/upload-proxy`）：**
 1. **Sec-Fetch 请求头校验**：两个头都不存在则拒绝（增加脚本伪造成本）
 2. **每日中转总字节数预检**：用 `Content-Length` 做快速判断，超过 5GB 则拒绝
-3. **实际计费**：文件真实写入 OSS 完成后，通过 `addDailyBytes(userId, realBytes)` 计入当日用量（防止恶意请求用声明大小占用配额）
+3. **实际计费**：文件真实写入 COS 完成后，通过 `addDailyBytes(userId, realBytes)` 计入当日用量（防止恶意请求用声明大小占用配额）
 
 **代理上传流程（零临时文件）：**
 ```
 ① GET /upload-url → 后端返回 { mode: 'proxy', uploadUrl: '/upload-proxy?objectKey=...&fileType=...&fileName=...' }
-② POST /upload-proxy → uploadGuard 预检 → req 可读流直接 putStream 到 OSS → 完成后 addDailyBytes + 写库广播
+② POST /upload-proxy → uploadGuard 预检 → req 可读流直接 putStream 到 COS → 完成后 addDailyBytes + 写库广播
 ```
-
-**白名单操作（无需重启服务，直接改数据库即时生效）：**
-```sql
--- 旧数据库迁移（新建数据库无需执行）
-ALTER TABLE users ADD COLUMN is_upload_whitelist INTEGER NOT NULL DEFAULT 0;
-
--- 设置白名单
-UPDATE users SET is_upload_whitelist = 1 WHERE username = '目标用户名';
-```
-
-**TODO（接入腾讯云 COS 时）：**
-- 白名单用户的 `getUploadUrl` 中启用 Policy `content-length-range`，单文件上限 4GB（1小时 × 8Mbps ÷ 8）
 
 ---
 
@@ -805,17 +777,6 @@ ffmpeg -i input.mp4 -c copy -movflags +faststart output.mp4
 
 ---
 
-### XHR 绕过 axios 拦截器导致上传 401
-
-**现象：** 视频文件上传接口返回 401，getUploadUrl 接口却正常（200）。
-
-**根因：** `VideoUploader` 使用原生 `XMLHttpRequest` 直接 PUT 文件到后端，完全绕过了 axios 请求拦截器，导致 `Authorization: Bearer <token>` 头没有被自动注入。
-
-**解决：** 改用封装的 `request`（axios 实例）调用 `request.put(url, file, { onUploadProgress })`，进度回调用 `onUploadProgress` 替代 `xhr.upload.onprogress`，token 由拦截器自动注入，无感刷新也正常触发。
-
-**补充：** OSS 预签名直传例外——OSS 通过 URL query 参数鉴权，加上自定义 `Authorization` 头反而会报错，这种场景继续用 XHR。
-
----
 
 ### Express 静态文件目录与 tsx 直接运行时 `__dirname` 不一致导致视频 404
 
@@ -839,45 +800,19 @@ const uploadsDir = path.resolve(__dirname, '../uploads');
 
 ---
 
-### SQLite 新增字段后旧数据库文件报 500
+### 数据库迁移中哪些操作需要幂等
 
-**现象：** 后端代码新增了 SQL 查询列（如 `r.name AS room_name`），服务重启后 `/api/rooms/my` 等接口返回 500。
+使用 SQLite 期间曾遇到两类问题，根源相同：某些 schema 操作在重复执行时会报错，导致服务启动失败。
 
-**根因：** `CREATE TABLE IF NOT EXISTS` 只在表不存在时建表，**不会修改已存在表的结构**。旧数据库文件里 `rooms` 表没有 `name` 列，查询时 SQLite 抛出列不存在的异常。
+**需要幂等处理的典型场景：**
 
-**解决：** 手动对旧数据库文件执行 `ALTER TABLE` 补列：
-```bash
-sqlite3 database/cowatch.sqlite3 "ALTER TABLE rooms ADD COLUMN name TEXT NOT NULL DEFAULT '';"
-```
+| 操作 | 非幂等的错误 | 幂等写法 |
+|------|------------|--------|
+| 新增列 | `ALTER TABLE` 重复执行报"column already exists" | try/catch 捕获同名错误，或迁移版本号标记 |
+| 删除外键约束 | 重复执行（如重建表）会因表已存在而失败 | `PRAGMA foreign_key_list` 检测有无约束再决定是否执行 |
+| 插入种子数据 | 重复插入主键冲突 | `INSERT ... ON CONFLICT DO NOTHING` |
 
-**规律：** 每次 schema 有字段变更，都需要对已有数据库文件单独跑迁移语句。生产环境应使用迁移工具（如 `better-sqlite3-migrate`、`flyway`）管理版本化 schema 变更，避免手动操作遗漏。
-
-**已落地改进（`runMigrations()` 幂等机制）：**
-
-`initSchema()` 末尾调用 `runMigrations()`，用 try/catch "duplicate column name" 实现幂等 ALTER TABLE：
-
-```ts
-function runMigrations(): void {
-  const migrations = [
-    { sql: 'ALTER TABLE users ADD COLUMN is_upload_whitelist INTEGER NOT NULL DEFAULT 0', desc: 'users.is_upload_whitelist' },
-    { sql: 'ALTER TABLE room_videos ADD COLUMN hls_prefix TEXT', desc: 'room_videos.hls_prefix' },
-    // 新增字段时在此处追加一条即可
-  ];
-  for (const { sql, desc } of migrations) {
-    try {
-      db.prepare(sql).run();
-    } catch (err) {
-      if ((err as Error).message?.includes('duplicate column name')) {
-        // 列已存在，跳过（幂等）
-      } else {
-        throw err; // 其他错误（语法错误等）需要暴露
-      }
-    }
-  }
-}
-```
-
-**规则：** 每次新增字段时，在 `CREATE TABLE IF NOT EXISTS` 里加好完整定义（新建库直接建全），同时在 `runMigrations()` 里追加对应的 `ALTER TABLE`（旧库自动补列）。两处保持同步，互不遗漏。
+现已迁移至 PostgreSQL，改用 `migrations/*.sql` 版本化管理。每个迁移文件只执行一次，由迁移工具记录版本，天然幂等，不再需要手动 try/catch。
 
 ---
 
@@ -1530,7 +1465,7 @@ daibao 与 cowatch 是独立 Compose 网格，不共享内部 DNS，容器间无
 
 **后端 URL 注入方式（envsubst）：** `nginx.conf` 用 `${COWATCH_BACKEND_URL}` 占位，镜像启动时 `envsubst` 将 Docker Compose `environment` 变量替换为实际 URL，无需重新构建镜像即可切换生产/测试指向。
 
-**当前耦合的临时性：** daibao 借用 cowatch 的 8000 端口是因为 SQLite 进程绑定导致无法独立 admin-backend。未来第二个子产品上线时，改为独立 admin-backend 聚合层，daibao 只需修改 `COWATCH_BACKEND_URL` 环境变量，nginx.conf 和对外端口（6000/6001）不变。
+**当前耦合的临时性：** daibao 借用 cowatch 的 8000 端口，尚未拆分独立 admin-backend。未来第二个子产品上线时，改为独立 admin-backend 聚合层，daibao 只需修改 `COWATCH_BACKEND_URL` 环境变量，nginx.conf 和对外端口（6000/6001）不变。
 
 ---
 
@@ -1579,64 +1514,29 @@ useRequest(fetchPerfStats, {
 
 ---
 
-### 日志型表不设外键（以 segment_views 为例）
+### 日志型表不设外键
 
-**背景/踩坑：** `segment_views.video_id` 原本有 `FOREIGN KEY REFERENCES room_videos(id)`。删除视频时后端报 `SQLITE_CONSTRAINT_FOREIGNKEY`（500），日志指向 `deleteRoomVideo`。根因是删视频前未清理 `segment_views` 子记录，而直接清理又会导致流量历史数据丢失，无法回溯统计。
-
-**决策：移除 segment_views 的外键约束。**
-
-SQLite 不支持 `DROP CONSTRAINT`，通过"创建无外键新表 → 复制数据 → 删旧表 → 重命名"完成迁移，并在 `initSchema` 中加幂等迁移函数（`PRAGMA foreign_key_list` 检测有无外键，已迁移则跳过）。
+`segment_views.video_id` 曾设有外键，导致删除视频时因子记录未清理而报约束错误；直接级联删又会丢失流量历史数据。最终决策：移除外键。
 
 **外键的三个作用，对日志表都不适用：**
 
 | 作用 | 业务主数据（适用） | 日志/埋点表（不适用） |
 |------|------|------|
-| 引用完整性（插入时拒绝孤立记录） | room_members 不能引用不存在的 user | 流量已真实发生，视频删除不影响这个事实 |
+| 引用完整性（插入时拒绝孤立记录） | `room_members` 不能引用不存在的 user | 流量已真实发生，视频删除不影响这个事实 |
 | 级联操作（父表删除时处理子表） | 适合"父删子必无意义"的强关联 | 父删后日志应保留，级联删破坏统计回溯 |
-| 查询优化提示 | 有效 | SQLite 优化器弱，实际无效 |
+| 查询优化提示 | 有效 | 实际收益有限 |
 
 **通用原则：** 流量日志、操作记录、埋点等表，`*_id` 字段只是分组 key，不设外键。外键适合业务主数据之间的强关联（如 `room_members → users/rooms`）。
 
 ---
 
-### SQLite → PostgreSQL 迁移：字段名/类型变化导致的不兼容
+### SQLite → PostgreSQL 迁移注意点
 
-**本质根因：** SQLite 是弱类型 + 动态列名（`AS` 别名直接命名结果集），postgres.js 是强类型 + 精确返回 PG 原生类型。迁移后两处默认行为改变，需要统一处理。
+迁移过程中有三处需要注意：
 
-**问题一：`BIGINT` 列返回 `string` 而非 `number`**
-
-- **现象：** PG 迁移后 API 响应中时间戳字段变成字符串（如 `"1782095216984"`），前端类型校验失败或计算出错。
-- **根因：** postgres.js 对 `BIGINT`（OID 20）默认返回 JS `string`，防止超 2^53 的 64-bit 整数精度丢失。
-- **解决：** 在连接池初始化时配置自定义 type parser，一次性全局生效：
-  ```ts
-  const sql = postgres(DATABASE_URL, {
-    types: {
-      bigint: {
-        to: 20, from: [20],
-        parse: (x: string) => Number(x),   // 时间戳均 < 2^53，安全转换
-        serialize: (x: number) => String(x),
-      },
-    },
-  });
-  ```
-
-**问题二：API 字段名变化导致前端崩溃**
-
-- **现象：** `/rooms/my` 接口原来返回 `{room_id, room_name}`（SQLite 查询用了 `AS` 别名），迁移后直接返回原始列名 `{id, name}`，前端 `room.room_name.slice()` 报 `Cannot read properties of undefined`。
-- **根因：** 早期 SQLite 层用 `SELECT r.id AS room_id, r.name AS room_name` 做了字段重命名，迁移到 PG 时丢失了这些别名。
-- **解决：** 在 controller 层做字段映射，保持 API 契约不变；DB 层保留原始列名，映射逻辑集中在 controller 的 `.map()` 中：
-  ```ts
-  const rooms = rows.map((r) => ({
-    room_id: r.id,
-    room_name: r.name,
-    // ...
-  }));
-  ```
-
-**问题三：sqlite3 导出 NULL 为空字符串导致 `\COPY` 失败**
-
-- **现象：** 数据迁移时 `user_subscriptions.expires_at`（BIGINT 可空）为 NULL，sqlite3 以 `-separator $'\t'` 模式导出时变成空字符串，psql `\COPY` 报 `invalid input syntax for type bigint: ""`。
-- **解决：** sqlite3 查询时显式转换：`COALESCE(CAST(expires_at AS TEXT), '\N')`，psql 配合 `\COPY ... FROM STDIN NULL AS '\N'`。
+1. **`BIGINT` 类型**：postgres.js 默认将 `BIGINT` 列以 JS `string` 返回（防精度丢失），需在连接池初始化时配置 type parser 统一转为 `number`。
+2. **API 字段名**：SQLite 层习惯用 `AS` 别名重命名结果列，迁移后 PG 返回原始列名，需在 controller 层显式做字段映射以保持 API 契约不变。
+3. **NULL 数据导出**：sqlite3 导出时 NULL 变为空字符串，psql `\COPY` 会报类型错误，需用 `COALESCE(..., '\N')` + `NULL AS '\N'` 显式标记。
 
 ---
 

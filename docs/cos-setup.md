@@ -47,24 +47,9 @@ COS_SECRET_KEY=<腾讯云 API 密钥 SecretKey>
 
 ## 文件上传完整链路
 
-### 白名单用户（COS 直传）
+### COS 模式（后端代理中转）
 
-```
-① GET /api/rooms/:roomId/upload-url
-    后端生成 COS 预签名 PUT URL（有效期 15 分钟）
-    返回：{ uploadUrl: "https://cos.../cowatch/.../file.mp4?q-sign-...", videoUrl: "...", fileName: "..." }
-
-② PUT <uploadUrl>（浏览器直接发给 COS）
-    Content-Type: video/mp4
-    Body: 视频文件二进制流
-    不经过后端，带宽完全在浏览器 ↔ COS 之间
-
-③ PUT /api/rooms/:roomId/video
-    通知后端上传完成，传 videoUrl + fileName
-    后端写入 room_videos 表，广播 VIDEO_ADDED 给房间所有成员
-```
-
-### 非白名单用户（后端代理中转）
+所有用户统一走后端代理，后端负责 ffmpeg HLS 切片后再上传到 COS。
 
 ```
 ① GET /api/rooms/:roomId/upload-url
@@ -72,8 +57,8 @@ COS_SECRET_KEY=<腾讯云 API 密钥 SecretKey>
 
 ② POST /api/rooms/:roomId/upload-proxy（浏览器 → 后端）
     uploadGuard 中间件预检：Sec-Fetch 请求头 + 每日流量限制（5GB）
-    后端将 req 可读流直接 putObject 到 COS（零临时文件）
-    上传完成后：addDailyBytes 计费 + 写入 room_videos + 广播 VIDEO_ADDED
+    后端先落临时文件，触发 ffmpeg -c copy HLS 切片
+    切片完成后上传 .ts 片段到 COS，广播 VIDEO_ADDED
 ```
 
 ### 本地开发模式（不配置 COS 变量时）
@@ -83,25 +68,7 @@ COS_SECRET_KEY=<腾讯云 API 密钥 SecretKey>
     isOssEnabled() = false，返回：{ uploadUrl: "/api/rooms/:roomId/upload?...", mode: "local" }
 
 ② PUT /api/rooms/:roomId/upload
-    文件流写入本地 uploads/:roomId/ 目录
-    videoUrl = /uploads/:roomId/xxx.mp4（Express 静态文件服务）
-```
-
----
-
-## 白名单管理
-
-新注册用户默认 `is_upload_whitelist = 0`（走代理中转）。
-
-```bash
-# 迁移旧数据库（新建数据库无需执行，schema 已包含该字段）
-sqlite3 database/cowatch.sqlite3 "ALTER TABLE users ADD COLUMN is_upload_whitelist INTEGER NOT NULL DEFAULT 0;"
-
-# 设置白名单（改动立即生效，无需重启后端）
-sqlite3 database/cowatch.sqlite3 "UPDATE users SET is_upload_whitelist = 1 WHERE username = '目标用户名';"
-
-# 查看所有用户白名单状态
-sqlite3 database/cowatch.sqlite3 "SELECT username, is_upload_whitelist FROM users;"
+    文件流写入本地 uploads/:roomId/ 目录，触发本地 HLS 切片
 ```
 
 ---
@@ -135,4 +102,3 @@ getVideoUrl(objectKey): string
 ## 待办
 
 - [ ] 接入腾讯云 CDN，将 `COS_BASE_URL` 设置为 CDN 域名
-- [ ] 白名单用户 `getUploadUrl` 启用 COS Policy `content-length-range`，单文件上限 4GB

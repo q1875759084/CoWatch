@@ -8,7 +8,7 @@
 
 ### 后端（CoWatch-backend）
 
-- `src/database/schema.ts` — 新增 `user_subscriptions`、`invite_codes` 表；`runMigrations` 废弃 `is_upload_whitelist`
+- `src/database/schema.ts` — 新增 `user_subscriptions`、`invite_codes` 表
 - `src/database/subscription/index.ts` — 🆕 订阅查询层
 - `src/database/inviteCode/index.ts` — 🆕 邀请码操作层
 - `src/database/user/index.ts` — 清空 `PRESET_USERS`，删除 `seedDefaultUsers`
@@ -58,7 +58,6 @@ CREATE TABLE invite_codes (
 
 ### users 表变更
 
-- `is_upload_whitelist` 列**保留但停止读写**（旧数据兼容）
 - 不新增任何列（用户身份通过 `user_subscriptions` 判断）
 
 ### Plan 命名规范
@@ -239,7 +238,6 @@ interface UserContextValue {
 | 权益存储结构 | 独立 `user_subscriptions` 表 | 支持多套餐叠加、独立到期时间，横向扩展零成本 |
 | 预置账号 | 完全删除，所有账号均通过注册创建 | 逻辑统一，会员身份由会员码决定 |
 | 会员开通方式 | `grant_plan` 非空的邀请码，注册后自动写订阅 | 与普通注册流程统一，无需额外接口 |
-| `is_upload_whitelist` | 保留列但停止读写，改查订阅表 | 兼容旧数据，不做破坏性迁移 |
 | Plan 命名规范 | `{domain}:{tier}`，如 `vip:basic` | 可读性强，支持前缀查询 |
 | 建房权限控制 | `requirePlan('vip:basic')` 中间件，路由层注入 | 易复用，后续新增权益点只加一行 |
 | 前端感知身份 | `plans` 随 profile 返回，`hasPlan()` 封装 | UI 禁用 + 转化提示，后端作最终防线 |
