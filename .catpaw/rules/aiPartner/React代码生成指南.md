@@ -41,7 +41,7 @@ function Parent() {
 ## Hooks 使用规范
 
 - 用 `useMemoizedFn`（ahooks）替代 `useCallback`，避免依赖数组遗漏问题
-- 用 `useRequest`（ahooks）替代手写 `useEffect` 请求逻辑
+- 用 `useRequest`（ahooks）替代手写 `useEffect` 请求逻辑；以下情况保留 `useEffect` 是合理例外：多个请求之间存在**业务依赖关系**（第一个请求的结果决定是否发起第二个），此时用 `useRequest` + `ready/refreshDeps` 拼接反而逻辑分散，语义不如 `async/await` 串行清晰
 - `useEffect` 避免将导航对象直接放入依赖数组
 - 不可以通过 `||` 或者 `??` 来设置非基本类型（对象、数组、函数）的默认值
 

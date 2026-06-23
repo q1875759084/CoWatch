@@ -143,13 +143,34 @@ export default function RoomPage() {
     });
 
 
-    // 初始化房间状态 + 视频列表
+    // 初始化房间状态 + 视频列表（串行）
+    //
+    // 串行原因：getInfo 返回的 planLevel 是前置条件。
+    //   - free 房间：getInfo 后直接 initRoom（触发过期页渲染），不发 getVideos
+    //   - 非 free 房间：getInfo 成功后再发 getVideos
+    // 若用 Promise.all 并行，free 房间的 getVideos 必然 403，
+    // 导致 Promise.all 整体 reject，initRoom 不被调用，页面停留在上一个房间的旧 state。
+    //
+    // 注意：此处有依赖关系的串行请求不适合用 useRequest，保留 useEffect 是合理例外。
     useEffect(() => {
         if (!roomId) return;
-        Promise.all([
-            getRoomInfoApi(roomId),
-            getVideosApi(roomId),
-        ]).then(([info, videosData]) => {
+        getRoomInfoApi(roomId).then(async (info) => {
+            // free 房间：直接写入 state（触发 <RoomExpired /> 渲染），不请求视频列表
+            if (info.planLevel === 'free') {
+                initRoom({
+                    roomId: info.roomId,
+                    roomName: info.roomName,
+                    planLevel: info.planLevel,
+                    videos: [],
+                    members: info.members,
+                    controlMode: info.controlMode,
+                    controllerId: info.controllerId,
+                });
+                return;
+            }
+
+            // 非 free 房间：再拉取视频列表
+            const videosData = await getVideosApi(roomId);
             // listVideos 返回 objectKey，播放 URL 由 WS ROOM_STATE / SWITCH_VIDEO 下发
             const videos = videosData.videos.map((v) => ({
                 id: v.id,
