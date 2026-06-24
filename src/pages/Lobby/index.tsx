@@ -32,8 +32,6 @@ import styles from './index.module.scss';
 const DEFAULT_DRAW_COLOR = '#ffffff';
 
 /**
- * SYNC_PROGRESS 兜底纠偏阈值（秒）。
- *
  * SYNC_PROGRESS 是主控的实时进度广播，非主控收到后的处理原则：
  *   - 偏差在阈值内：不 seek，各自自然播放即可
  *   - 偏差超出阈值：说明发生了严重失步，才执行兜底 seek 纠偏

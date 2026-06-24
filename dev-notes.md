@@ -1327,27 +1327,100 @@ done
 
 ---
 
-### `useMemoizedFn` 内读取 state 变量的 stale closure 问题
+### 函数稳定化工具选型：普通函数 / `useCallback` / `useMemoizedFn` / `useSyncedState`
 
-**现象：** `handleSwitchVideo` 里用 `objectKey === activeObjectKey` 判断是否为主控自身广播，但该判断**永远为 false**，导致主控收到自己发出的 `SWITCH_VIDEO` 广播时重复执行了完整的元数据同步逻辑。
+**核心问题：** 四种方式解决不同问题，混用会产生链式副作用。
 
-**根因：** `useMemoizedFn` 的核心机制是记忆函数引用，其闭包在首次创建时捕获 state 变量（此时为初始值 `null`）。后续 `setState` 不会更新闭包内的捕获值，因此闭包里的 `activeObjectKey` 永远是 `null`，比较永远不成立。
+#### 各自解决什么
 
-**解决：** 对所有需要在 `useMemoizedFn` 闭包内读取最新值的 state，引入对应的 `useRef` 作为"可变镜像"：
+| 方式 | 解决的问题 | 代价 |
+|------|-----------|------|
+| **普通函数** | 无需任何稳定化，每次渲染重建 | 引用每次变化，作为 prop 会触发子组件 re-render |
+| **`useCallback(fn, deps)`** | 让函数引用在 deps 不变时保持稳定 | 需要精确维护 deps 数组，deps 漏写 = stale closure；deps 过宽 = 失去稳定效果 |
+| **`useMemoizedFn(fn)`** | 引用永远稳定，同时内部始终调用最新的 fn 实现 | 闭包捕获时机问题：函数体内直接读取的外部 state 是**旧值**（首次创建时的快照） |
+| **`useSyncedState`** | 在 `useMemoizedFn` 闭包内读到最新 state | 需要同时维护 state + ref 两份数据，写入入口必须统一 |
+
+#### `useMemoizedFn` 的正确使用前提
+
+`useMemoizedFn` **只应用于需要传给子组件的 handler**，目的是阻止子组件因函数引用变化产生不必要的 re-render：
 
 ```ts
-const [activeObjectKey, setActiveObjectKey] = useState<string | null>(null);
-const activeObjectKeyRef = useRef<string | null>(null); // 同步镜像
-
-// 每次 setState 时同步写 ref
-activeObjectKeyRef.current = objectKey;
-setActiveObjectKey(objectKey);
-
-// useMemoizedFn 内读 ref，而非 state
-if (objectKey === activeObjectKeyRef.current) { ... }
+// ✅ 正确：handler 传给子组件，引用稳定可减少子组件 re-render
+const handlePlay = useMemoizedFn((id: string) => { ... });
+<VideoList onPlay={handlePlay} />
 ```
 
-**同类场景：** `followModeRef` 也是同一模式，用于解决 `followMode` 在 `useMemoizedFn` 内读取时的 stale closure。项目中所有需要在稳定函数引用内读取最新状态的变量，均应配套 ref 镜像。
+#### `useMemoizedFn` 的滥用场景及后果
+
+**错误用法：** 将只传给 hook（而非组件）的函数也用 `useMemoizedFn` 包裹：
+
+```ts
+// ❌ 错误：WS handler 只传给 useRoomWs，hook 不是组件，引用稳不稳定无所谓
+const handleSyncProgress = useMemoizedFn((currentTime: number) => {
+    if (!followMode) return;  // ⚠️ followMode 永远是初始值！stale closure
+});
+```
+
+**滥用导致的链式副作用：**
+
+```
+useMemoizedFn 用在 WS handler 上
+  → 闭包固化，直接读 state 得到旧值
+  → 为了读最新值，引入 followModeRef
+  → 为了 state 和 ref 同步，引入 useSyncedState
+  → 代码中出现大量不必要的 ref 镜像
+```
+
+#### 正确方案：WS hook 内部负责 callback 稳定化
+
+`useRoomWs` 已经在内部用 `useMemoizedFn` 包装了所有传入的 callback（`stableOnXxx`），外部传什么引用都无所谓——WS 消息到来时始终调最新的实现：
+
+```ts
+// useRoomWs 内部（已有）
+const stableOnSyncProgress = useMemoizedFn(onSyncProgress ?? (() => {}));
+// ws.onmessage 里调用 stableOnSyncProgress(...)，而非 onSyncProgress(...)
+```
+
+因此，调用方可以用**普通函数**，直接读 state，不需要任何 memo：
+
+```ts
+// ✅ 正确：普通函数，直接读 state，useRoomWs 内部负责稳定
+const handleSyncProgress = (currentTime: number) => {
+    if (!followMode) return;  // followMode 是当次渲染的最新值，正确
+};
+useRoomWs({ onSyncProgress: handleSyncProgress });
+```
+
+这样 `followModeRef`、`activeObjectKeyRef`、`activeVideoIdRef`、`sendMessageRef` 这些 ref 镜像就都不需要存在了。
+
+#### `useSyncedState` 的适用场景
+
+仅当**同一个 state 既需要驱动 JSX 渲染，又需要在 `useMemoizedFn` 闭包内命令式读取最新值**时才使用（即无法避免 `useMemoizedFn` 的场景）：
+
+```ts
+// 仍然需要 useSyncedState 的场景：handler 本身传给子组件（必须稳定引用），
+// 但 handler 内部又需要读最新的 state
+const [followMode, followModeRef, setFollowMode] = useSyncedState(true);
+const handleFollowModeToggle = useMemoizedFn(() => {
+    const next = !followModeRef.current;  // 读 ref，正确
+    setFollowMode(next);
+});
+<ControlPanel onFollowModeToggle={handleFollowModeToggle} />
+```
+
+#### 决策矩阵
+
+```
+函数是否传给子组件？
+├─ 否（只传给 hook / 内部使用）→ 普通函数，直接读 state
+└─ 是（传给子组件，需要稳定引用）
+     ├─ 函数体内需要读 state 的最新值？
+     │   ├─ 否 → useMemoizedFn（最简单）
+     │   └─ 是 → useMemoizedFn + useSyncedState（对需要读的 state）
+     └─ deps 简单且固定？→ useCallback 也可以（但 useMemoizedFn 更安全）
+```
+
+**历史实际 bug：** `handleSwitchVideo` 中 `objectKey === activeObjectKey` 永远 false，主控切换视频无反应；根因是 `activeObjectKey` 用 `useMemoizedFn` 包裹后闭包固化，后来通过引入 `activeObjectKeyRef` 修复，但这本质上是 `useMemoizedFn` 滥用导致的补丁链。
 
 ---
 
@@ -1408,39 +1481,6 @@ const handleControlChanged = useMemoizedFn((newControllerId: string) => {
 - 旧文件不主动删除（头像文件极小，存储成本忽略不计）
 
 **通用规则：** 凡是后端返回的"可更新静态资源 URL"（头像、封面图、二维码等），objectKey 都不能固定为用户维度的唯一路径。只要路径不变，CDN 就会永久命中旧缓存，无论文件内容是否已替换。解法统一：在文件名中加入时间戳或内容 hash。
-
----
-
-### `useMemoizedFn` 闭包读到旧 state（stale closure）
-
-**现象：** `useMemoizedFn` 包裹的函数内读取 React state，值永远是初始值（如 `activeObjectKey` 始终为 `null`），导致条件判断永远不成立。历史实际 bug：`handleSwitchVideo` 中 `objectKey === activeObjectKey` 永远 false，主控切换视频无反应；`handleControlChanged` 里 `activeVideoIdRef` 漏写，控制权转移后新主控同步视频失败。
-
-**根因：** `useMemoizedFn` 的核心特性是返回引用稳定的函数，函数引用不随渲染更新。代价是内部闭包只在初始化时捕获一次外部变量，后续 state 更新触发重渲染时函数不重建，闭包里的 state 值永远是旧的。
-
-**解决：** 凡是需要在 `useMemoizedFn` 闭包里读取最新值、同时又需要驱动渲染的状态，必须同时维护 state（服务渲染）和 ref（服务闭包命令式读取）：
-- **state**：驱动 JSX 重渲染，通过 `useState` 管理
-- **ref**：在 `useMemoizedFn` 闭包内命令式读取，`ref.current` 每次读取都是当时最新值，不受闭包捕获时机影响
-
-原始写法需要在每次写入时手动同步双写（`setXxx(val)` + `xxxRef.current = val`），漏写即产生 bug。封装 `useSyncedState` hook 将两者合并为单一 setter：
-
-```ts
-// src/hooks/useSyncedState.ts
-export function useSyncedState<T>(initial: T) {
-    const [value, setValue] = useState<T>(initial);
-    const ref = useRef<T>(initial);
-    const set = useCallback((next: T) => {
-        ref.current = next;
-        setValue(next);
-    }, []);
-    return [value, ref, set] as const;
-    // 用法：const [activeObjectKey, activeObjectKeyRef, setActiveObjectKey] = useSyncedState<string | null>(null);
-    //   value  → JSX 渲染（响应式）
-    //   ref    → useMemoizedFn 闭包内读取（始终最新）
-    //   setter → 同时更新两者，不可能遗漏
-}
-```
-
-**注意：** `useSyncedState` 的 setter 只接受值，不接受函数式更新 `(prev) => next`。若原逻辑用了函数式更新，改为从 `ref.current` 读当前值再计算：`const next = !xxxRef.current; setXxx(next)`。
 
 ---
 
