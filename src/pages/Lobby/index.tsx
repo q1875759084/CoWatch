@@ -120,9 +120,6 @@ export default function RoomPage() {
      */
     const pendingStrokesRef = useRef<Array<{ color: string; points: Array<{ x: number; y: number }> }> | null>(null);
 
-    /** 节流版 sendMessage，避免每帧都创建新函数；用 ref 包装避免闭包捕获旧引用 */
-    const sendMessageRef = useRef<ReturnType<typeof useRoomWs>['sendMessage'] | null>(null);
-
     /**
      * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
      * 比 useEffect([activeVideoUrl]) 更可靠，因为它直接响应组件挂载事件。
@@ -225,7 +222,7 @@ export default function RoomPage() {
         setFollowMode(next);
         if (next) {
             // 开启跟随：发送 FORCE_SYNC 让后端单播回当前状态
-            sendMessageRef.current?.('FORCE_SYNC', {});
+            sendMessage('FORCE_SYNC', {});
         } else {
             // 切到自由模式：重置所有鼠标相关状态
             // 自由模式本意是脱离共享，不应继续影响他人画布/光标
@@ -241,7 +238,7 @@ export default function RoomPage() {
     });
     /** 主控一键拉回：发送 FORCE_SYNC，后端广播完整状态给所有非主控 */
     const handleForceSync = useMemoizedFn(() => {
-        sendMessageRef.current?.('FORCE_SYNC', {});
+        sendMessage('FORCE_SYNC', {});
     });
 
     /**
@@ -261,7 +258,7 @@ export default function RoomPage() {
             const currentObjectKey = activeObjectKeyRef.current;
             const currentVideoId = activeVideoIdRef.current;
             if (currentObjectKey && currentVideoId) {
-                sendMessageRef.current?.('SWITCH_VIDEO', { objectKey: currentObjectKey, videoId: currentVideoId });
+                sendMessage('SWITCH_VIDEO', { objectKey: currentObjectKey, videoId: currentVideoId });
             }
         } else {
             // 自己从主控变为非主控：重置为自由模式，由用户自行决定是否开启跟随。
@@ -439,7 +436,7 @@ export default function RoomPage() {
      * userId 由服务端用连接时鉴权的 userId 覆盖，上行不需要传。
      */
     const handleStrokeComplete = useMemoizedFn((stroke: StrokeRecord) => {
-        sendMessageRef.current?.('DRAW_STROKE', {
+        sendMessage('DRAW_STROKE', {
             color: stroke.color,
             points: stroke.points,
         });
@@ -451,7 +448,7 @@ export default function RoomPage() {
      */
     const handleClearStrokes = useMemoizedFn(() => {
         painterRef.current?.clearStrokes();
-        sendMessageRef.current?.('DRAW_CLEAR', {});
+        sendMessage('DRAW_CLEAR', {});
     });
 
     /**
@@ -480,7 +477,7 @@ export default function RoomPage() {
      */
     const handleClearStrokesByColor = useMemoizedFn((color: string) => {
         painterRef.current?.clearStrokesByColor(color);
-        sendMessageRef.current?.('DRAW_CLEAR_COLOR', { color });
+        sendMessage('DRAW_CLEAR_COLOR', { color });
     });
 
     /**
@@ -529,7 +526,7 @@ export default function RoomPage() {
 
         // 节流发送给他人
         if (cursorEnabled) {
-            sendMessageRef.current?.('CURSOR_MOVE', { x, y, styleId: selectedStyleId });
+            sendMessage('CURSOR_MOVE', { x, y, styleId: selectedStyleId });
         }
     });
 
@@ -541,7 +538,7 @@ export default function RoomPage() {
         const uid = userInfo?.userId ?? '__self__';
         handleCursorHide(uid);
         if (cursorEnabled) {
-            sendMessageRef.current?.('CURSOR_HIDE', {});
+            sendMessage('CURSOR_HIDE', {});
         }
     });
 
@@ -586,9 +583,6 @@ export default function RoomPage() {
         onChatMessage: (msg) => setChatMessages((prev) => [...prev, msg]),
     });
 
-    // 将最新 sendMessage 同步到 ref，供节流函数闭包读取
-    sendMessageRef.current = sendMessage;
-
     /**
      * 主控在笔记输入时触发：本地立即更新 noteContent，
      * 然后节流 1000ms 广播给其他成员。
@@ -597,7 +591,7 @@ export default function RoomPage() {
         setNoteContent(content);
         if (noteThrottleRef.current) clearTimeout(noteThrottleRef.current);
         noteThrottleRef.current = setTimeout(() => {
-            sendMessageRef.current?.('NOTE_UPDATE', { content });
+            sendMessage('NOTE_UPDATE', { content });
         }, 1000);
     });
 
@@ -606,7 +600,7 @@ export default function RoomPage() {
      * 后端补充 userId/nickname/timestamp 后广播给所有成员（含自身）。
      */
     const handleSendChat = useMemoizedFn((content: string) => {
-        sendMessageRef.current?.('CHAT_MESSAGE', { content });
+        sendMessage('CHAT_MESSAGE', { content });
     });
 
     /**
