@@ -8,7 +8,7 @@ import Hls from 'hls.js';
 import { useMemoizedFn } from 'ahooks';
 import { throttle } from '@/utils/throttle';
 import { getAccessToken } from '@/utils/token';
-import styles from './VideoPlayer.module.scss';
+import styles from './index.module.scss';
 
 export interface VideoPlayerHandle {
   /**

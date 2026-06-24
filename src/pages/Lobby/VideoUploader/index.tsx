@@ -4,7 +4,7 @@ import { getUploadUrlApi } from '@/api/room';
 import request, { ApiError } from '@/utils/request';
 import { validateVideoFile } from '@/utils/validateVideo';
 import { useRoomMeta } from '@/context/RoomMetaContext';
-import styles from './VideoUploader.module.scss';
+import styles from './index.module.scss';
 
 /** 上传状态机：idle → uploading → slicing → idle | error */
 type UploadStatus = 'idle' | 'uploading' | 'slicing' | 'error';

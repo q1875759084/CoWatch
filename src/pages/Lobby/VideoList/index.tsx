@@ -4,7 +4,7 @@ import { Tag, Modal, Tooltip } from 'antd';
 import type { VideoItem } from '@/types/room';
 import { EmptyState } from '@/components/EmptyState';
 import { Button } from '@/components/Button';
-import styles from './VideoList.module.scss';
+import styles from './index.module.scss';
 
 interface VideoListProps {
   videos: VideoItem[];

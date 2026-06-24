@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import type { ChatMessageData } from '@/types/room';
 import { useRoomMeta } from '@/context/RoomMetaContext';
-import styles from './NotePanel.module.scss';
+import styles from './index.module.scss';
 
 // ─── 聊天消息分组 ─────────────────────────────────────────────────────────────
 

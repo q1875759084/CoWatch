@@ -1,0 +1,61 @@
+// ── 右侧控制面板 ────────────────────────────────────────────────────────────
+
+.panel {
+  position: relative;
+  width: 280px;
+  flex-shrink: 0;
+  background: $bg-surface;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-left: 12px;
+  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+// 折叠态：收缩为切换按钮的宽度
+.panelCollapsed {
+  width: 24px;
+  overflow-y: hidden;
+}
+
+// 折叠时内容淡出
+.panelContent {
+  opacity: 1;
+  transition: opacity 0.15s ease;
+}
+
+.panelContentHidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+// 折叠/展开切换按钮：贴在面板左侧边缘垂直居中
+.panelToggleBtn {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 48px;
+  border: none;
+  border-radius: 6px 0 0 6px;
+  background: $bg-surface;
+  color: #718096;
+  cursor: pointer;
+  transition: color 0.15s;
+  z-index: 1;
+  flex-shrink: 0;
+
+  // svg icon 固定 16px
+  :global(svg) {
+    width: 16px;
+    height: 16px;
+  }
+
+  &:hover {
+    color: #e2e8f0;
+  }
+}

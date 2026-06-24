@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, type MutableRefObject } from 'react';
 import { useMemoizedFn } from 'ahooks';
+import { message } from 'antd';
 import { useParams } from 'react-router-dom';
 import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
@@ -13,7 +14,7 @@ import LoadingSpinner from '@/components/LoadingSpinner';
 import { EmptyState } from '@/components/EmptyState';
 import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
-import ControlPanel from './ControlPanel';
+import RightPanel from './components/RightPanel';
 import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import VideoTagBar from './VideoTagBar';
@@ -22,10 +23,9 @@ import PainterLayer, {
     type PainterLayerHandle,
     type StrokeRecord,
 } from './PainterLayer';
-import { DEFAULT_STYLE_ID } from './cursorStyles';
+import { DEFAULT_STYLE_ID } from './PainterLayer/cursorStyles';
 import NotePanel from './NotePanel';
 import RoomExpired from './RoomExpired';
-import { CaretLeftOutlined, CaretRightOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
 /** 默认画笔颜色 */
@@ -39,11 +39,9 @@ const DEFAULT_DRAW_COLOR = '#ffffff';
  *   - 偏差超出阈值：说明发生了严重失步，才执行兜底 seek 纠偏
  *
  * 阈值设为 0.5s：精确对齐主控进度，网络延迟通常远小于此值。
- * 之前临时调到 3s 是为了掩盖"非主控根本没起播、一直在 seek"的问题，
  * 现在根本原因（sync 保护窗口吞掉 play 事件）已修复，恢复 0.5s。
  */
 const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
-
 
 export default function RoomPage() {
     const { roomId } = useParams<{ roomId: string }>();
@@ -63,9 +61,6 @@ export default function RoomPage() {
      */
     const pendingInitRef = useRef<{ isPlaying: boolean; currentTime: number } | null>(null);
     const videoRef = useRef<VideoPlayerHandle>(null);
-
-    // ── 右侧面板折叠状态 ──────────────────────────────────────────────────────
-    const [panelCollapsed, setPanelCollapsed] = useState(false);
 
     // ── Tag 状态 ───────────────────────────────────────────────────────────────
     const [tags, setTags] = useState<Tag[]>([]);
@@ -116,14 +111,14 @@ export default function RoomPage() {
      * 避免每帧 mousemove 都触发 React re-render。
      */
     const cursorsRef = useRef<Map<string, CursorState>>(new Map());
-  /** PainterLayer 命令式句柄，用于主动触发重绘 */
-  const painterRef = useRef<PainterLayerHandle>(null);
-  /**
-   * 暂存 ROOM_STATE 下发的历史笔迹。
-   * WS 比 PainterLayer 挂载早到，painterRef.current 此时为 null，
-   * 先存入此 ref，等 PainterLayer callback ref 触发时再消费。
-   */
-  const pendingStrokesRef = useRef<Array<{ color: string; points: Array<{ x: number; y: number }> }> | null>(null);
+    /** PainterLayer 命令式句柄，用于主动触发重绘 */
+    const painterRef = useRef<PainterLayerHandle>(null);
+    /**
+     * 暂存 ROOM_STATE 下发的历史笔迹。
+     * WS 比 PainterLayer 挂载早到，painterRef.current 此时为 null，
+     * 先存入此 ref，等 PainterLayer callback ref 触发时再消费。
+     */
+    const pendingStrokesRef = useRef<Array<{ color: string; points: Array<{ x: number; y: number }> }> | null>(null);
 
     /** 节流版 sendMessage，避免每帧都创建新函数；用 ref 包装避免闭包捕获旧引用 */
     const sendMessageRef = useRef<ReturnType<typeof useRoomWs>['sendMessage'] | null>(null);
@@ -196,6 +191,12 @@ export default function RoomPage() {
                 controlMode: info.controlMode,
                 controllerId: info.controllerId,
             });
+        }).catch((err: unknown) => {
+            // 初始化失败：roomState 将永远是 null，页面会卡在 Loading。
+            // 此处展示错误原因，让用户知道发生了什么，并可刷新重试。
+            // request.ts 拦截器已将 4xx/业务错误包成 ApiError（含中文 message），
+            // 网络超时等情况则透传原始 Error。
+            void message.error(err instanceof Error ? err.message : '房间加载失败，请刷新重试');
         });
     }, [roomId]);
 
@@ -698,7 +699,7 @@ export default function RoomPage() {
                 {/* 左侧主内容区 */}
                 <main className={styles.main}>
                     {/* 视频列表 */}
-                     <CollapseSection
+                    <CollapseSection
                         title="视频列表"
                         collapsible
                         defaultOpen={false}
@@ -729,30 +730,30 @@ export default function RoomPage() {
            * - 出了视频区鼠标自动恢复默认样式，tag区/上传区不受影响
            */}
                     <div className={styles.playerRatio}>
-            {/* 自由模式下非主控不渲染画布：避免显示其他人的笔迹/鼠标（与当前自选视频无关） */}
-            {(isController || followMode) && (
-              <PainterLayer
-                ref={(handle) => {
-                  (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
-                  if (handle && pendingStrokesRef.current) {
-                    const pending = pendingStrokesRef.current;
-                    pendingStrokesRef.current = null;
-                    handle.clearStrokes();
-                    pending.forEach((s) => handle.addStroke(s));
-                  }
-                }}
-                cursorStyleActive={cursorStyleActive}
-                enabled={cursorEnabled}
-                drawingMode={drawingMode}
-                cursors={cursorsRef.current}
-                drawColor={drawColor}
-                onCursorMove={handleSelfCursorMove}
-                // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
-                onCursorEnter={() => { /* no-op */ }}
-                onCursorLeave={handleSelfCursorLeave}
-                onStrokeComplete={handleStrokeComplete}
-              />
-            )}
+                        {/* 自由模式下非主控不渲染画布：避免显示其他人的笔迹/鼠标（与当前自选视频无关） */}
+                        {(isController || followMode) && (
+                            <PainterLayer
+                                ref={(handle) => {
+                                    (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
+                                    if (handle && pendingStrokesRef.current) {
+                                        const pending = pendingStrokesRef.current;
+                                        pendingStrokesRef.current = null;
+                                        handle.clearStrokes();
+                                        pending.forEach((s) => handle.addStroke(s));
+                                    }
+                                }}
+                                cursorStyleActive={cursorStyleActive}
+                                enabled={cursorEnabled}
+                                drawingMode={drawingMode}
+                                cursors={cursorsRef.current}
+                                drawColor={drawColor}
+                                onCursorMove={handleSelfCursorMove}
+                                // 不需要在 mouseenter 时做任何事：光标由 handleSelfCursorMove 在首次 mousemove 时插入
+                                onCursorEnter={() => { /* no-op */ }}
+                                onCursorLeave={handleSelfCursorLeave}
+                                onStrokeComplete={handleStrokeComplete}
+                            />
+                        )}
                         {roomState.activeVideoUrl ? (
                             <VideoPlayer
                                 ref={setVideoRef}
@@ -799,46 +800,33 @@ export default function RoomPage() {
                 </main>
 
                 {/* 右侧控制面板 */}
-                <aside className={`${styles.panel} ${panelCollapsed ? styles.panelCollapsed : ''}`}>
-                    {/* 折叠/展开按钮：始终可见，贴在面板左侧边缘 */}
-                    <button
-                        type="button"
-                        className={styles.panelToggleBtn}
-                        onClick={() => setPanelCollapsed((v) => !v)}
-                        title={panelCollapsed ? '展开面板' : '收起面板'}
-                    >
-                        {panelCollapsed ? <CaretLeftOutlined /> : <CaretRightOutlined />}
-                    </button>
-                    <div className={`${styles.panelContent} ${panelCollapsed ? styles.panelContentHidden : ''}`}>
-                    <ControlPanel
-                        members={roomState.members}
-                        controllerId={roomState.controllerId}
-                        currentUserId={userInfo?.userId ?? ''}
-                        isAdmin={isAdmin}
-                        onTransferControl={(targetUserId) => {
-                            sendMessage('TRANSFER_CONTROL', { targetUserId });
-                        }}
-                        isController={isController}
-                        followMode={followMode}
-                        onFollowModeToggle={handleFollowModeToggle}
-                        onForceSync={handleForceSync}
-                        cursorSettings={{
-                            disabled: !isController && !followMode,
-                            cursorEnabled,
-                            selectedStyleId,
-                            cursorStyleActive,
-                            drawingMode,
-                            drawColor,
-                            onCursorToggle: handleCursorToggle,
-                            onCursorStyleSelect: handleCursorStyleSelect,
-                            onDrawingModeToggle: handleDrawingModeToggle,
-                            onDrawColorChange: setDrawColor,
-                            onClearStrokes: handleClearStrokes,
-                            onClearStrokesByColor: handleClearStrokesByColor,
-                        }}
-                    />
-                    </div>
-                </aside>
+                <RightPanel
+                    members={roomState.members}
+                    controllerId={roomState.controllerId}
+                    currentUserId={userInfo?.userId ?? ''}
+                    isAdmin={isAdmin}
+                    onTransferControl={(targetUserId) => {
+                        sendMessage('TRANSFER_CONTROL', { targetUserId });
+                    }}
+                    isController={isController}
+                    followMode={followMode}
+                    onFollowModeToggle={handleFollowModeToggle}
+                    onForceSync={handleForceSync}
+                    cursorSettings={{
+                        disabled: !isController && !followMode,
+                        cursorEnabled,
+                        selectedStyleId,
+                        cursorStyleActive,
+                        drawingMode,
+                        drawColor,
+                        onCursorToggle: handleCursorToggle,
+                        onCursorStyleSelect: handleCursorStyleSelect,
+                        onDrawingModeToggle: handleDrawingModeToggle,
+                        onDrawColorChange: setDrawColor,
+                        onClearStrokes: handleClearStrokes,
+                        onClearStrokesByColor: handleClearStrokesByColor,
+                    }}
+                />
             </div>
 
             {/* 共享笔记 + 聊天浮层：绝对定位在 .page 右上角， bar 下方 12px，右侧 20px */}

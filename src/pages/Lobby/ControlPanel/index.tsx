@@ -7,9 +7,9 @@ import { useRoomMeta } from '@/context/RoomMetaContext';
 import MemberList from '@/components/MemberList';
 import CollapseSection from '@/components/CollapseSection';
 import { downloadBatApi } from '@/api/room';
-import { CURSOR_STYLES } from './cursorStyles';
+import { CURSOR_STYLES } from '../PainterLayer/cursorStyles';
 import { Button } from '@/components/Button';
-import styles from './ControlPanel.module.scss';
+import styles from './index.module.scss';
 
 /** 固定使用 CRF 30 档位 */
 const ENCODE_PRESET = '30' as const;

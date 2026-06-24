@@ -1,4 +1,4 @@
-import styles from './RoomExpired.module.scss';
+import styles from './index.module.scss';
 
 /**
  * 房间已过期（plan_level = 'free'）时展示的占位页。

@@ -1,0 +1,9 @@
+// 开启鼠标共享且非绘制模式时，强制隐藏该容器内所有元素的系统光标。
+// 必须用 `& *` 覆盖子元素（button/input/video 等有自己的 cursor:pointer），
+// 单独设父元素 cursor:none 无法压制子元素自带的 cursor 声明。
+.cursorHidden {
+  &,
+  & * {
+    cursor: none !important;
+  }
+}

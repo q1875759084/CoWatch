@@ -1618,6 +1618,40 @@ initRoom({ videos, members, controlMode, controllerId }); // 写内层
 
 ---
 
+### 请求错误处理的双层职责划分：全局拦截器 vs 业务侧 catch
+
+**背景：** Lobby 初始化时调用 `getRoomInfoApi(roomId)` 加载房间信息，失败后页面永远卡在 Loading 态，无任何提示，用户无法感知也无法刷新重试（静默失败）。
+
+**根因：** 全局拦截器（`request.ts`）只负责**格式化错误**，不做 UI 反馈；而调用侧没有 `.catch()`，导致错误被吞掉。
+
+**职责划分（两层，各司其职）：**
+
+| 层级 | 位置 | 职责 | 不做什么 |
+|------|------|------|----------|
+| **全局拦截器** | `src/utils/request.ts` | 将 4xx/5xx 和业务错误统一包成 `ApiError`（含中文 message）；透传网络超时等原始 Error | 不直接调 `message.error`，不做 UI 反馈，不知道业务上下文 |
+| **业务侧 catch** | 各调用方 `.catch()` | 处理用户可感知的后果：`message.error`、跳转、UI 状态恢复等 | 不重复格式化错误，直接用拦截器已包好的 `err.message` |
+
+**判断是否需要业务侧 catch 的标准：**
+- ✅ **必须有 catch**：失败后 UI 会进入"僵尸状态"（永远 Loading、功能不可用），用户必须感知并能采取行动（刷新、重试）
+- ⚠️ **可酌情省略**：操作型请求（点击按钮触发），失败后无持久 UI 后果，全局 Toast 足够（但最好也加 catch 给更具体的提示）
+- ❌ **不需要 catch**：fire-and-forget 的上报/埋点请求，失败无需用户感知
+
+**修复示例（Lobby 初始化）：**
+
+```ts
+getRoomInfoApi(roomId).then(async (info) => {
+  // ...初始化逻辑
+}).catch((err: unknown) => {
+  // 拦截器已将 4xx/业务错误包成 ApiError（含中文 message）
+  // 网络超时等情况透传原始 Error
+  void message.error(err instanceof Error ? err.message : '房间加载失败，请刷新重试');
+});
+```
+
+**通用原则：** 拦截器负责"错误长什么样"，业务侧负责"错误意味着什么"。两者不应互相越界。
+
+---
+
 ### SQLite → PostgreSQL 迁移注意点
 
 迁移过程中有三处需要注意：

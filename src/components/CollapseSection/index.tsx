@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { CaretDownOutlined } from '@ant-design/icons';
 import styles from './index.module.scss';
 
@@ -38,6 +38,8 @@ export default function CollapseSection({
   children,
 }: CollapseSectionProps) {
   const [open, setOpen] = useState(defaultOpen);
+
+  console.log(123)
 
   const titleContent = (
     <span className={styles.titleRow}>

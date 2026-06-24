@@ -2,7 +2,7 @@ import { useState, useId } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import type { Tag } from '@/types/room';
 import { Button } from '@/components/Button';
-import styles from './VideoTagBar.module.scss';
+import styles from './index.module.scss';
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
