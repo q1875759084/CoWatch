@@ -24,22 +24,10 @@ import PainterLayer, {
     type StrokeRecord,
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './PainterLayer/cursorStyles';
+import { DEFAULT_DRAW_COLOR, SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './constants';
 import NotePanel from './NotePanel';
 import RoomExpired from './RoomExpired';
 import styles from './index.module.scss';
-
-/** 默认画笔颜色 */
-const DEFAULT_DRAW_COLOR = '#ffffff';
-
-/**
- * SYNC_PROGRESS 是主控的实时进度广播，非主控收到后的处理原则：
- *   - 偏差在阈值内：不 seek，各自自然播放即可
- *   - 偏差超出阈值：说明发生了严重失步，才执行兜底 seek 纠偏
- *
- * 阈值设为 0.5s：精确对齐主控进度，网络延迟通常远小于此值。
- * 现在根本原因（sync 保护窗口吞掉 play 事件）已修复，恢复 0.5s。
- */
-const SYNC_PROGRESS_THRESHOLD_SEC = 0.5;
 
 export default function RoomPage() {
     const { roomId } = useParams<{ roomId: string }>();
@@ -196,12 +184,13 @@ export default function RoomPage() {
     }, [roomId]);
 
     // ── 拉取 tag 列表工具函数 ───────────────────────────────────────────────────
-    const fetchTags = useMemoizedFn((videoId: string) => {
+    // 普通函数：仅被同文件内的 handler 调用，不传给子组件，无需稳定引用。
+    const fetchTags = (videoId: string) => {
         if (!roomId || !videoId) return;
         getTagsApi(roomId, videoId).then(setTags).catch((err) => {
             console.warn('[Tag] 拉取 tag 列表失败:', err);
         });
-    });
+    };
 
     // ── 复盘模式（跟随复盘开关） ────────────────────────────────────────────────
     /**
@@ -336,7 +325,6 @@ export default function RoomPage() {
      *   - isPlaying=true 且偏差 >= 0.5s → seek + play（追上主控进度）
      *   - isPlaying=false → 始终 seek + pause（暂停必须精确对帧）
      */
-    const SYNC_STATE_SEEK_THRESHOLD_SEC = 0.5;
     /**
      * 收到 SYNC_STATE：seq 由后端分配，直接传给 VideoPlayer。
      * VideoPlayer 内部用 seq 大小判断异步回调（onSeeked）是否过期。
@@ -557,6 +545,21 @@ export default function RoomPage() {
         }
     }, [selectedStyleId, userInfo?.userId]);
 
+    /**
+     * 收到 VIDEO_DELETED 广播：
+     * - 列表更新由 useRoomWs 内部的 removeVideo（RoomContext）统一处理
+     * - 此处仅处理「被删的恰好是当前激活视频」的特殊情况：重置播放器并提示用户
+     */
+    const handleVideoDeleted = (deletedVideoId: string) => {
+        if (deletedVideoId !== activeVideoId) return;
+        void message.warning('当前视频已被管理员删除');
+        setActiveObjectKey(null);
+        setActiveVideoId('');
+        setTags([]);
+        setDuration(0);
+        setActiveVideoUrl(null);
+    };
+
     const { sendMessage } = useRoomWs({
         roomId: roomId!,
         token: getAccessToken() ?? '',
@@ -568,16 +571,7 @@ export default function RoomPage() {
         onSwitchVideo: handleSwitchVideo,
         onControlChanged: handleControlChanged,
         onVideoAdded: (videoId) => setLastVideoAddedId(videoId),
-        onVideoDeleted: (deletedVideoId) => {
-            // 删除的是当前激活视频：重置播放器和相关状态
-            if (deletedVideoId === activeVideoId) {
-                setActiveObjectKey(null);
-                setActiveVideoId('');
-                setTags([]);
-                setDuration(0);
-                setActiveVideoUrl(null);
-            }
-        },
+        onVideoDeleted: handleVideoDeleted,
         onCursorMove: handleCursorMove,
         onCursorHide: handleCursorHide,
         onDrawStroke: handleDrawStroke,
