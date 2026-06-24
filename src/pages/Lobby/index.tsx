@@ -245,7 +245,7 @@ export default function RoomPage() {
      * 理由：转移控制权是管理员的主动行为，原主控无需立即跟随新主控，
      * 应默认进入自由状态，由用户自行决定是否开启跟随。
      */
-    const handleControlChanged = useMemoizedFn((newControllerId: string) => {
+    const handleControlChanged = (newControllerId: string) => {
         const myUserId = userInfo?.userId;
         if (!myUserId) return;
 
@@ -263,13 +263,13 @@ export default function RoomPage() {
             // 即使之前不是主控，决置为 false 也没有副作用（followMode 对主控无意义）。
             setFollowMode(false);
         }
-    });
+    };
 
     /**
      * 收到 ROOM_STATE：保存播放初始化参数，等 VideoPlayer 就绪后执行。
      * activeVideoId 由后端直接下发，无需前端在本地视频列表中做 objectKey→videoId 匹配。
      */
-    const handleRoomState = useMemoizedFn((d: RoomStateData) => {
+    const handleRoomState = (d: RoomStateData) => {
         const { isPlaying, currentTime, activeObjectKey, activeVideoId, strokes, noteContent, forceSynced } = d;
 
         if (videoRef.current) {
@@ -306,20 +306,26 @@ export default function RoomPage() {
         if (forceSynced) {
             setFollowMode(true);
         }
-    });
+    };
 
     /**
      * 收到 SYNC_PROGRESS：仅在严重失步时才兜底 seek，正常播放不干预。
      * 自由模式（followMode=false）时静默忽略。
+     *
+     * 普通函数（非 useMemoizedFn）：只传给 useRoomWs hook，不传给子组件，
+     * 无需稳定引用；useRoomWs 内部已用 useMemoizedFn 包装，始终调最新实现。
+     * 守卫条件读 followModeRef.current（ref）而非 followMode（state）：
+     * setFollowMode 是异步批处理，state 更新需等到下一渲染帧；
+     * ref 是同步写入，无竞态窗口，命令式守卫必须用 ref。
      */
-    const handleSyncProgress = useMemoizedFn((currentTime: number) => {
+    const handleSyncProgress = (currentTime: number) => {
         if (!followModeRef.current) return;
         const handle = videoRef.current;
         if (!handle) return;
         if (Math.abs(handle.getCurrentTime() - currentTime) >= SYNC_PROGRESS_THRESHOLD_SEC) {
             handle.syncSeek(currentTime);
         }
-    });
+    };
 
     /**
      * 收到 SYNC_STATE（播放/暂停 + 时间）：全员同步执行。
@@ -335,7 +341,7 @@ export default function RoomPage() {
      * 收到 SYNC_STATE：seq 由后端分配，直接传给 VideoPlayer。
      * VideoPlayer 内部用 seq 大小判断异步回调（onSeeked）是否过期。
      */
-    const handleSyncState = useMemoizedFn((isPlaying: boolean, currentTime: number, seq: number) => {
+    const handleSyncState = (isPlaying: boolean, currentTime: number, seq: number) => {
         if (!followModeRef.current) return;
         const handle = videoRef.current;
         if (!handle) return;
@@ -349,18 +355,18 @@ export default function RoomPage() {
         } else {
             handle.syncSeekAndPause(currentTime, seq);
         }
-    });
+    };
 
-    const handleTagAdded = useMemoizedFn((tag: Tag) => {
+    const handleTagAdded = (tag: Tag) => {
         setTags((prev) => {
             if (prev.some((t) => t.id === tag.id)) return prev;
             return [...prev, tag].sort((a, b) => a.time - b.time);
         });
-    });
+    };
 
-    const handleTagDeleted = useMemoizedFn((id: string) => {
+    const handleTagDeleted = (id: string) => {
         setTags((prev) => prev.filter((t) => t.id !== id));
-    });
+    };
 
     /**
      * 收到远端 SWITCH_VIDEO 广播：同步 activeObjectKey / activeVideoId 并拉取 tags。
@@ -370,7 +376,7 @@ export default function RoomPage() {
      *   2. 非主控 · 跟随模式：更新所有状态，完整同步
      *   3. 非主控 · 自由模式：忽略，不响应
      */
-    const handleSwitchVideo = useMemoizedFn((objectKey: string, videoId: string | undefined, videoUrl: string) => {
+    const handleSwitchVideo = (objectKey: string, videoId: string | undefined, videoUrl: string) => {
         // 场景 1：主控收到自己发出的广播（objectKey 与当前一致）
         // 仅需更新签名后的 videoUrl，元数据（activeObjectKey/tags 等）已在本地点击时处理
         if (objectKey === activeObjectKeyRef.current) {
@@ -388,7 +394,7 @@ export default function RoomPage() {
             setActiveVideoId(videoId);
             fetchTags(videoId);
         }
-    });
+    };
 
     // ── 鼠标共享 handlers ────────────────────────────────────────────────────────
 
@@ -452,23 +458,23 @@ export default function RoomPage() {
     /**
      * 收到远端 DRAW_STROKE：将笔迹添加到 PainterLayer。
      */
-    const handleDrawStroke = useMemoizedFn((data: DrawStrokeData) => {
+    const handleDrawStroke = (data: DrawStrokeData) => {
         painterRef.current?.addStroke({ color: data.color, points: data.points });
-    });
+    };
 
     /**
      * 收到远端 DRAW_CLEAR：清空画布。
      */
-    const handleDrawClear = useMemoizedFn(() => {
+    const handleDrawClear = () => {
         painterRef.current?.clearStrokes();
-    });
+    };
 
     /**
      * 收到远端 DRAW_CLEAR_COLOR：清除指定颜色笔迹。
      */
-    const handleDrawClearColor = useMemoizedFn((color: string) => {
+    const handleDrawClearColor = (color: string) => {
         painterRef.current?.clearStrokesByColor(color);
-    });
+    };
 
     /**
      * 用户点击「清除此色」：本地过滤 + WS 广播。
@@ -482,7 +488,7 @@ export default function RoomPage() {
      * 收到远端 CURSOR_MOVE 广播：更新 cursors Map，触发 canvas 重绘。
      * 不走 setState，避免 React re-render 影响帧率。
      */
-    const handleCursorMove = useMemoizedFn((data: CursorMoveDownData) => {
+    const handleCursorMove = (data: CursorMoveDownData) => {
         cursorsRef.current.set(data.userId, {
             userId: data.userId,
             x: data.x,
@@ -490,13 +496,13 @@ export default function RoomPage() {
             styleId: data.styleId,
         });
         painterRef.current?.redraw();
-    });
+    };
 
     /** 收到远端 CURSOR_HIDE 广播（或本地鼠标离开区域）：立即从 Map 移除并重绘。 */
-    const handleCursorHide = useMemoizedFn((userId: string) => {
+    const handleCursorHide = (userId: string) => {
         cursorsRef.current.delete(userId);
         painterRef.current?.redraw();
-    });
+    };
 
     /**
      * PainterLayer 回调：鼠标在 .main 内移动。

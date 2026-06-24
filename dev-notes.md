@@ -1371,27 +1371,101 @@ useMemoizedFn 用在 WS handler 上
   → 代码中出现大量不必要的 ref 镜像
 ```
 
-#### 正确方案：WS hook 内部负责 callback 稳定化
+#### `useMemoizedFn` 的内部机制（为什么它能解决闭包问题）
 
-`useRoomWs` 已经在内部用 `useMemoizedFn` 包装了所有传入的 callback（`stableOnXxx`），外部传什么引用都无所谓——WS 消息到来时始终调最新的实现：
+`useMemoizedFn` 的核心是**稳定的壳 + 每次渲染更新壳里的实现**：
 
 ```ts
-// useRoomWs 内部（已有）
-const stableOnSyncProgress = useMemoizedFn(onSyncProgress ?? (() => {}));
-// ws.onmessage 里调用 stableOnSyncProgress(...)，而非 onSyncProgress(...)
+// useMemoizedFn 简化原理
+function useMemoizedFn(fn) {
+    const fnRef = useRef(fn);
+    fnRef.current = fn;  // ← 每次渲染都把最新 fn 存进 ref（关键）
+
+    const stableFn = useRef((...args) => fnRef.current(...args));
+    return stableFn.current;  // ← 返回引用永远不变的包装函数
+}
 ```
 
-因此，调用方可以用**普通函数**，直接读 state，不需要任何 memo：
+- **壳**（`stableFn`）：引用永远稳定，可以安全地被长生命周期闭包（如 `ws.onmessage`）捕获
+- **实现**（`fnRef.current`）：每次渲染更新，调用时穿透到最新版本
+
+这是普通函数不具备的能力——普通函数每次渲染重建，`ws.onmessage` 闭包捕获的直接是实现本身，一旦捕获就固化了。
+
+**同一机制带来的两个收益（日常开发容易只记住收益1）：**
+
+```
+返回稳定的壳函数
+  → 收益1（常被记住）：作为 prop 传给子组件，引用不变，子组件不 re-render
+  → 收益2（常被忽略）：被 useEffect / 事件监听 / 定时器闭包捕获后，
+                       调用时仍能穿透到最新实现，不会读到旧函数
+```
+
+收益2 才是 `useMemoizedFn` 解决的**根本问题**（长生命周期结构中始终调最新实现），收益1 是同一机制的副产品。`useRoomWs` 内部对 callback 做 `useMemoizedFn` 包装，用的正是收益2，而非收益1——`stableOnSyncProgress` 不需要传给任何子组件，稳定引用对它毫无意义，有意义的是 `ws.onmessage` 闭包能通过它调到最新的外部函数。
+
+#### 正确方案：外部普通函数 + 内部 `useMemoizedFn`，两层分工
+
+`useRoomWs` 已经在内部用 `useMemoizedFn` 包装了所有传入的 callback（`stableOnXxx`）：
 
 ```ts
-// ✅ 正确：普通函数，直接读 state，useRoomWs 内部负责稳定
+// useRoomWs 内部
+const stableOnSyncProgress = useMemoizedFn(onSyncProgress ?? (() => {}));
+
+useEffect(() => {
+    ws.onmessage = (event) => {
+        stableOnSyncProgress(d.currentTime);  // 壳：引用稳定，闭包安全捕获
+        // 调用时穿透到 fnRef.current，即最新的 onSyncProgress
+    };
+}, [roomId, token]);  // effect 只在房间切换时重跑
+```
+
+因此，外部调用方可以用**普通函数**——**前提是 hook 内部已经做了 `useMemoizedFn` 包装**。
+
+⚠️ **但守卫条件必须读 ref，不能读 state**：`setFollowMode` 是异步批处理，state 更新需等到下一渲染帧；ref 是同步写入，无竞态窗口。命令式守卫（决定是否执行副作用）必须用 ref，这是 React 设计意图（**state 驱动渲染，ref 驱动命令式逻辑**），而非技术债：
+
+```ts
+// ✅ 正确：普通函数 + ref 守卫
 const handleSyncProgress = (currentTime: number) => {
-    if (!followMode) return;  // followMode 是当次渲染的最新值，正确
+    if (!followModeRef.current) return;  // ref：同步读取，无竞态窗口
+    // ...
 };
 useRoomWs({ onSyncProgress: handleSyncProgress });
+
+// ❌ 错误：守卫读 state，有竞态窗口
+const handleSyncProgress = (currentTime: number) => {
+    if (!followMode) return;  // state：异步批处理，setFollowMode 后下一帧才生效
+    // setFollowMode(false) 触发的瞬间，WS 消息到来仍会读到旧值 true，执行不该执行的逻辑
+};
 ```
 
-这样 `followModeRef`、`activeObjectKeyRef`、`activeVideoIdRef`、`sendMessageRef` 这些 ref 镜像就都不需要存在了。
+**完整时序：**
+```
+followMode: false → true
+
+第1次渲染：
+  handleSyncProgress-A（闭包 followMode=false）→ 传给 useRoomWs
+  → fnRef.current = handleSyncProgress-A
+  → useEffect 执行，ws.onmessage 捕获 stableOnSyncProgress（壳，引用稳定）
+
+followMode 变 true，第2次渲染：
+  handleSyncProgress-B（闭包 followMode=true）→ 传给 useRoomWs
+  → fnRef.current = handleSyncProgress-B  ← ref 已更新，useEffect 不重跑
+
+WS 消息到来：
+  ws.onmessage 调 stableOnSyncProgress（壳）
+  → 壳调 fnRef.current（即 handleSyncProgress-B）
+  → handleSyncProgress-B 里 followMode = true ✅
+```
+
+**两层职责分离：**
+- **外部（调用方）**：普通函数，负责"持有最新的 state"
+- **内部（hook）**：`useMemoizedFn`，负责"让 `useEffect` 闭包能调到最新的外部函数"
+
+⚠️ 外部改成普通函数之所以能工作，**完全依赖** hook 内部已做 `useMemoizedFn` 包装这一前提，两层缺一不可。
+
+**结论**：
+- `followModeRef`、`activeObjectKeyRef`、`activeVideoIdRef` 是**正确设计，不是技术债**，凡是在回调中做命令式守卫的地方都必须用 ref
+- `sendMessageRef` 是真正的技术债：`sendMessage` 本身已在 `useRoomWs` 内用 `useMemoizedFn` 稳定化，外部再包一层 ref 完全多余，可删除
+- 外部 WS handler 上多余的 `useMemoizedFn` 可去掉（因为 hook 内部已稳定），但 ref 守卫必须保留
 
 #### `useSyncedState` 的适用场景
 
@@ -1412,7 +1486,10 @@ const handleFollowModeToggle = useMemoizedFn(() => {
 
 ```
 函数是否传给子组件？
-├─ 否（只传给 hook / 内部使用）→ 普通函数，直接读 state
+├─ 否（只传给 hook）
+│   └─ hook 内部是否用 useMemoizedFn 包装了 callback？
+│       ├─ 是 → 普通函数，直接读 state（依赖 hook 内部的稳定化）
+│       └─ 否 → hook 内部需要先做稳定化，否则有 useEffect 闭包问题
 └─ 是（传给子组件，需要稳定引用）
      ├─ 函数体内需要读 state 的最新值？
      │   ├─ 否 → useMemoizedFn（最简单）

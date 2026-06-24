@@ -117,7 +117,6 @@ export function useRoomWs({
   } = useRoom();
 
   /**
-   * useMemoizedFn：返回引用稳定的函数，内部始终调用最新的回调实现。
    * 解决 ws.onmessage 闭包只能捕获初始回调的问题，无需手动维护 callbacksRef。
    */
   const stableOnRoomState    = useMemoizedFn(onRoomState    ?? (() => {}));
