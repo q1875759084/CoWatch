@@ -18,10 +18,7 @@ import RightPanel from './components/RightPanel';
 import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import VideoTagBar from './VideoTagBar';
-import PainterLayer, {
-    type PainterLayerHandle,
-    type StrokeRecord,
-} from './PainterLayer';
+import PainterLayer, { type StrokeRecord } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './PainterLayer/cursorStyles';
 import { SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './constants';
 import { usePainterSharing } from './hooks/usePainterSharing';
@@ -74,6 +71,9 @@ export default function RoomPage() {
         drawingMode, setDrawingMode,
         drawColor, setDrawColor,
         cursorsRef,
+        painterRef,
+        setPainterRef,
+        setPendingStrokes,
         handleDrawingModeToggle,
     } = usePainterSharing();
 
@@ -83,15 +83,6 @@ export default function RoomPage() {
     const [chatMessages, setChatMessages] = useState<ChatMessageData[]>([]);
     /** 节流发送 NOTE_UPDATE 的定时器 ref */
     const noteThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    /** PainterLayer 命令式句柄，用于主动触发重绘 */
-    const painterRef = useRef<PainterLayerHandle>(null);
-    /**
-     * 暂存 ROOM_STATE 下发的历史笔迹。
-     * WS 比 PainterLayer 挂载早到，painterRef.current 此时为 null，
-     * 先存入此 ref，等 PainterLayer callback ref 触发时再消费。
-     */
-    const pendingStrokesRef = useRef<Array<{ color: string; points: Array<{ x: number; y: number }> }> | null>(null);
-
     /**
      * Callback ref：VideoPlayer 每次挂载时触发，消费暂存的初始化参数。
      * 比 useEffect([activeVideoUrl]) 更可靠，因为它直接响应组件挂载事件。
@@ -260,14 +251,9 @@ export default function RoomPage() {
             setActiveVideoId(activeVideoId);
             fetchTags(activeVideoId);
         }
-        // 恢复历史笔迹：如果 PainterLayer 已挂载则直接应用，否则暂存到 ref 等待挂载
+        // 恢复历史笔迹：若 PainterLayer 已挂载则直接应用，否则由 setPendingStrokes 暂存到 hook 内部 ref
         if (strokes?.length) {
-            if (painterRef.current) {
-                painterRef.current.clearStrokes();
-                strokes.forEach((s: { color: string; points: Array<{ x: number; y: number }> }) => painterRef.current?.addStroke(s));
-            } else {
-                pendingStrokesRef.current = strokes;
-            }
+            setPendingStrokes(strokes);
         }
         // 初始化共享笔记
         if (noteContent !== undefined) {
@@ -707,15 +693,7 @@ export default function RoomPage() {
                         {/* 自由模式下非主控不渲染画布：避免显示其他人的笔迹/鼠标（与当前自选视频无关） */}
                         {(isController || followMode) && (
                             <PainterLayer
-                                ref={(handle) => {
-                                    (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
-                                    if (handle && pendingStrokesRef.current) {
-                                        const pending = pendingStrokesRef.current;
-                                        pendingStrokesRef.current = null;
-                                        handle.clearStrokes();
-                                        pending.forEach((s) => handle.addStroke(s));
-                                    }
-                                }}
+                                ref={setPainterRef}
                                 cursorStyleActive={cursorStyleActive}
                                 enabled={cursorEnabled}
                                 drawingMode={drawingMode}

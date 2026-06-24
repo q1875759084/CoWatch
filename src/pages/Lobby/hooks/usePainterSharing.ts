@@ -1,8 +1,8 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, type MutableRefObject } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import { DEFAULT_STYLE_ID } from '../PainterLayer/cursorStyles';
 import { DEFAULT_DRAW_COLOR } from '../constants';
-import type { CursorState } from '../PainterLayer';
+import type { CursorState, PainterLayerHandle } from '../PainterLayer';
 
 export interface PainterSharingState {
     /** 是否开启鼠标共享（是否发送自己的位置） */
@@ -35,19 +35,39 @@ export interface PainterSharingState {
      * 避免每帧 mousemove 都触发 React re-render。
      */
     cursorsRef: React.MutableRefObject<Map<string, CursorState>>;
+    /**
+     * PainterLayer 命令式句柄（只读）。
+     * 供 Lobby 内仍未迁移的 handlers（handleCursorToggle 等）访问。
+     * Step 3 完成后可移除此暴露。
+     */
+    painterRef: React.RefObject<PainterLayerHandle | null>;
+    /**
+     * PainterLayer callback ref，传给 JSX 的 ref prop。
+     * 封装了"挂载时消费 pendingStrokes"的逻辑，避免 Lobby 直接感知 pendingStrokesRef。
+     */
+    setPainterRef: (handle: PainterLayerHandle | null) => void;
+    /**
+     * 写入待恢复的历史笔迹（由 handleRoomState 在 PainterLayer 未就绪时调用）。
+     * 挂载时 setPainterRef 会自动消费并清空。
+     */
+    setPendingStrokes: (strokes: Array<{ color: string; points: Array<{ x: number; y: number }> }>) => void;
     /** 绘制模式开关 handler（传给子组件，需稳定引用） */
     handleDrawingModeToggle: () => void;
 }
 
 /**
- * 鼠标共享与协同绘制的状态管理 hook（Step 1：纯状态层）。
+ * 鼠标共享与协同绘制的状态管理 hook（Step 2：封装 painterRef + pendingStrokesRef）。
  *
- * 当前仅封装：
+ * 当前封装：
  *   - 5 个核心 state（cursorEnabled / selectedStyleId / cursorStyleActive / drawingMode / drawColor）
  *   - cursorsRef（光标 Map，命令式更新，不走 setState）
- *   - handleDrawingModeToggle（无跨模块依赖，可安全迁移）
+ *   - painterRef（PainterLayer 命令式句柄）
+ *   - pendingStrokesRef（历史笔迹暂存，WS 比挂载先到时使用）
+ *   - setPainterRef（callback ref，含 pendingStrokes 消费逻辑）
+ *   - setPendingStrokes（供 handleRoomState 写入）
+ *   - handleDrawingModeToggle
  *
- * 待后续 step 迁移（依赖 painterRef / sendMessage / userInfo）：
+ * 待后续 step 迁移（依赖 sendMessage / userInfo）：
  *   - handleCursorToggle, handleCursorStyleSelect
  *   - handleSelfCursorMove, handleSelfCursorLeave
  *   - handleStrokeComplete, handleClearStrokes, handleClearStrokesByColor
@@ -62,6 +82,44 @@ export function usePainterSharing(): PainterSharingState {
     const [drawingMode, setDrawingMode] = useState(false);
     const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
     const cursorsRef = useRef<Map<string, CursorState>>(new Map());
+    const painterRef = useRef<PainterLayerHandle | null>(null);
+    /**
+     * 暂存 ROOM_STATE 下发的历史笔迹。
+     * WS 比 PainterLayer 挂载早到，painterRef.current 此时为 null，
+     * 先存入此 ref，等 PainterLayer callback ref 触发时再消费。
+     */
+    const pendingStrokesRef = useRef<Array<{ color: string; points: Array<{ x: number; y: number }> }> | null>(null);
+
+    /**
+     * PainterLayer callback ref：挂载时同步写入 painterRef，并消费暂存的历史笔迹。
+     * 封装在 hook 内，Lobby 的 JSX 只需 ref={setPainterRef}，无需感知 pendingStrokesRef。
+     */
+    const setPainterRef = useMemoizedFn((handle: PainterLayerHandle | null) => {
+        (painterRef as MutableRefObject<PainterLayerHandle | null>).current = handle;
+        if (handle && pendingStrokesRef.current) {
+            const pending = pendingStrokesRef.current;
+            pendingStrokesRef.current = null;
+            handle.clearStrokes();
+            pending.forEach((s) => handle.addStroke(s));
+        }
+    });
+
+    /**
+     * 写入待恢复的历史笔迹。
+     * handleRoomState 在 PainterLayer 未挂载时调用此方法暂存，
+     * 等 setPainterRef 触发时自动消费。
+     * 若 PainterLayer 已挂载（painterRef.current 存在），直接应用，不暂存。
+     */
+    const setPendingStrokes = useMemoizedFn(
+        (strokes: Array<{ color: string; points: Array<{ x: number; y: number }> }>) => {
+            if (painterRef.current) {
+                painterRef.current.clearStrokes();
+                strokes.forEach((s) => painterRef.current?.addStroke(s));
+            } else {
+                pendingStrokesRef.current = strokes;
+            }
+        }
+    );
 
     const handleDrawingModeToggle = useMemoizedFn(() => {
         setDrawingMode((prev) => !prev);
@@ -79,6 +137,9 @@ export function usePainterSharing(): PainterSharingState {
         drawColor,
         setDrawColor,
         cursorsRef,
+        painterRef,
+        setPainterRef,
+        setPendingStrokes,
         handleDrawingModeToggle,
     };
 }
