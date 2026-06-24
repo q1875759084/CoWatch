@@ -23,8 +23,8 @@ import PainterLayer, {
     type PainterLayerHandle,
     type StrokeRecord,
 } from './PainterLayer';
-import { DEFAULT_STYLE_ID } from './PainterLayer/cursorStyles';
-import { DEFAULT_DRAW_COLOR, SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './constants';
+import { SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './constants';
+import { useCursorSettings } from './hooks/useCursorSettings';
 import NotePanel from './NotePanel';
 import RoomExpired from './RoomExpired';
 import styles from './index.module.scss';
@@ -66,24 +66,15 @@ export default function RoomPage() {
      */
     const [lastVideoAddedId, setLastVideoAddedId] = useState<string | undefined>(undefined);
 
-    // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
-    /** 是否开启鼠标共享（是否发送自己的位置） */
-    const [cursorEnabled, setCursorEnabled] = useState(false);
-    /** 当前选中的光标样式 ID */
-    const [selectedStyleId, setSelectedStyleId] = useState(DEFAULT_STYLE_ID);
-    /**
-     * 是否已激活虚拟光标样式（用户主动点击了某个样式，隐藏系统光标，本地渲染 canvas 虚拟光标）。
-     * 独立于 cursorEnabled（WS 广播）和 drawingMode（绘制）。
-     */
-    const [cursorStyleActive, setCursorStyleActive] = useState(false);
-    /**
-     * 是否处于绘制模式。独立于鼠标共享（cursorEnabled），两者互不依赖。
-     * - false（默认）：视频播放器可正常操作
-     * - true：在视频区按住左键拖动发送笔迹 WS，同时拦截 click 防止触发播放
-     */
-    const [drawingMode, setDrawingMode] = useState(false);
-    /** 当前画笔颜色 */
-    const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
+    // ── 鼠标/画笔偏好配置（用户主动设置，不由 WS 驱动） ──────────────────────────
+    const {
+        cursorEnabled, setCursorEnabled,
+        selectedStyleId,
+        cursorStyleActive,
+        drawingMode, setDrawingMode,
+        drawColor, setDrawColor,
+        selectStyle,
+    } = useCursorSettings();
     /** 共享笔记内容（由 WS 同步） */
     const [noteContent, setNoteContent] = useState('');
     /** 房间聊天消息列表（由 WS 广播维护，不落库） */
@@ -211,13 +202,10 @@ export default function RoomPage() {
             // 开启跟随：发送 FORCE_SYNC 让后端单播回当前状态
             sendMessage('FORCE_SYNC', {});
         } else {
-            // 切到自由模式：重置所有鼠标相关状态
-            // 自由模式本意是脱离共享，不应继续影响他人画布/光标
+            // 切到自由模式：关闭广播相关开关（样式/颜色偏好保留，切回时体验连贯）
             setCursorEnabled(false);
-            setCursorStyleActive(false);
-            setSelectedStyleId(DEFAULT_STYLE_ID);
             setDrawingMode(false);
-            // 清空自己的光标 Map 条目并重绘（不再广播，本地也不显示）
+            // 清空自己的光标 Map 条目并重绘（运行时 ref 操作，不在 useCursorSettings 内）
             const uid = userInfo?.userId ?? '__self__';
             cursorsRef.current.delete(uid);
             painterRef.current?.redraw();
@@ -404,18 +392,22 @@ export default function RoomPage() {
      *   - 点击已激活的样式 → 反选，取消虚拟光标（恢复系统默认光标）
      * 即：首次点任意样式 = 切换样式 + 开起虚拟光标；再点同一个 = 关闭虚拟光标。
      */
+    /**
+     * 点击光标样式时切换激活状态：
+     *   - 点击当前未激活时 → 激活，同时更换样式
+     *   - 点击已激活的样式 → 反选，取消虚拟光标（恢复系统默认光标）
+     * 即：首次点任意样式 = 切换样式 + 开启虚拟光标；再点同一个 = 关闭虚拟光标。
+     *
+     * selectStyle 封装 selectedStyleId + cursorStyleActive 的联动规则；
+     * 选择 'default' 时还需清理 cursorsRef 和触发重绘（运行时操作，在此处处理）。
+     */
     const handleCursorStyleSelect = useMemoizedFn((styleId: string) => {
+        selectStyle(styleId);
         if (styleId === 'default') {
-            // 点击「默认」项：关闭虚拟光标，恢复系统光标
-            setCursorStyleActive(false);
-            setSelectedStyleId('default');
+            // 选回默认光标：从 Map 移除自己的条目并重绘
             const uid = userInfo?.userId ?? '__self__';
             cursorsRef.current.delete(uid);
             painterRef.current?.redraw();
-        } else {
-            // 点击自定义样式：激活虚拟光标 + 切换样式
-            setSelectedStyleId(styleId);
-            setCursorStyleActive(true);
         }
     });
 

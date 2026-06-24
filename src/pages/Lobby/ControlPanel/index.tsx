@@ -28,7 +28,11 @@ const DRAW_COLORS = [
 // ─── CursorSettings ──────────────────────────────────────────────────────────
 
 export interface CursorSettingsProps {
-  /** 整个鼠标功能区是否禁用（自由模式下为 true） */
+  /**
+   * 共享/绘制相关控件是否禁用（自由模式下为 true）。
+   * 仅影响：鼠标共享开关、绘制模式开关、画笔颜色、清除按钮。
+   * 光标样式选择器始终可点（纯本地视觉偏好，不影响他人）。
+   */
   disabled: boolean;
   /** 鼠标共享是否开启（控制是否发送自己的位置） */
   cursorEnabled: boolean;
@@ -66,9 +70,9 @@ export function CursorSettings({
   onClearStrokesByColor,
 }: CursorSettingsProps) {
   return (
-    <CollapseSection
+      <CollapseSection
       title="鼠标设置"
-      subtitle={disabled ? '自由模式下不可用' : undefined}
+      subtitle={disabled ? '部分功能自由模式禁用' : undefined}
       collapsible
     >
       {/* 样式选择器 — default 项选中 = 系统光标；其他项选中 = 激活虚拟光标 */}
@@ -84,7 +88,6 @@ export function CursorSettings({
               title={cs.label}
               className={`${styles.cursorStyleBtn} ${isActive ? styles.cursorStyleBtnActive : ''}`}
               onClick={() => onCursorStyleSelect(cs.id)}
-              disabled={disabled}
             >
               <img src={cs.url} alt={cs.label} className={styles.cursorStyleIcon} draggable={false} />
             </button>
