@@ -19,12 +19,12 @@ import VideoUploader from './VideoUploader';
 import VideoList from './VideoList';
 import VideoTagBar from './VideoTagBar';
 import PainterLayer, {
-    type CursorState,
     type PainterLayerHandle,
     type StrokeRecord,
 } from './PainterLayer';
 import { DEFAULT_STYLE_ID } from './PainterLayer/cursorStyles';
-import { DEFAULT_DRAW_COLOR, SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './constants';
+import { SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './constants';
+import { usePainterSharing } from './hooks/usePainterSharing';
 import NotePanel from './NotePanel';
 import RoomExpired from './RoomExpired';
 import styles from './index.module.scss';
@@ -66,37 +66,23 @@ export default function RoomPage() {
      */
     const [lastVideoAddedId, setLastVideoAddedId] = useState<string | undefined>(undefined);
 
-    // ── 鼠标共享状态 ────────────────────────────────────────────────────────────
-    /** 是否开启鼠标共享（是否发送自己的位置） */
-    const [cursorEnabled, setCursorEnabled] = useState(false);
-    /** 当前选中的光标样式 ID */
-    const [selectedStyleId, setSelectedStyleId] = useState(DEFAULT_STYLE_ID);
-    /**
-     * 是否已激活虚拟光标样式（用户主动点击了某个样式，隐藏系统光标，本地渲染 canvas 虚拟光标）。
-     * 独立于 cursorEnabled（WS 广播）和 drawingMode（绘制）。
-     */
-    const [cursorStyleActive, setCursorStyleActive] = useState(false);
-    /**
-     * 是否处于绘制模式。独立于鼠标共享（cursorEnabled），两者互不依赖。
-     * - false（默认）：视频播放器可正常操作
-     * - true：在视频区按住左键拖动发送笔迹 WS，同时拦截 click 防止触发播放
-     */
-    const [drawingMode, setDrawingMode] = useState(false);
-    /** 当前画笔颜色 */
-    const [drawColor, setDrawColor] = useState(DEFAULT_DRAW_COLOR);
+    // ── 鼠标共享状态（由 usePainterSharing 管理，step1 迁移） ───────────────────
+    const {
+        cursorEnabled, setCursorEnabled,
+        selectedStyleId, setSelectedStyleId,
+        cursorStyleActive, setCursorStyleActive,
+        drawingMode, setDrawingMode,
+        drawColor, setDrawColor,
+        cursorsRef,
+        handleDrawingModeToggle,
+    } = usePainterSharing();
+
     /** 共享笔记内容（由 WS 同步） */
     const [noteContent, setNoteContent] = useState('');
     /** 房间聊天消息列表（由 WS 广播维护，不落库） */
     const [chatMessages, setChatMessages] = useState<ChatMessageData[]>([]);
     /** 节流发送 NOTE_UPDATE 的定时器 ref */
     const noteThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    /**
-     * 所有光标的状态 Map（含自己 + 远端）。
-     * key：userId（自己用 userInfo.userId）。
-     * 直接操作 Map 引用（不 setState）+ 调 painterRef.redraw() 触发 canvas 重绘，
-     * 避免每帧 mousemove 都触发 React re-render。
-     */
-    const cursorsRef = useRef<Map<string, CursorState>>(new Map());
     /** PainterLayer 命令式句柄，用于主动触发重绘 */
     const painterRef = useRef<PainterLayerHandle>(null);
     /**
@@ -417,10 +403,6 @@ export default function RoomPage() {
             setSelectedStyleId(styleId);
             setCursorStyleActive(true);
         }
-    });
-
-    const handleDrawingModeToggle = useMemoizedFn(() => {
-        setDrawingMode((prev) => !prev);
     });
 
     /**
