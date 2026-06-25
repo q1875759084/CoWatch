@@ -100,31 +100,22 @@ function createWindow(): void {
   // 业务代码无需任何修改。
   const apiHost = new URL(API_ORIGIN).host;
 
-  if (app.isPackaged) {
-    win.loadURL(`app://${apiHost}/index.html`);
-  } else if (isPreview) {
-    win.loadURL(`app://${apiHost}/index.html`);
-    win.webContents.openDevTools();
-  } else {
+  if (!app.isPackaged && !isPreview) {
     // dev 模式：webpack-dev-server 自带 proxy，直接加载 HTTP URL
     win.loadURL(DEV_SERVER_URL);
     win.webContents.openDevTools();
+  } else {
+    // preview / packaged 模式：通过 app:// 协议加载本地 dist 产物
+    win.loadURL(`app://${apiHost}/index.html`);
+    // preview 模式额外开 DevTools，用于调试打包问题
+    if (isPreview) win.webContents.openDevTools();
   }
 }
 
-// ─── 上线版（Windows 专用，目标用户为游戏玩家）────────────────────────────
-// 上线前将下方"开发版"替换为此版本
-//
-// app.whenReady().then(() => {
-//   registerAppProtocol();
-//   createWindow();
-// });
-// app.on('window-all-closed', () => app.quit());
-
-// ─── 开发版（兼容 macOS 开发机）─────────────────────────────────────────────
 app.whenReady().then(() => {
   registerAppProtocol();
   createWindow();
+  // macOS：Dock 点击时若无窗口则重新创建（Windows 不触发此事件）
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
