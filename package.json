@@ -2,11 +2,23 @@
   "name": "cowatch",
   "version": "1.0.0",
   "description": "CoWatch 游戏复盘网站前端",
-  "main": "index.js",
+  "main": "dist-electron/main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/cowatch.git"
+  },
   "scripts": {
     "dev": "webpack serve --config webpack.dev.js",
     "build": "webpack --config webpack.prod.js",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "type-check:electron": "tsc --noEmit --project tsconfig.electron.json",
+    "electron:build-main": "webpack --config webpack.electron.js",
+    "electron:dev": "npm run electron:build-main && electron .",
+    "electron:preview": "npm run electron:build && cross-env ELECTRON_PREVIEW=true electron .",
+    "electron:build": "webpack --config webpack.electron-renderer.js && webpack --config webpack.electron.js",
+    "electron:pack": "npm run electron:build && electron-builder --win --publish never",
+    "electron:pack:mac": "npm run electron:build && electron-builder --mac --publish never",
+    "electron:release": "npm run electron:build && electron-builder --win --publish always"
   },
   "engines": {
     "node": ">=20",
@@ -24,8 +36,11 @@
     "@types/react": "19.1.6",
     "@types/react-dom": "19.1.6",
     "babel-loader": "9.2.1",
+    "cross-env": "^7.0.3",
     "css-loader": "6.10.0",
     "dotenv": "17.4.2",
+    "electron": "^35.7.5",
+    "electron-builder": "^24.13.3",
     "html-webpack-plugin": "5.6.7",
     "sass": "1.71.0",
     "sass-loader": "14.2.1",

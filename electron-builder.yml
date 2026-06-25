@@ -1,0 +1,56 @@
+# electron-builder 打包配置
+# 文档：https://www.electron.build/configuration/configuration
+
+appId: site.daibao.cowatch
+productName: CoWatch
+copyright: Copyright © 2024 CoWatch
+
+# 打包时包含的文件
+files:
+  - dist/**/*          # React 页面（webpack 产物）
+  - dist-electron/**/* # Electron 主进程（webpack.electron.js 产物）
+  - package.json
+
+# 构建产物输出目录
+directories:
+  output: release
+  buildResources: build  # 图标等资源放这里（build/icon.ico）
+
+# ─── Windows 配置（上线目标平台）────────────────────────────────────────────
+win:
+  target:
+    - target: nsis       # NSIS 安装包（.exe 安装程序）
+      arch:
+        - x64            # 64 位，覆盖 Win10/11 主流用户
+  # 应用图标（需要在 build/icon.ico 放置，256x256 或更大）
+  # icon: build/icon.ico
+
+# ─── macOS 配置（仅用于开发机本地验证，不对外发布）─────────────────────────
+mac:
+  target:
+    - target: dmg        # .dmg 磁盘镜像，双击挂载即可运行，无需签名
+      arch:
+        - arm64          # Apple Silicon（M 系列芯片）
+        - x64            # Intel Mac（兼容）
+  # 本地验证不做代码签名，跳过公证
+  identity: null
+
+# NSIS 安装包配置
+nsis:
+  # 单文件安装包（用户无需选择安装目录，一键安装）
+  oneClick: true
+  # 安装到用户目录（不需要管理员权限，避免 UAC 弹窗）
+  perMachine: false
+  # 安装完成后自动启动
+  runAfterFinish: true
+  # 创建桌面快捷方式
+  createDesktopShortcut: true
+  # 创建开始菜单快捷方式
+  createStartMenuShortcut: true
+
+# ─── 自动更新配置（GitHub Releases）────────────────────────────────────────
+publish:
+  provider: github
+  # owner 和 repo 会从 package.json 的 repository 字段读取
+  # 需要设置环境变量 GH_TOKEN 才能发布
+  releaseType: release

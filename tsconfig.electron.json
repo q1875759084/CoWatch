@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    // Electron 主进程是 CommonJS 模块环境
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    // 主进程有 Node.js 全局类型（fs、path、child_process 等）
+    "types": ["node"],
+    "outDir": "dist-electron",
+    "rootDir": "electron"
+  },
+  "include": ["electron/**/*", "src/global.d.ts"],
+  "exclude": ["node_modules", "dist", "dist-electron", "src"]
+}

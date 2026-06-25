@@ -42,3 +42,27 @@ declare module '*.gif' {
   const url: string;
   export default url;
 }
+
+// ─── Electron contextBridge 暴露的 API（preload.ts 中定义）──────────────────
+interface ElectronBridge {
+  /** 标识当前运行在 Electron 环境中 */
+  readonly isElectron: true;
+
+  // 录制相关（阶段2实现后解注释）
+  // recorder: {
+  //   start: (windowId: string) => Promise<void>;
+  //   stop: () => Promise<void>;
+  //   onProgress: (cb: (pct: number) => void) => void;
+  // };
+
+  // 本地存储（阶段1实现后解注释）
+  // store: {
+  //   get: (key: string) => Promise<string | null>;
+  //   set: (key: string, value: string) => Promise<void>;
+  //   delete: (key: string) => Promise<void>;
+  // };
+}
+
+declare interface Window {
+  electronBridge?: ElectronBridge;
+}

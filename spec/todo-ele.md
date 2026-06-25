@@ -12,7 +12,7 @@ pro 会员增值功能。用户在游戏过程中后台静默录制，边录边�
 - **electron-vite**：官方推荐脚手架，支持 React + TypeScript，热更新开箱即用
 - UI 层复用现有 CoWatch React 组件，零迁移成本
 
-### 录制方案：ffmpeg 子进程（路线 A，推荐）
+### 录制方案：ffmpeg 子进程
 - 用 `ffmpeg-static` npm 包内置各平台 ffmpeg 可执行文件（包体积 +60-80MB）
 - Main Process 通过 `child_process.spawn` 调用 ffmpeg
 - ffmpeg 命令参数与现有 `.bat` 脚本一致（`-crf 30 -g 300` 等）
