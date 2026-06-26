@@ -10,6 +10,22 @@
  * 缓存目录：userData/hls-cache/{cacheKey}
  *   - userData 是 Electron 提供的用户数据目录（各平台路径不同）
  *   - cacheKey 取自剥离签名后的 URL pathname，去掉前导 /，/ 替换为 _
+ *
+ * ─── 新格式切片（后端代理路径）处理流程 ─────────────────────────────────────
+ *
+ * 自 refactor-hls-segment-proxy 变更后，m3u8 中切片 URL 改为：
+ *   /api/rooms/{roomId}/videos/{videoId}/segments/{segmentName}.ts
+ *
+ * 在 Electron 中，此请求以 app://localhost/api/rooms/... 发出，流程如下：
+ *   1. main.ts protocol.handle 先判断 isHlsSegment → true（含 /segments/）
+ *   2. 进入 handleHlsSegment
+ *   3. realUrl 替换 app://localhost → apiOrigin
+ *      → http://backend/api/rooms/{roomId}/videos/{videoId}/segments/{segmentName}.ts
+ *   4. net.fetch(realUrl) → 后端校验权限 → 302 重定向到 CDN 签名 URL
+ *   5. net.fetch 自动跟随 302，获取 CDN 响应
+ *   6. 写入本地 cache（cache key = pathname，无签名参数，可复用）
+ *   7. parseSegmentMeta(realUrl) 解析 roomId/videoId/segmentName（新格式 regex 已支持）
+ *   8. extractUserId(realUrl) 返回 'anonymous'（后端代理路径无 uid 参数，可接受）
  */
 
 import fs from 'fs';

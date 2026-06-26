@@ -33,11 +33,16 @@ export const REPORT_FLUSH_DELAY = 3000;
 
 /**
  * 判断是否为需要缓存的 HLS 片段请求。
- * pathname 包含 /cowatch/ 且以 .ts 结尾（兼容 CDN 和本地 /uploads/cowatch/ 两种路径）。
+ *
+ * 兼容两种 URL 格式：
+ *   1. 旧格式（CDN 直链 / 本地 /uploads）：pathname 含 /cowatch/ 且以 .ts 结尾
+ *   2. 新格式（后端代理路径）：pathname 含 /segments/ 且以 .ts 结尾
+ *      → /api/rooms/{roomId}/videos/{videoId}/segments/{segmentName}.ts
  */
 export function isHlsSegment(url: string): boolean {
   const { pathname } = new URL(url);
-  return pathname.includes('/cowatch/') && pathname.endsWith('.ts');
+  if (!pathname.endsWith('.ts')) return false;
+  return pathname.includes('/cowatch/') || pathname.includes('/segments/');
 }
 
 /**
@@ -61,17 +66,31 @@ export function stripSignature(url: string): string {
 /**
  * 从 HLS 片段 URL 路径中解析 roomId、videoId、segmentName。
  *
- * COS/CDN 路径格式：/cowatch/{roomId}/{videoId}/{segmentName}.ts
- * 本地路径格式：   /uploads/cowatch/{roomId}/{videoId}/{segmentName}.ts
+ * 支持两种路径格式：
+ *   旧格式（CDN 直链）：  /cowatch/{roomId}/{videoId}/{segmentName}.ts
+ *   旧格式（本地上传）：  /uploads/cowatch/{roomId}/{videoId}/{segmentName}.ts
+ *   新格式（后端代理）：  /api/rooms/{roomId}/videos/{videoId}/segments/{segmentName}.ts
+ *                         （或 app://localhost/api/rooms/...）
  *
  * 返回 null 表示解析失败（不上报）。
  */
 export function parseSegmentMeta(url: string): SegmentMeta | null {
   try {
     const { pathname } = new URL(url);
-    const match = pathname.match(/\/cowatch\/([^/]+)\/([^/]+)\/([^/]+\.ts)$/);
-    if (!match) return null;
-    return { roomId: match[1], videoId: match[2], segmentName: match[3] };
+
+    // 新格式：/api/rooms/{roomId}/videos/{videoId}/segments/{segmentName}.ts
+    const newMatch = pathname.match(/\/rooms\/([^/]+)\/videos\/([^/]+)\/segments\/([^/]+\.ts)$/);
+    if (newMatch) {
+      return { roomId: newMatch[1], videoId: newMatch[2], segmentName: newMatch[3] };
+    }
+
+    // 旧格式：/cowatch/{roomId}/{videoId}/{segmentName}.ts（含 /uploads/ 前缀）
+    const oldMatch = pathname.match(/\/cowatch\/([^/]+)\/([^/]+)\/([^/]+\.ts)$/);
+    if (oldMatch) {
+      return { roomId: oldMatch[1], videoId: oldMatch[2], segmentName: oldMatch[3] };
+    }
+
+    return null;
   } catch {
     return null;
   }
