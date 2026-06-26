@@ -164,7 +164,7 @@ export async function handleHlsSegment(request: Request): Promise<Response> {
   }
 
   // ── 未命中：发起真实网络请求 ─────────────────────────────────────────────
-  // ⚠️ request.url 是 app://localhost/uploads/cowatch/...，不能直接传给 net.fetch，
+  // ⚠️ request.url 是 app://localhost/api/rooms/...，不能直接传给 net.fetch，
   // 否则会递归触发 protocol.handle。必须替换为真实后端地址（http://...）。
   const realUrl = request.url.replace(/^app:\/\/[^/]+/, apiOrigin);
   const response = await net.fetch(realUrl, {
@@ -175,8 +175,8 @@ export async function handleHlsSegment(request: Request): Promise<Response> {
     // 克隆响应，异步写入缓存（不阻塞返回）
     const arrayBuffer = await response.clone().arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
-    fs.writeFile(filePath, buffer, () => {
-      // 写入失败静默忽略（下次请求会重新下载）
+    fs.writeFile(filePath, buffer, (err) => {
+      if (err) console.error('[HLS cache] write error:', filePath, err);
     });
 
     // 上报真实 CDN 下载记录
