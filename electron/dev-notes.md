@@ -285,3 +285,52 @@ console.log('[cache] MISS', path.basename(filePath));
 ```
 
 **WS 是例外：** `ws://` 不经过 `protocol.handle`，直接走 Chromium 原生 WebSocket 实现，Network 面板里的 WS 连接是真实的，状态反映真实网络行为。
+
+---
+
+## 踩坑记录
+
+### HLS 切片 CDN 直链在 Electron 下跨域报错
+
+**现象：** Electron preview 模式连接线上后端，hls.js 请求 m3u8 成功，但每个 `.ts` 切片请求均失败（DevTools 显示 CORS 错误），视频无法播放。后端 m3u8 内容里写的是完整 CDN 签名 URL（`https://cdn.cowatch.daibao.site/cowatch/...seg000.ts?sign=...`）。
+
+**根因：** hls.js 在渲染进程里直接发出对 CDN 绝对 URL 的 HTTP 请求，该请求不经过 `protocol.handle`（只拦截 `app://` scheme），而是由 Chromium 直接发到 CDN。此时请求 Origin 为 `app://localhost`，CDN 不在 CORS 白名单里，preflight OPTIONS 被 CDN 拒绝。
+
+**三种修复方案对比：**
+
+| 方案 | 改动位置 | 代价 |
+|------|---------|------|
+| CDN 加 CORS 头 | CDN 控制台 | 最小，但需处理防盗链规则冲突，且 OPTIONS 请求本身会被访问控制逻辑拦截 |
+| m3u8 改为相对路径 + 后端 segment 接口 | 后端 hlsService.ts + 新增接口 | 中等，架构更干净，Web/Electron 统一（**最终选择**） |
+| Electron 层拦截 m3u8 响应替换 URL | cache.ts | 改动最小，但逻辑放在 Electron 层不够清晰 |
+
+**解决（方案2——后端 segment 代理接口）：**
+
+m3u8 切片 URL 改为后端相对路径：
+```
+/api/rooms/{roomId}/videos/{videoId}/segments/{segmentName}.ts
+```
+
+后端新增 `GET /:roomId/videos/:videoId/segments/:segmentName` 接口：鉴权通过后 302 重定向到 CDN 签名 URL（线上）或 `/uploads/...`（本地）。渲染进程请求该相对路径 → `app://localhost/api/rooms/...` → `protocol.handle` → 后端代理 → 302 → CDN，整个路径全程在 `app://` 内，无跨域。
+
+**为什么当初的设计是合理的：** 原设计针对纯 Web 端——hls.js 直连 CDN 是行业主流做法（Netflix、B 站均类似架构），后端不参与切片传输，省带宽，SW 做 cache-first 二次播放零流量。Electron 的 `app://` 带来了新的 CORS 约束，是加入 Electron 后才出现的新需求，原设计没有义务提前考虑。
+
+---
+
+### 架构决策
+
+### HLS 切片应通过后端代理路径分发，不直接在 m3u8 中暴露 CDN 签名 URL
+
+**背景：** 评估 HLS 分发架构时有两种选择：①切片 URL 直接写 CDN 签名地址；②切片 URL 写后端代理路径，后端鉴权后 302 到 CDN。
+
+**结论：** 选方案②——m3u8 切片 URL 统一为 `/api/rooms/.../segments/seg000.ts`，后端接口完成鉴权 + 302。
+
+**方案②在纯 Web 端的影响分析：**
+
+- **带宽**：后端只做鉴权 + 302，不传输视频数据，服务器带宽不受影响
+- **延迟**：每个切片多一次 HTTP 302 跳转（~10~50ms），hls.js 有预加载机制，用户无感知
+- **安全性提升**：切片访问需要有效登录态（JWT），比纯 URL 签名更标准——签名 URL 可被任意人复制在有效期内使用
+- **SW cache key 简化**：cache key 变为 `/api/rooms/.../segments/seg000.ts`，无签名参数，不再需要 `stripSignature` 逻辑（当前代码保留为向下兼容，新格式实际上无需剥离）
+- **Electron 兼容**：切片请求走 `app://` → `protocol.handle` → 后端，完全规避跨域
+
+**通用原则：** 今后凡是需要从 CDN 获取鉴权资源（视频、音频等），默认用后端代理路径而非直接写 CDN 绝对 URL，以保证 Web/Electron 行为一致，兼顾可扩展性。
