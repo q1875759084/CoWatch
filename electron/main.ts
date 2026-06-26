@@ -1,6 +1,7 @@
 import { app, BrowserWindow, protocol, net } from 'electron';
 import path from 'path';
 import { URL } from 'url';
+import { initHlsCache, setApiOrigin, isHlsSegment, handleHlsSegment } from './handlers/cache';
 
 // ─── 三种运行模式 ────────────────────────────────────────────────────────────
 //
@@ -27,16 +28,25 @@ const isPreview = process.env.ELECTRON_PREVIEW === 'true';
 const API_ORIGIN = process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002';
 
 // ─── 注册 app:// 自定义协议 ──────────────────────────────────────────────────
-// 设计思路：
-//   页面以 app://<apiHost>/index.html 加载，其中 apiHost 取自 API_ORIGIN
-//   （如 localhost:3002 或 cowatch.daibao.site）。
+// 背景：
+//   打包后无法直接用 file:// 加载页面——file:// 没有 origin，业务代码里所有
+//   相对路径（/api/xxx）会被补全为 file:///api/xxx，不走网络，全部失败。
 //
-//   这样 window.location.host === apiHost，所有业务代码里的相对路径推断
-//   （包括 WebSocket 连接）都和 Web 环境行为一致，业务代码零修改。
+// 方案：自定义 app:// 协议作为中间层
+//   1. win.loadURL('app://localhost/index.html')
+//      → 页面 origin 变为 app://localhost
+//      → 相对路径 /api/xxx 补全为 app://localhost/api/xxx
+//      → 由 protocol.handle 拦截，业务代码无需修改
 //
-//   protocol.handle 拦截 app:// 请求后：
-//     - 后端路径（/api/、/socket、/uploads/、/avatar/）→ 转发到 API_ORIGIN
-//     - 其余路径（前端 JS/CSS/图片等）→ 从本地 dist 目录读取
+//   2. protocol.handle 充当反向代理：
+//      - 后端路径（/api/、/socket、/uploads/、/avatar/）
+//        → 拼接真实后端地址 API_ORIGIN，用 net.fetch 发出真实 HTTP 请求
+//        → 转发前删除 Origin 头（原值为 app://localhost，后端 CORS 不认）
+//      - 静态资源路径（JS/CSS/图片等）
+//        → 从本地 dist 目录读取（file:// 协议）
+//
+//   3. net.fetch 底层仍是 Chromium C++ 网络栈，DNS/TCP/TLS 由 Chromium 处理，
+//      我们只做 URL 映射，无需手动实现任何网络协议。
 //
 // 注意：registerSchemesAsPrivileged 必须在 app.whenReady() 之前调用。
 protocol.registerSchemesAsPrivileged([
@@ -64,13 +74,28 @@ function registerAppProtocol(): void {
       pathname.startsWith('/uploads/') ||
       pathname.startsWith('/avatar/');
 
+    // ── HLS 片段 → 文件系统 cache-first ──────────────────────────────────
+    if (isHlsSegment(request.url)) {
+      return handleHlsSegment(request);
+    }
+
     if (isBackendPath) {
       const backendUrl = `${API_ORIGIN}${pathname}${reqUrl.search}`;
+      // Origin 头值为 app://localhost，后端 CORS 白名单里没有该 scheme，会直接拒绝。
+      // 反向代理的标准做法是不透传浏览器 Origin（nginx 同理），删掉即可。
+      // 后端 cors 中间件收不到 Origin 时默认放行，不影响功能。
+      const headers = new Headers(request.headers);
+      headers.delete('origin');
+      // GET / HEAD 不能带 body；有 body 时需要加 duplex: 'half'
+      // （Electron net.fetch 底层是 Node.js undici，发送 body 时必须声明此选项；
+      //   标准浏览器 fetch 不需要）
+      const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
       return net.fetch(backendUrl, {
         method: request.method,
-        headers: request.headers,
-        body: request.body,
-      });
+        headers,
+        body: hasBody ? request.body : undefined,
+        ...(hasBody ? { duplex: 'half' } : {}),
+      } as RequestInit);
     }
 
     // ── 前端静态资源 → 从本地 dist 读取 ──────────────────────────────────
@@ -94,25 +119,21 @@ function createWindow(): void {
     },
   });
 
-  // apiHost 取自 API_ORIGIN，如 'localhost:3002' 或 'cowatch.daibao.site'。
-  // 用它作为 app:// 的 host，使得 window.location.host === apiHost，
-  // WebSocket 连接（ws://${window.location.host}/socket）因此自动指向正确后端，
-  // 业务代码无需任何修改。
-  const apiHost = new URL(API_ORIGIN).host;
-
   if (!app.isPackaged && !isPreview) {
     // dev 模式：webpack-dev-server 自带 proxy，直接加载 HTTP URL
     win.loadURL(DEV_SERVER_URL);
     win.webContents.openDevTools();
   } else {
     // preview / packaged 模式：通过 app:// 协议加载本地 dist 产物
-    win.loadURL(`app://${apiHost}/index.html`);
+    win.loadURL('app://localhost/index.html');
     // preview 模式额外开 DevTools，用于调试打包问题
     if (isPreview) win.webContents.openDevTools();
   }
 }
 
 app.whenReady().then(() => {
+  initHlsCache();
+  setApiOrigin(API_ORIGIN);
   registerAppProtocol();
   createWindow();
   // macOS：Dock 点击时若无窗口则重新创建（Windows 不触发此事件）

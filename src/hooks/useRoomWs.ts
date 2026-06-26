@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import { useRoom } from '@/context/RoomContext';
+import { apiOrigin } from '@/utils/env';
 import type {
   WsMessage,
   SyncProgressData,
@@ -149,8 +150,9 @@ export function useRoomWs({
   useEffect(() => {
     if (!roomId || !token) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/socket?roomId=${roomId}&token=${encodeURIComponent(token)}`;
+    const { protocol: originProtocol, host } = new URL(apiOrigin);
+    const wsProtocol = originProtocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${host}/socket?roomId=${roomId}&token=${encodeURIComponent(token)}`;
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;

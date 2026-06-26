@@ -28,6 +28,16 @@
 // 类型检查由 tsconfig.sw.json 单独负责，IDE 的主 tsconfig 跳过此文件
 /// <reference lib="webworker" />
 
+import {
+  isHlsSegment,
+  stripSignature,
+  parseSegmentMeta,
+  extractUserId,
+  SegmentViewItem,
+  REPORT_QUEUE_MAX,
+  REPORT_FLUSH_DELAY,
+} from './utils/hlsSegment';
+
 const CACHE_NAME = 'cowatch-hls-v1';
 
 /**
@@ -38,95 +48,7 @@ const CACHE_NAME = 'cowatch-hls-v1';
  */
 const REPORT_URL = '/api/rooms/segment-view';
 
-/**
- * 判断是否为需要 SW 缓存的 HLS 片段请求。
- *
- * 基于路径特征：
- *   - pathname 包含 /cowatch/（匹配 COS/CDN 和本地 /uploads/cowatch/ 两种模式）
- *   - pathname 以 .ts 结尾（HLS 片段，非 .m3u8）
- */
-function isHlsSegment(request: Request): boolean {
-  const { pathname } = new URL(request.url);
-  return pathname.includes('/cowatch/') && pathname.endsWith('.ts');
-}
-
-/**
- * 剥离时效签名 query 参数，返回纯路径 URL（用作 cache key）。
- *
- * 兼容两种签名模式：
- *   - CDN TypeA 鉴权：sign={timestamp}-{rand}-{uid}-{md5}，剥离 sign 参数
- *   - 本地模式 COS SDK 签名：q-sign-* 系列参数，一并剥离
- */
-function stripSignature(url: string): string {
-  const u = new URL(url);
-  // CDN TypeA 鉴权参数
-  u.searchParams.delete('sign');
-  // 流量归因参数（不参与验签，但需从 cache key 中剥离，否则同一片段因 uid 不同产生多条缓存）
-  u.searchParams.delete('uid');
-  // COS SDK 签名参数（本地模式）
-  [
-    'q-sign-algorithm',
-    'q-ak',
-    'q-sign-time',
-    'q-key-time',
-    'q-header-list',
-    'q-url-param-list',
-    'q-signature',
-  ].forEach((p) => u.searchParams.delete(p));
-  return u.toString();
-}
-
-/**
- * 从 URL 的 uid query 参数中读取 userId（后端生成 m3u8 时附加，不参与 CDN 签名）。
- *
- * 设计说明：
- *   CDN TypeA sign 的 uid 字段固定为 '0'，不承担业务语义。
- *   userId 作为独立的 &uid={userId} 参数附加在 URL 上，CDN 透传不干扰验签。
- *   SW 直接读取，逻辑清晰，无需任何字符串解析。
- *
- * 若参数不存在（本地模式）返回 'anonymous'。
- */
-function extractUserId(url: string): string {
-  try {
-    return new URL(url).searchParams.get('uid') ?? 'anonymous';
-  } catch {
-    return 'anonymous';
-  }
-}
-
-/**
- * 从 HLS 片段 URL 的路径中解析 roomId、videoId、segmentName。
- *
- * COS/CDN 路径格式：/cowatch/{roomId}/{videoId}/{segmentName}.ts
- * 本地路径格式：   /uploads/cowatch/{roomId}/{videoId}/{segmentName}.ts
- *
- * 返回 null 表示解析失败（不上报）。
- */
-function parseSegmentMeta(url: string): {
-  roomId: string;
-  videoId: string;
-  segmentName: string;
-} | null {
-  try {
-    const { pathname } = new URL(url);
-    // 匹配 /cowatch/{roomId}/{videoId}/{segmentName}.ts
-    const match = pathname.match(/\/cowatch\/([^/]+)\/([^/]+)\/([^/]+\.ts)$/);
-    if (!match) return null;
-    return { roomId: match[1], videoId: match[2], segmentName: match[3] };
-  } catch {
-    return null;
-  }
-}
-
 // ─── 批量上报队列 ─────────────────────────────────────────────────────────────
-
-interface SegmentViewItem {
-  roomId: string;
-  videoId: string;
-  segmentName: string;
-  userId: string;
-  bytes: number;
-}
 
 /**
  * 待上报队列，满 10 条或超过 3 秒自动 flush。
@@ -138,9 +60,6 @@ interface SegmentViewItem {
  */
 const reportQueue: SegmentViewItem[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-const QUEUE_MAX = 10;    // 满 10 条立即 flush
-const FLUSH_DELAY = 3000; // 最长等待 3 秒
 
 function flushReportQueue(): void {
   if (flushTimer !== null) {
@@ -169,12 +88,12 @@ function reportSegmentView(
 ): void {
   reportQueue.push({ ...meta, userId, bytes });
 
-  if (reportQueue.length >= QUEUE_MAX) {
+  if (reportQueue.length >= REPORT_QUEUE_MAX) {
     // 队列已满，立即 flush
     flushReportQueue();
   } else if (flushTimer === null) {
-    // 启动定时器，最多等待 FLUSH_DELAY 后 flush
-    flushTimer = setTimeout(flushReportQueue, FLUSH_DELAY);
+    // 启动定时器，最多等待 REPORT_FLUSH_DELAY 后 flush
+    flushTimer = setTimeout(flushReportQueue, REPORT_FLUSH_DELAY);
   }
 }
 
@@ -206,7 +125,7 @@ self.addEventListener('activate', (event) => {
 // ─── fetch ────────────────────────────────────────────────────────────────────
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
-  if (!isHlsSegment(event.request)) return;
+  if (!isHlsSegment(event.request.url)) return;
 
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);

@@ -40,7 +40,10 @@ initMonitor();
 
 // 注册 Service Worker（HLS .ts 片段 cache-first 缓存，第二次播放 0 流量）
 // SW 文件在根路径，作用域覆盖整个站点
-if ('serviceWorker' in navigator) {
+//
+// Electron 跳过：app:// 协议不在 SW 白名单（只允许 https:// 和 http://localhost），
+// 注册会直接失败。Electron 环境下 HLS 缓存由 Main 进程的 handlers/cache.ts 替代实现。
+if ('serviceWorker' in navigator && !window.electronBridge?.isElectron) {
   window.addEventListener('load', () => {
     navigator.serviceWorker
       .register('/sw.js')

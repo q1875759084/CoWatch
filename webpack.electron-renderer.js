@@ -3,20 +3,16 @@
  *
  * 继承 webpack.prod.js，覆盖两个关键点：
  *
- * 1. publicPath: './' 而非 '/'
- *    原因：preview/packaged 模式下页面通过 app:// 协议加载。
- *    绝对路径 /bundle.js 会被解析为系统根目录，导致资源 404。
- *    相对路径 ./bundle.js 则相对于 index.html 所在目录，路径正确。
+ * 1. publicPath: '/'
+ *    app:// 协议注册了 standard: true，Chromium 将其视为标准协议，
+ *    绝对路径 /bundle.js 会被正确解析为 app://localhost/bundle.js，
+ *    由 protocol.handle 从本地 dist 目录读取。
+ *    不能用 './'：相对路径会基于当前路由（如 /room/2XWEVD/）拼接，
+ *    导致图片等资源路径变成 /room/2XWEVD/8815f2f....webp，全部 404。
  *
  * 2. __DEPLOY_ENV__: 'dev'
  *    Electron 不走 CI/CD，DEPLOY_ENV 环境变量永远不存在，
  *    监控 SDK 固定进入 development 模式（不上报）。
- *
- * 不再需要注入 __IS_ELECTRON__ / __ELECTRON_API_ORIGIN__：
- *    所有 HTTP 请求已由 main.ts 注册的 app:// protocol 在 Main 进程中透明转发，
- *    业务代码继续使用相对路径（/api/xxx），与 Web 版本完全一致，无需感知 Electron 环境。
- *    WebSocket 连接通过 window.location.host 推断，因为 app:// 的 host 就是后端地址，
- *    业务代码与 Web 版本完全一致。
  */
 
 const { mergeWithCustomize, unique } = require('webpack-merge');
@@ -34,7 +30,7 @@ module.exports = mergeWithCustomize({
   ),
 })(prod, {
   output: {
-    publicPath: './',
+    publicPath: '/',
   },
   plugins: [
     new DefinePlugin({

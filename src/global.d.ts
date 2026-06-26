@@ -47,6 +47,11 @@ declare module '*.gif' {
 interface ElectronBridge {
   /** 标识当前运行在 Electron 环境中 */
   readonly isElectron: true;
+  /**
+   * 后端 origin，格式如 'http://localhost:3002' 或 'https://cowatch.daibao.site'。
+   * 供 src/utils/env.ts 使用，业务代码不直接读取此字段。
+   */
+  readonly apiOrigin: string;
 
   // 录制相关（阶段2实现后解注释）
   // recorder: {
