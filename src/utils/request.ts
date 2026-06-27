@@ -77,6 +77,9 @@ request.interceptors.response.use(
         try {
           const newToken = await refreshTokenRequest();
           setAccessToken(newToken);
+          // Electron 环境：同步推送最新 token 给主进程，防止录制上传用过期 token
+          const bridge = (window as Window & { electronBridge?: { updateAuthToken?: (t: string) => void } }).electronBridge;
+          bridge?.updateAuthToken?.(newToken);
           pendingQueue.forEach(({ resolve }) => resolve(newToken));
           pendingQueue = [];
           isRefreshing = false;

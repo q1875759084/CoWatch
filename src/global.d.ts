@@ -53,12 +53,27 @@ interface ElectronBridge {
    */
   readonly apiOrigin: string;
 
-  // 录制相关（阶段2实现后解注释）
-  // recorder: {
-  //   start: (windowId: string) => Promise<void>;
-  //   stop: () => Promise<void>;
-  //   onProgress: (cb: (pct: number) => void) => void;
-  // };
+  recorder: {
+    /** 检测当前机器可用的最佳硬件/软件编码器 */
+    detectEncoder: () => Promise<import('./types/recorder').EncoderDetectResult>;
+    /** 获取可录制的窗口/整屏列表 */
+    getSources: () => Promise<import('./types/recorder').RecorderSource[]>;
+    /** 开始录制 */
+    start: (windowId: string, displayTitle: string, roomId: string, authToken: string) => Promise<void>;
+    /** 停止录制（等待剩余切片上传完成后调用 finish 接口） */
+    stop: () => Promise<void>;
+    /** 注册录制计时回调（每秒触发，seconds 为已录秒数） */
+    onTick: (cb: (seconds: number) => void) => void;
+    /** 注册上传进度回调 */
+    onProgress: (cb: (info: import('./types/recorder').RecordingProgress) => void) => void;
+    /** 移除录制计时回调 */
+    offTick: () => void;
+    /** 移除上传进度回调 */
+    offProgress: () => void;
+  };
+
+  /** 推送最新 JWT token 给主进程，token 无感刷新后调用，防止录制上传用过期 token */
+  updateAuthToken: (token: string) => Promise<void>;
 
   // 本地存储（阶段1实现后解注释）
   // store: {

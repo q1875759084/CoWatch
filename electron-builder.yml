@@ -34,6 +34,10 @@ mac:
         - x64            # Intel Mac（兼容）
   # 本地验证不做代码签名，跳过公证
   identity: null
+  # Info.plist 权限说明字符串（macOS 系统弹窗所必须）
+  # 缺少此项时打包后的 .app 调用 desktopCapturer.getSources 不会弹出授权对话框
+  extendInfo:
+    NSScreenCaptureUsageDescription: CoWatch 需要录制屏幕内容以支持房间同步录制功能。
 
 # NSIS 安装包配置
 nsis:

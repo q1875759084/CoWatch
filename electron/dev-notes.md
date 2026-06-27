@@ -334,3 +334,107 @@ m3u8 切片 URL 改为后端相对路径：
 - **Electron 兼容**：切片请求走 `app://` → `protocol.handle` → 后端，完全规避跨域
 
 **通用原则：** 今后凡是需要从 CDN 获取鉴权资源（视频、音频等），默认用后端代理路径而非直接写 CDN 绝对 URL，以保证 Web/Electron 行为一致，兼顾可扩展性。
+
+---
+
+### ffmpeg 停止后尾片（最后一段 HLS 切片）丢失
+
+**现象：** 点击"停止录制"后，录制结果缺少最后几秒内容——最后一个 `.ts` 切片（通常不足 `hls_time` = 10s）未上传到服务端。
+
+**根因：** `stop()` 流程先关闭 chokidar watcher，再向 ffmpeg 发 `SIGTERM`。ffmpeg 收到信号后仍会继续将内存帧 flush 写入磁盘（macOS `avfoundation` 尤其明显，可能需要数秒），但 watcher 已经关闭，新写入的切片无法触发 `add` 事件，无法进入上传队列。
+
+**解决：** ffmpeg 进程彻底退出（`close` 事件）后，执行一次手动目录扫描：
+```ts
+const files = fs.readdirSync(sessionTmpDir).filter(f => f.endsWith('.ts'));
+for (const f of files) {
+  if (!queuedFileNames.has(f)) {
+    // 补入上传队列
+    uploadSegment(path.join(sessionTmpDir, f), ...);
+  }
+}
+```
+通过 `queuedFileNames` Set 去重，避免重复上传 watcher 已处理的切片。
+
+---
+
+### macOS `avfoundation` 录制内容为空（0 字节或无视频流）
+
+**现象：** 点击"停止录制"，ffmpeg 报告退出成功，但上传的切片为空文件或后端解析时无视频流。日志显示 ffmpeg 收到 `SIGTERM` 后 stdout 仍持续输出约 1~2 秒。
+
+**根因：** macOS `avfoundation` 屏幕采集存在帧 I/O 缓冲，`SIGTERM` 后 ffmpeg 需要时间 flush 剩余帧到磁盘。若等待时间不足（原来为 5s，某些情况下 avfoundation 需要更长时间），文件尚未完整写入就被判定超时，进入 SIGKILL + 清理流程，导致切片内容为空。
+
+**解决：** 将 ffmpeg 退出等待时间从 5s 延长到 **15s**：
+```ts
+// 发送 SIGTERM
+ffmpegProcess.kill('SIGTERM');
+// 等待最多 15s，超时再 SIGKILL
+const killTimer = setTimeout(() => ffmpegProcess?.kill('SIGKILL'), 15_000);
+ffmpegProcess.on('close', () => clearTimeout(killTimer));
+```
+15s 兜底足以覆盖 avfoundation 的 flush 延迟，正常情况 ffmpeg 在 1~3s 内退出，`SIGKILL` 不会被触发。
+
+---
+
+### macOS avfoundation 屏幕录制 PTS 差值为零，视频时长显示 0:00
+
+**现象：** ffmpeg 日志显示 `time=00:00:00.03 / dup=99% / Non-monotonous DTS`，录制了 3~13 秒的视频，播放器显示 `0:00 / 0:00`，且画面只有一帧（录制开始时的截图）。
+
+**根因：** macOS `avfoundation` 屏幕捕获给每一帧打的 PTS 差值为 0（不是绝对值太大，而是帧与帧之间没有时间差）。libx264 编码时每帧 duration=0，HLS muxer 写出时 DTS 不单调，输出文件中所有帧时间戳集中在约 0.03 秒内，`dup=N-2` 帧全是重复帧。
+
+**排查过程（三次无效尝试）：**
+
+| 尝试 | 为什么无效 |
+|------|-----------|
+| `-use_wallclock_as_timestamps 1` | avfoundation demuxer 直接忽略，该选项仅对 v4l2/alsa（Linux 设备）有效 |
+| `-vf setpts=PTS-STARTPTS` | 只做 PTS 绝对值平移，帧间差值仍为 0，每帧 duration 仍为 0 |
+| `setpts=PTS-STARTPTS` + `-bf 0` | B 帧消失、DTS 警告消失，但 duration=0 被原样传给编码器，切片文件真实时长仍只有 0.37s |
+
+**解决：** macOS 分支加 `-vf fps=30 -bf 0`：
+
+```ts
+const darwinExtraArgs: string[] = process.platform === 'darwin'
+  ? ['-vf', 'fps=30', '-bf', '0']
+  : [];
+```
+
+- **`-vf fps=30`**：完全丢弃 avfoundation 的原始 PTS，按 30fps 均匀重新分配时间戳（第 0 帧=0, 第 1 帧=1/30s, ...），等价于 OBS 的 "Use CFR" 选项。这是 avfoundation 屏幕录制的标准处理方式。
+- **`-bf 0`**：禁用 B 帧，使 DTS 严格等于 PTS，消除 HLS muxer 的 DTS 不单调警告。屏幕录制场景下 B 帧压缩收益极小（静止帧 P/B 几乎全为 skip），禁用无实质质量损失，且降低编码延迟。
+
+**验证方式：** 用 `ffprobe -v error -show_entries format=duration` 检查切片文件真实时长，而非只看 ffmpeg 日志。
+
+**Windows 不受影响：** gdigrab 由 ffmpeg 自己维护 PTS（不依赖外部驱动），天然单调，无需该修复。
+
+---
+
+### generateM3u8 最后一片 #EXTINF 硬编码导致短录制时长显示错误
+
+**现象：** Electron 录制 3~13 秒的视频（只有 1 个切片），后端生成的 m3u8 里写 `#EXTINF:10.000000`，播放器据此计算总时长为 10s，但实际视频流只有几秒，进度条和时长均显示异常。
+
+**根因：** `generateM3u8` 对所有切片一律写固定值 `HLS_SEGMENT_DURATION=10`，没有区分录制型视频（最后一片可能不足 10s）和普通上传视频。
+
+**解决：**
+1. 新增 `migrations/004_video_duration.sql`：为 `room_videos` 表加 `duration_seconds INTEGER` 字段（nullable，不影响旧数据）
+2. `recordingFinish` 接口写入 `durationSeconds` 到 DB
+3. `generateM3u8` 当 `video.duration_seconds` 有值时，最后一片 `#EXTINF` 改为 `totalDuration - 10 × (n-1)`
+
+旧视频和手动上传视频 `duration_seconds` 为 NULL，走原有逻辑，完全向后兼容。
+
+---
+
+### 主进程异步清理时模块变量已被重置（竞态陷阱）
+
+**现象：** 偶发：第二次录制开始后，第一次录制的临时目录 `tmp/cowatch-rec/<sessionId-1>/` 未被清理，残留在磁盘。日志显示 `fs.rm` 回调里 `tmpDir` 为空字符串。
+
+**根因：** `stop()` 结束时调用 `fs.rm(tmpDir, ...)` 异步删除临时目录，随后立即将模块变量 `tmpDir = ''` 重置。当用户在清理完成前就开始第二次录制时，`start()` 会将 `tmpDir` 设为新路径；`fs.rm` 的回调执行时读到的是新路径，原本该删的目录被跳过。
+
+**解决：** `stop()` 入口处用局部常量固定当前路径，后续所有异步操作引用该常量，不读模块变量：
+```ts
+async function stop(...) {
+  const sessionTmpDir = tmpDir;  // 固定当前会话路径
+  tmpDir = '';                   // 立即重置模块变量，不影响 sessionTmpDir
+
+  // ...所有后续操作（上传、清理）均用 sessionTmpDir...
+  fs.rm(sessionTmpDir, { recursive: true, force: true }, () => {});
+}
+```
+这是 Node.js 异步代码的通用陷阱：**模块级变量在异步操作期间可能已被外部修改**，凡是需要跨异步边界保持语义不变的状态，必须在进入异步前复制到局部变量。

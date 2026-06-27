@@ -7,6 +7,8 @@ interface CollapseSectionProps {
   title: ReactNode;
   /** 标题旁的补充说明（小字，灰色），用于状态提示等场景 */
   subtitle?: ReactNode;
+  /** 标题行右侧额外内容（如操作按钮），点击不触发折叠 */
+  titleExtra?: ReactNode;
   /**
    * 是否可折叠。
    * - true：标题行可点击展开/折叠，右侧显示 ▼ 箭头
@@ -35,11 +37,10 @@ export default function CollapseSection({
   subtitle,
   collapsible = false,
   defaultOpen = true,
+  titleExtra,
   children,
 }: CollapseSectionProps) {
   const [open, setOpen] = useState(defaultOpen);
-
-  console.log(123)
 
   const titleContent = (
     <span className={styles.titleRow}>
@@ -57,11 +58,22 @@ export default function CollapseSection({
           onClick={() => setOpen((v) => !v)}
         >
           {titleContent}
+          {titleExtra && (
+            <span
+              className={styles.titleExtra}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+              role="presentation"
+            >
+              {titleExtra}
+            </span>
+          )}
           <CaretDownOutlined className={`${styles.arrow} ${open ? styles.arrowOpen : ''}`} />
         </button>
       ) : (
         <div className={styles.header}>
           {titleContent}
+          {titleExtra && <span className={styles.titleExtra}>{titleExtra}</span>}
         </div>
       )}
       {/* grid 容器：1fr ↔ 0fr 过渡，浏览器自动计算真实高度，无需写死数值 */}

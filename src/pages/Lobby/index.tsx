@@ -27,12 +27,40 @@ import { SYNC_PROGRESS_THRESHOLD_SEC, SYNC_STATE_SEEK_THRESHOLD_SEC } from './co
 import { useCursorSettings } from './hooks/useCursorSettings';
 import NotePanel from './NotePanel';
 import RoomExpired from './RoomExpired';
+import { Recorder } from '@/components/Recorder';
+import { RecorderProvider, useRecorderState } from '@/context/RecorderContext';
 import styles from './index.module.scss';
 
 export default function RoomPage() {
+    return (
+        <RecorderProvider>
+            <RoomPageInner />
+        </RecorderProvider>
+    );
+}
+
+function RoomPageInner() {
     const { roomId } = useParams<{ roomId: string }>();
     const { userInfo } = useUser();
     const { roomMeta, setRoomMeta } = useRoomMeta();
+    const { recorderState } = useRecorderState();
+
+    // ── 录制中：阻止页面关闭/刷新，并在 beforeunload 时自动停止录制 ──────────
+    useEffect(() => {
+        if (recorderState !== 'recording') return;
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            e.preventDefault();
+            // 尝试停止录制（异步，不等待）
+            const bridge = (window as Window & { electronBridge?: { recorder: { stop: () => Promise<void> } } }).electronBridge;
+            if (bridge) {
+                void bridge.recorder.stop();
+            }
+            // 浏览器需要设置 returnValue 才会弹出确认框
+            e.returnValue = '';
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [recorderState]);
     const { roomState, initRoom, setActiveVideoUrl } = useRoom();
     /**
      * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
@@ -681,6 +709,7 @@ export default function RoomPage() {
                         title="视频列表"
                         collapsible
                         defaultOpen={false}
+                        titleExtra={<Recorder roomId={roomId ?? ''} />}
                     >
                         <VideoList
                             videos={roomState.videos}

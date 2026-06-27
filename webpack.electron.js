@@ -37,9 +37,22 @@ const shared = {
   resolve: {
     extensions: ['.ts', '.js'],
   },
-  externals: {
-    electron: 'commonjs electron',
-  },
+  // Electron 主进程运行在完整 Node.js 环境，所有 node_modules 都应标记为 external。
+  // 不打包进 bundle 的原因：
+  //   1. ffmpeg-static 等包依赖运行时路径解析，打包后路径基准变为 dist-electron/ 导致 ENOENT
+  //   2. chokidar、fsevents 等含 native addon（.node 文件），webpack 无法正确处理
+  //   3. 减小 bundle 体积，加快冷启动速度
+  externals: [
+    // electron 本身由 Electron runtime 提供，不在 node_modules 里
+    { electron: 'commonjs electron' },
+    // 排除所有 node_modules：匹配不以 . 或 / 开头的模块名（即 npm 包）
+    ({ request }, callback) => {
+      if (request && /^[a-zA-Z@]/.test(request) && !request.startsWith('electron/')) {
+        return callback(null, `commonjs ${request}`);
+      }
+      callback();
+    },
+  ],
   plugins: [],
   devtool: isDev ? 'source-map' : false,
 };

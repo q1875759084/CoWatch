@@ -53,6 +53,15 @@
   text-transform: none;
 }
 
+// 标题行右侧额外插槽（操作按钮等），margin-left: auto 把内容推到最右
+.titleExtra {
+  margin-left: auto;
+  margin-right: 8px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
 .arrow {
   font-size: 9px;
   color: #e2e8f0;

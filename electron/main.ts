@@ -2,6 +2,7 @@ import { app, BrowserWindow, protocol, net } from 'electron';
 import path from 'path';
 import { URL } from 'url';
 import { initHlsCache, setApiOrigin, isHlsSegment, handleHlsSegment } from './handlers/cache';
+import { registerRecorderHandlers, setApiOriginForRecorder } from './handlers/recorder';
 
 // ─── 三种运行模式 ────────────────────────────────────────────────────────────
 //
@@ -134,8 +135,11 @@ function createWindow(): void {
 app.whenReady().then(() => {
   initHlsCache();
   setApiOrigin(API_ORIGIN);
+  setApiOriginForRecorder(API_ORIGIN);
+  registerRecorderHandlers();
   registerAppProtocol();
   createWindow();
+
   // macOS：Dock 点击时若无窗口则重新创建（Windows 不触发此事件）
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -145,6 +149,4 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// ─── IPC 处理器占位（录制功能阶段再实现）────────────────────────────────────
-// ipcMain.handle('recorder:start', async (_event, windowId: string) => { ... });
-// ipcMain.handle('recorder:stop', async () => { ... });
+// ─── 录制 IPC 处理器已通过 registerRecorderHandlers() 注册（见上方 whenReady）────
