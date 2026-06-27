@@ -376,16 +376,37 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
   }
 
   // ── 编码参数 ─────────────────────────────────────────────────────────────
+  // 质量基准：游戏录屏（高动态）场景，软编 CRF 28 为保底质量标准。
+  //
   // 软编（libx264）：
-  //   -crf 30：与 compress_30.bat 保持一致的质量标准
+  //   -crf 28：恒定质量模式，游戏场景保底画质，动态画面自动升码率
   //   -preset veryfast：实时录制必须用快速 preset，medium 及以上会导致 CPU 过高积压掉帧
-  //                     代价：同等 CRF 下码率约高 20-30%，但录屏静止帧多实际均值仍很低
-  // 硬编（nvenc/amf/qsv）：硬件编码器不支持 CRF 模式，改用 VBR 码率控制
-  //   -b:v 2000k：目标码率
-  //   -maxrate 2500k -bufsize 4000k：限制峰值，防止码率漂移导致切片大小剧烈波动
-  const encodeArgs: string[] = isSoftwareEncoder
-    ? ['-c:v', detectedEncoder, '-crf', '30', '-preset', 'veryfast']
-    : ['-c:v', detectedEncoder, '-b:v', '2000k', '-maxrate', '2500k', '-bufsize', '4000k'];
+  //
+  // 硬编：各引擎均使用"质量优先"模式，而非固定码率 VBR。
+  //   原因：固定码率会导致静止帧浪费码率、动态场景画质下降（块状失真）。
+  //   目标场景：游戏录屏（高动态），对标软编 CRF 28（保底）的视觉质量。
+  //   -maxrate 5000k -bufsize 10000k：为游戏高动态瞬间留足峰值空间，防止块状失真。
+  //
+  //   h264_nvenc：-rc vbr -cq 28
+  //     CQ（Constant Quality）是 nvenc 唯一的质量恒定模式，CQ 28 ≈ libx264 CRF 28
+  //     必须配合 -b:v 0 让编码器自由分配码率
+  //
+  //   h264_qsv：-global_quality 28 -look_ahead 1
+  //     QSV 的质量参数，功能等同于 CRF；look_ahead 开启前向参考，稍微提升编码效率
+  //
+  //   h264_amf：-quality quality -b:v 0
+  //     AMF 无 CQ 模式，-quality quality 指定质量优先策略，放开目标码率让其自行分配
+  let encodeArgs: string[];
+  if (isSoftwareEncoder) {
+    encodeArgs = ['-c:v', detectedEncoder, '-crf', '28', '-preset', 'veryfast'];
+  } else if (detectedEncoder === 'h264_nvenc') {
+    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '28', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
+  } else if (detectedEncoder === 'h264_qsv') {
+    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '28', '-look_ahead', '1', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
+  } else {
+    // h264_amf 及其他未知硬编，使用质量优先 VBR
+    encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
+  }
 
   // macOS avfoundation 屏幕捕获的帧 PTS 全部相同（差值=0），
   // 导致每帧 duration=0，编码器输出的时间戳全部错误，播放器显示 0:00。
