@@ -485,8 +485,12 @@ async function cleanup(): Promise<void> {
   if (ffmpegProcess) {
     await new Promise<void>((resolve) => {
       if (process.platform === 'win32') {
-        ffmpegProcess!.stdin?.write('q');
-        ffmpegProcess!.stdin?.end();
+        // Windows 上 SIGTERM 等于 SIGKILL（强杀进程导致末片截断），
+        // 改用 stdin 写入 'q' 让 ffmpeg 优雅退出（flush 编码器缓冲区后关闭）。
+        // 在 write 回调中 end，确保 'q' 字符已刷入管道再关闭 stdin
+        ffmpegProcess!.stdin?.write('q', () => {
+          ffmpegProcess!.stdin?.end();
+        });
       } else {
         ffmpegProcess!.kill('SIGTERM');
       }
@@ -519,8 +523,10 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
   const ffmpeg = getFfmpegPath();
   // 软编降分辨率：854x480；硬编正常档：1600x900
   const resolution = isSoftwareEncoder ? '854x480' : '1600x900';
-  const segPattern = path.join(tmpDir, 'seg%03d.ts');
-  const m3u8Path = path.join(tmpDir, 'index.m3u8');
+  // ffmpeg 在所有平台上都能正确解析正斜杠路径；
+  // Windows path.join 生成反斜杠，部分 ffmpeg 版本（静态构建）可能将 \s \U 等误解析为转义序列
+  const segPattern = path.join(tmpDir, 'seg%03d.ts').replace(/\\/g, '/');
+  const m3u8Path = path.join(tmpDir, 'index.m3u8').replace(/\\/g, '/');
 
   // ── 平台差异：输入源参数 ─────────────────────────────────────────────────
   // Windows：gdigrab 通过窗口标题捕获
@@ -546,13 +552,15 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
       '-i', `${avfIndex}:none`, // 视频设备:音频设备，none 表示不录音
     ];
   } else {
-    // Windows：gdigrab 按窗口标题捕获
-    const safeTitle = displayTitle.replace(/"/g, '\\"');
-    inputArgs = [
-      '-f', 'gdigrab',
-      '-framerate', '30',
-      '-i', `title=${safeTitle}`,
-    ];
+    // Windows：gdigrab 捕获
+    // 整屏：gdigrab -i desktop（desktopCapturer 的 screen: 前缀源）
+    // 窗口：gdigrab -i title=窗口标题
+    if (sourceId.startsWith('screen:')) {
+      inputArgs = ['-f', 'gdigrab', '-framerate', '30', '-i', 'desktop'];
+    } else {
+      const safeTitle = displayTitle.replace(/"/g, '\\"');
+      inputArgs = ['-f', 'gdigrab', '-framerate', '30', '-i', `title=${safeTitle}`];
+    }
   }
 
   // ── 编码参数 ─────────────────────────────────────────────────────────────

@@ -56,8 +56,11 @@ module.exports = {
             loader: 'sass-loader',
             options: {
               // 将全局变量文件自动注入到每个 scss 文件，无需手动 @use / @import
-              additionalData: `@use "${path.resolve(__dirname, 'src/styles/_variables.scss')}" as *;`,
+              // 使用 includePaths + 模块名，避免 Dart Sass 在 Windows 上
+              // 无法解析含非 ASCII 字符（如中文用户名）的绝对路径
+              additionalData: `@use "variables" as *;`,
               sassOptions: {
+                includePaths: [path.resolve(__dirname, 'src/styles')],
                 silenceDeprecations: ['legacy-js-api'],
               },
             },
