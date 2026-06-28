@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 
-import { message, Tooltip } from 'antd';
+import { message, Modal, Tooltip } from 'antd';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState } from '@/types/recorder';
+import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError } from '@/types/recorder';
 import { useRecorderState } from '@/context/RecorderContext';
 import { getAccessToken } from '@/utils/token';
 
@@ -59,12 +59,7 @@ export function Recorder({ roomId }: RecorderProps) {
         setEncoderInfo(result);
         updateState('ready');
 
-        if (result.isSoftware) {
-          void message.warning(
-            '当前使用 CPU 软件编码，视频分辨率已自动降为 480p，可能影响游戏性能',
-            5,
-          );
-        }
+        // 软编提示延迟到用户实际点击「开始录制」时弹出，避免进房时被忽视
       })
       .catch((err: unknown) => {
         console.error('[Recorder] 编码器检测失败：', (err as Error).message);
@@ -73,7 +68,7 @@ export function Recorder({ roomId }: RecorderProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 注册 tick / progress IPC 监听器（仅 Electron 环境）────────────────────
+  // ── 注册 tick / progress / error IPC 监听器（仅 Electron 环境）─────────────
   useEffect(() => {
     if (!bridge) return;
 
@@ -84,17 +79,44 @@ export function Recorder({ roomId }: RecorderProps) {
     bridge.recorder.onProgress((info) => {
       setProgress(info);
     });
+    // 主进程 abortRecording 触发：网络持续不可用 / 积压超限
+    bridge.recorder.onError((err: RecorderError) => {
+      console.error('[Recorder] 主进程异常中止：', err.reason);
+      // 重置为 ready，允许用户手动重新录制
+      updateState('ready');
+      Modal.error({
+        title: '录制已中止',
+        content: err.reason || '网络持续异常，切片上传失败，录制已自动停止。',
+        okText: '确定',
+      });
+    });
 
     return () => {
       bridge.recorder.offTick();
       bridge.recorder.offProgress();
+      bridge.recorder.offError();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, localState]);
 
-  // ── 打开窗口选择器 ─────────────────────────────────────────────────────────
+  // ── 打开窗口选择器（点击「开始录制」按钮时触发）────────────────────────────
   const handleOpenPicker = async () => {
     if (!bridge) return;
+
+    // 软编码时先弹一次告知弹窗，用户确认后再进入录制源选择
+    if (encoderInfo?.isSoftware) {
+      const confirmed = await new Promise<boolean>((resolve) => {
+        Modal.info({
+          title: '软件编码模式',
+          content: '当前设备不支持硬件加速编码，将使用 CPU 软件编码。视频分辨率已自动降为 480p，录制期间可能影响游戏性能。',
+          okText: '确定',
+          onOk: () => resolve(true),
+          onCancel: () => resolve(false),
+        });
+      });
+      if (!confirmed) return;
+    }
+
     try {
       const list = await bridge.recorder.getSources();
       setSources(list);
@@ -113,7 +135,7 @@ export function Recorder({ roomId }: RecorderProps) {
   };
 
   // ── 开始录制 ───────────────────────────────────────────────────────────────
-  const handleConfirmSource = async (source: RecorderSource) => {
+  const handleConfirmSource = async (source: RecorderSource, _sourceType: 'screen' | 'window') => {
     if (!bridge) return;
     setShowPicker(false);
     try {
@@ -198,16 +220,14 @@ export function Recorder({ roomId }: RecorderProps) {
   // idle / ready
   return (
     <>
-      <Tooltip title={encoderInfo?.isSoftware ? `软件编码 (${encoderInfo.encoder})` : (encoderInfo?.encoder ?? '')}>
-        <button
-          type="button"
-          className={styles.btn}
-          onClick={handleOpenPicker}
-          disabled={localState !== 'ready'}
-        >
-          开始录制
-        </button>
-      </Tooltip>
+      <button
+        type="button"
+        className={styles.btn}
+        onClick={handleOpenPicker}
+        disabled={localState !== 'ready'}
+      >
+        开始录制
+      </button>
 
       {showPicker ? (
         <WindowPicker

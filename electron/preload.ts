@@ -50,6 +50,17 @@ contextBridge.exposeInMainWorld('electronBridge', {
     offProgress: () => {
       ipcRenderer.removeAllListeners('recorder:progress');
     },
+    /**
+     * 注册录制异常中止回调（网络持续不可用 / 积压超限时由主进程触发）。
+     * 收到后应重置 UI 状态并向用户展示错误原因。
+     */
+    onError: (cb: (err: { reason: string }) => void) => {
+      ipcRenderer.on('recorder:error', (_event, err: { reason: string }) => cb(err));
+    },
+    /** 移除录制异常中止回调 */
+    offError: () => {
+      ipcRenderer.removeAllListeners('recorder:error');
+    },
   },
 
   /**

@@ -70,6 +70,10 @@ interface ElectronBridge {
     offTick: () => void;
     /** 移除上传进度回调 */
     offProgress: () => void;
+    /** 注册录制异常中止回调（主进程 abortRecording 触发时推送） */
+    onError: (cb: (err: import('./types/recorder').RecorderError) => void) => void;
+    /** 移除录制异常中止回调 */
+    offError: () => void;
   };
 
   /** 推送最新 JWT token 给主进程，token 无感刷新后调用，防止录制上传用过期 token */

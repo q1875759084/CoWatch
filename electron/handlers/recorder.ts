@@ -8,11 +8,14 @@
  *   - 切片文件监听 + 上传到后端（后端再转存 COS）
  *   - 录制结束调用 /recording/finish 接口
  *
- * 切片上传流程：
- *   ffmpeg 生成 seg*.ts → chokidar 检测到 add 事件 →
- *   POST /api/rooms/:roomId/recording/segment（后端存 COS）→
- *   p-retry 3 次失败 → 进入 pendingSegments 队列 →
- *   网络恢复后批量补传
+ * 切片上传流程（双队列容错架构）：
+ *   ffmpeg 生成 seg*.ts → chokidar add → uploadSegment（fire-and-forget）
+ *     → doUpload（pRetry 4 次）
+ *       ├─ 成功：更新 segmentKeys / 删除临时文件
+ *       └─ 全败：推入 pendingQueue
+ *   retryTimerRef（setInterval 30s）→ isRetryScheduled 互斥 → triggerRetryQueue
+ *     → 指数退避（10s→20s→40s→80s→160s）+ 批量补录（最多 RETRY_BATCH 片）
+ *     → 连续全败 MAX_FAIL_ROUNDS 轮（质：网络不可用）或 积压 MAX_PENDING 片（量：速率跟不上）→ abortRecording
  *
  * IPC 通道（ipcMain.handle / webContents.send）：
  *   recorder:detectEncoder  → detectEncoder()
@@ -43,8 +46,27 @@ const HLS_SEGMENT_DURATION = 10;
 /** 最长录制时长（毫秒），到时自动停止 */
 const MAX_RECORD_MS = 2 * 60 * 60 * 1000;
 
-/** 切片上传最大重试次数（p-retry） */
-const UPLOAD_MAX_RETRIES = 3;
+/**
+ * doUpload 内 pRetry 重试次数（1+1=2 次）。
+ * 首次上传只处理瞬时抖动（1s 间隔），持续故障快速失败进 pendingQueue，
+ * 交由 triggerRetryQueue 的指数退避兜底，避免 4 次重试最坏阻塞 ~15s。
+ * 两路合计重试能力不减弱：triggerRetryQueue 里 doUpload 同样 pRetry。
+ */
+const UPLOAD_MAX_RETRIES = 1;
+
+/** 补录队列：整批全败的连续轮次上限，超过则判定为持续不可用，触发 abortRecording */
+const MAX_FAIL_ROUNDS = 5;
+/**
+ * 补录队列容量上限：网络可用但上传速率持续低于录制速率时触发 abortRecording。
+ * 推导：ffmpeg 每 10s 一片，每个 setInterval 周期（30s）最多产生 3 片进入 pendingQueue。
+ * 设定为 MAX_FAIL_ROUNDS × 3 = 15，语义：积压量等价于"5 轮周期内完全无消化"，
+ * 与 reround 条件覆盖同一时间窗口（≈2.5 分钟），形成质量（reround）和数量（积压）的双保险。
+ */
+const MAX_PENDING = 15;
+/** 每次补录最多处理的切片数（避免单次补录耗时过长） */
+const RETRY_BATCH = 5;
+/** 补录退避基础时间（ms），指数退避基准：10s, 20s, 40s, 80s, 160s */
+const RETRY_BASE_MS = 10_000;
 
 /** 编码器候选列表，依次探测，取第一个可用的 */
 const ENCODER_CANDIDATES = ['h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'] as const;
@@ -59,8 +81,11 @@ let tmpDir = '';
 let ffmpegProcess: ChildProcess | null = null;
 /** 已上传成功的 objectKey 列表（有序） */
 let segmentKeys: string[] = [];
-/** 上传失败待补传的本地文件路径列表 */
-let pendingSegments: string[] = [];
+/**
+ * 补录队列：pRetry 全败后入队，等待 triggerRetryQueue 补传。
+ * 替代原 pendingSegments，配合双队列容错架构。
+ */
+let pendingQueue: string[] = [];
 /** 已上传切片数量，用于 crash 重启时的 -hls_start_number */
 let uploadedCount = 0;
 /** 正在进行中的上传 Promise 集合（用于 stop 时等待所有上传完成） */
@@ -71,8 +96,23 @@ const queuedFileNames = new Set<string>();
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 /** 定时器：最长录制时间到后自动停止 */
 let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-/** 定时器：每 30s 轮询补传 pending 切片 */
-let pendingFlushTimerRef: ReturnType<typeof setInterval> | null = null;
+/**
+ * 补录定时器：每 30s 由 setInterval 检查，若 isRetryScheduled=false 则触发 triggerRetryQueue。
+ * isRetryScheduled 互斥判断前置在 setInterval 回调里（不在 triggerRetryQueue 内部），
+ * 保证退避期间不被外部时钟打断。
+ */
+let retryTimerRef: ReturnType<typeof setInterval> | null = null;
+/**
+ * 补录队列互斥锁：triggerRetryQueue 运行期间（含退避等待）置为 true。
+ * setInterval 回调检查此标志，为 true 时直接跳过，不重复触发。
+ */
+let isRetryScheduled = false;
+/**
+ * 补录整批全败的连续轮次计数。
+ * 有任意一片成功即归零（代表网络可用只是不稳定）。
+ * 达到 MAX_FAIL_ROUNDS 时触发 abortRecording。
+ */
+let consecutiveFailRounds = 0;
 /** chokidar 文件监听器 */
 let watcher: FSWatcher | null = null;
 /** 用户主动停止标志，区分正常停止和 ffmpeg crash */
@@ -158,7 +198,7 @@ function getFfmpegPath(): string {
 function pushProgress(): void {
   const info: RecordingProgress = {
     uploaded: uploadedCount,
-    pending: pendingSegments.length,
+    pending: pendingQueue.length,
   };
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('recorder:progress', info);
@@ -246,32 +286,39 @@ async function getSources(): Promise<RecorderSource[]> {
 // ─── 切片上传 ──────────────────────────────────────────────────────────────────
 
 /**
- * 上传单个切片文件到后端。
- * 后端接口：POST /api/rooms/:roomId/recording/segment
- * 使用 p-retry 3 次（指数退避 + 随机抖动）。
- * 失败：进入 pendingSegments 队列，不中断录制。
+ * 底层上传单个切片：发起 net.fetch + pRetry，成功 resolve，彻底失败时 reject。
+ * 供 uploadSegment（录制流）和 triggerRetryQueue（补录流）共同调用。
+ * 成功后自动删除本地临时文件。
  */
-async function uploadSegment(filePath: string): Promise<void> {
+async function doUpload(filePath: string): Promise<void> {
   const segmentName = path.basename(filePath);
   const objectKey = `cowatch/${currentRoomId}/recordings/${sessionId}/${segmentName}`;
-  queuedFileNames.add(segmentName);
 
-  const upload = pRetry(
+  await pRetry(
     async () => {
       const buffer = fs.readFileSync(filePath);
-      const response = await net.fetch(
-        `${apiOrigin}/api/rooms/${currentRoomId}/recording/segment`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'video/MP2T',
-            'X-Object-Key': objectKey,
-            ...(currentAuthToken ? { 'Authorization': `Bearer ${currentAuthToken}` } : {}),
-          },
-          body: buffer,
-          duplex: 'half',
-        } as RequestInit,
-      );
+      // 15s 超时：防止后端宕机时 TCP 进入 TIME_WAIT 导致 fetch 永久 hang
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15_000);
+      let response: Response;
+      try {
+        response = await net.fetch(
+          `${apiOrigin}/api/rooms/${currentRoomId}/recording/segment`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'video/MP2T',
+              'X-Object-Key': objectKey,
+              ...(currentAuthToken ? { 'Authorization': `Bearer ${currentAuthToken}` } : {}),
+            },
+            body: buffer,
+            duplex: 'half',
+            signal: controller.signal,
+          } as RequestInit,
+        );
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         throw new Error(`上传失败 HTTP ${response.status}：${segmentName}`);
@@ -291,20 +338,37 @@ async function uploadSegment(filePath: string): Promise<void> {
     },
   );
 
-  const uploadPromise = upload
+  // 上传成功：更新状态、删除临时文件
+  segmentKeys.push(objectKey);
+  uploadedCount = segmentKeys.length;
+  fs.unlink(filePath, (err) => {
+    if (err) console.warn('[recorder] 删除临时文件失败：', filePath, err.message);
+  });
+}
+
+/**
+ * 录制上传（fire-and-forget）。
+ * chokidar 发现新切片时调用，上传失败时将文件路径推入 pendingQueue，不中断录制。
+ * 职责：仅负责首次上传（pRetry 4 次），不感知补录队列。
+ */
+function uploadSegment(filePath: string): void {
+  const segmentName = path.basename(filePath);
+  queuedFileNames.add(segmentName);
+
+  const uploadPromise = doUpload(filePath)
     .then(() => {
-      segmentKeys.push(objectKey);
-      uploadedCount = segmentKeys.length;
-      // 上传成功后删除本地临时文件
-      fs.unlink(filePath, (err) => {
-        if (err) console.warn('[recorder] 删除临时文件失败：', filePath, err.message);
-      });
       pushProgress();
     })
     .catch(() => {
-      // 3 次全部失败：进入待补传队列
-      console.error(`[recorder] 切片上传失败（已用尽重试）：${segmentName}，加入 pending 队列`);
-      pendingSegments.push(filePath);
+      // 4 次全部失败：进入补录队列等待 triggerRetryQueue 处理
+      if (isUserStopped) return; // stop 之后不再入队（Bug 2 修复）
+      console.error(`[recorder] 切片上传全部失败：${segmentName}，加入 pendingQueue`);
+      if (pendingQueue.length >= MAX_PENDING) {
+        // 积压超限：触发录制中止（不再入队，避免无限膨胀）
+        void abortRecording('网络持续异常，切片积压过多');
+        return;
+      }
+      pendingQueue.push(filePath);
       pushProgress();
     })
     .finally(() => {
@@ -315,16 +379,132 @@ async function uploadSegment(filePath: string): Promise<void> {
 }
 
 /**
- * 批量补传 pendingSegments 中所有失败的切片。
- * 网络恢复后调用。
+ * 补录队列执行函数（由 retryTimerRef 定时器调用）。
+ * 互斥锁 isRetryScheduled 的判断由外部 setInterval 回调前置执行，
+ * 本函数不重复判断，职责更单一。
+ * 流程：终止判断 → 指数退避 → 批量补传 → 健康状态更新 → 释放锁。
  */
-async function flushPendingSegments(): Promise<void> {
-  if (pendingSegments.length === 0) return;
-  console.log(`[recorder] 网络恢复，开始补传 ${pendingSegments.length} 个切片`);
-  const toRetry = pendingSegments.splice(0, pendingSegments.length);
-  for (const filePath of toRetry) {
-    await uploadSegment(filePath);
+async function triggerRetryQueue(): Promise<void> {
+  // isUserStopped 兜底（abortRecording 触发后退避期间 stop 可能介入）
+  if (isUserStopped) return;
+  // 无需补传：队列为空且无连续失败记录
+  if (pendingQueue.length === 0 && consecutiveFailRounds === 0) return;
+
+  // 终止条件判断（优先于退避逻辑）
+  if (consecutiveFailRounds >= MAX_FAIL_ROUNDS || pendingQueue.length >= MAX_PENDING) {
+    void abortRecording('网络持续异常，上传已中止');
+    return;
   }
+
+  isRetryScheduled = true;
+
+  try {
+    // 指数退避 + 随机抖动
+    // consecutiveFailRounds=0（首次补录）时立即执行，无需等待
+    const jitter = Math.random() * 2000;
+    const backoffMs = consecutiveFailRounds === 0
+      ? 0
+      : Math.min(RETRY_BASE_MS * Math.pow(2, consecutiveFailRounds - 1), 160_000) + jitter;
+
+    if (backoffMs > 0) {
+      console.log(`[recorder] 补录退避 ${Math.round(backoffMs / 1000)}s（连续失败轮次：${consecutiveFailRounds}）`);
+      await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+    }
+
+    if (isUserStopped) return; // 退避期间用户停止录制，放弃补录
+
+    // 取最多 RETRY_BATCH 片进行补录
+    const batch = pendingQueue.splice(0, RETRY_BATCH);
+    if (batch.length === 0) return;
+
+    console.log(`[recorder] 开始补录 ${batch.length} 个切片（队列剩余：${pendingQueue.length}）`);
+
+    let batchHasSuccess = false;
+    for (const filePath of batch) {
+      if (isUserStopped) break;
+      try {
+        await doUpload(filePath);
+        batchHasSuccess = true;
+        console.log(`[recorder] 补录成功：${path.basename(filePath)}`);
+        pushProgress();
+      } catch {
+        // 本批次这片补录失败：重新推回队列头部（保持顺序）
+        pendingQueue.unshift(filePath);
+        console.warn(`[recorder] 补录失败（将重试）：${path.basename(filePath)}`);
+      }
+    }
+
+    if (batchHasSuccess) {
+      // 有任意一片成功 → 网络可用，重置失败轮次
+      consecutiveFailRounds = 0;
+    } else {
+      // 整批全败 → 网络不可用，轮次 +1
+      consecutiveFailRounds += 1;
+      console.warn(`[recorder] 补录整批失败，连续失败轮次：${consecutiveFailRounds}/${MAX_FAIL_ROUNDS}`);
+    }
+  } finally {
+    // 无论成功、失败或异常，都必须释放锁
+    isRetryScheduled = false;
+  }
+}
+
+/**
+ * 录制异常中止（网络持续不可用 / 积压超限）。
+ * 通知渲染进程 + 调用 cleanup 重置状态。
+ * 注意：不等待 activeUploads，直接放弃未完成的上传。
+ */
+async function abortRecording(reason: string): Promise<void> {
+  if (isUserStopped) return; // 已经在停止流程中，避免重复触发
+  console.error(`[recorder] 录制中止：${reason}`);
+  isUserStopped = true;
+
+  // 通知渲染进程
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('recorder:error', { reason });
+  }
+
+  await cleanup();
+}
+
+/**
+ * 统一清理所有录制资源（定时器 + ffmpeg + watcher + 状态重置）。
+ * stop() 和 abortRecording() 均调用此函数。
+ * 注意：tmpDir 清理与 finish 接口调用在 stop() 中单独处理，
+ *       abortRecording 路径下不调用 finish（无需通知后端生成视频）。
+ */
+async function cleanup(): Promise<void> {
+  // 清理定时器
+  if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
+  if (timeoutTimer !== null) { clearTimeout(timeoutTimer); timeoutTimer = null; }
+  if (retryTimerRef !== null) { clearInterval(retryTimerRef); retryTimerRef = null; }
+
+  // 关闭文件监听
+  if (watcher) { await watcher.close(); watcher = null; }
+
+  // 停止 ffmpeg（若尚未停止）
+  if (ffmpegProcess) {
+    await new Promise<void>((resolve) => {
+      if (process.platform === 'win32') {
+        ffmpegProcess!.stdin?.write('q');
+        ffmpegProcess!.stdin?.end();
+      } else {
+        ffmpegProcess!.kill('SIGTERM');
+      }
+      ffmpegProcess!.on('close', () => resolve());
+      setTimeout(() => {
+        try { ffmpegProcess?.kill('SIGKILL'); } catch (_) { /* 已退出 */ }
+        resolve();
+      }, 15000);
+    });
+    ffmpegProcess = null;
+  }
+
+  // 重置业务状态（tmpDir 由调用方负责清理目录后再重置）
+  pendingQueue = [];
+  consecutiveFailRounds = 0;
+  isRetryScheduled = false;
+  activeUploads.clear();
+  queuedFileNames.clear();
 }
 
 // ─── ffmpeg 启动 ──────────────────────────────────────────────────────────────
@@ -489,13 +669,14 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
   ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, uploadedCount);
   attachFfmpegHandlers(displayTitle);
 
-  watcher = chokidar.watch(path.join(tmpDir, '*.ts'), {
+  // 注意：chokidar v5 不支持 glob 路径 watch，必须 watch 目录后在回调内过滤扩展名
+  watcher = chokidar.watch(tmpDir, {
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
   });
   watcher.on('add', (filePath) => {
-    void uploadSegment(filePath);
+    if (filePath.endsWith('.ts')) void uploadSegment(filePath);
   });
 }
 
@@ -534,9 +715,11 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
   currentSourceId = windowId;
   currentAuthToken = authToken;
   segmentKeys = [];
-  pendingSegments = [];
+  pendingQueue = [];
   uploadedCount = 0;
   isUserStopped = false;
+  isRetryScheduled = false;
+  consecutiveFailRounds = 0;
   crashRestartCount = 0;
   recordStartTime = Date.now();
   activeUploads.clear();
@@ -561,13 +744,14 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
   attachFfmpegHandlers(displayTitle);
 
   // 启动 chokidar 监听新增切片文件
-  watcher = chokidar.watch(path.join(tmpDir, '*.ts'), {
+  // 注意：chokidar v5 不支持 glob 路径 watch，必须 watch 目录后在回调内过滤扩展名
+  watcher = chokidar.watch(tmpDir, {
     persistent: true,
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
   });
   watcher.on('add', (filePath) => {
-    void uploadSegment(filePath);
+    if (filePath.endsWith('.ts')) uploadSegment(filePath);
   });
 
   // 启动 tick 计时器
@@ -584,63 +768,43 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
     void stop();
   }, MAX_RECORD_MS);
 
-  // pending 补传：每 30 秒检查一次，网络恢复后自动补传
-  // （不依赖 net.on/process.on 事件，简单轮询足够录制场景使用）
-  const pendingFlushTimer = setInterval(() => {
-    if (pendingSegments.length > 0) void flushPendingSegments();
+  // 补录定时器：每 30s 检查一次
+  // isRetryScheduled 互斥判断前置在此回调里，保证退避期间不被外部时钟打断
+  retryTimerRef = setInterval(() => {
+    if (isRetryScheduled) return; // ★ 上一轮还在跑（可能正在退避），跳过本次
+    void triggerRetryQueue();
   }, 30_000);
-  // stop 时需要清除此 timer，存入模块变量，与 tickTimer / timeoutTimer 统一在 stop() 开头清理
-  pendingFlushTimerRef = pendingFlushTimer;
 
   console.log(`[recorder] 录制开始，sessionId=${sessionId}，roomId=${roomId}`);
 }
 
 /**
- * 停止录制。
- * 流程：停止 ffmpeg → 等待所有上传 → 补传 pending → 调用 finish 接口 → 清理临时目录
+ * 停止录制（用户主动停止）。
+ * 流程：
+ *   1. 提前设置 isUserStopped = true（阻止新入队）
+ *   2. 通过 cleanup 清理定时器、停止 ffmpeg、关闭 chokidar
+ *   3. 扫描临时目录，补入遗漏的尾片（fire-and-forget 加入 activeUploads）
+ *   4. 等待所有正在进行的 activeUploads 完成
+ *   5. 对剩余 pendingQueue 做最后一轮直接补传（绕过 triggerRetryQueue，确保 stop 时上传完整）
+ *   6. 调用 finish 接口 → 清理临时目录 → 重置状态
  */
 async function stop(): Promise<void> {
-  if (!ffmpegProcess) return;
+  if (!ffmpegProcess && !isUserStopped) return; // 没有在录制，直接返回
+  if (isUserStopped) return;                    // 已在停止流程（abortRecording 可能已触发）
 
+  // ① 提前设置 isUserStopped，阻止后续 uploadSegment 将新失败再次入队
   isUserStopped = true;
-
-  // 停止定时器
-  if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
-  if (timeoutTimer !== null) { clearTimeout(timeoutTimer); timeoutTimer = null; }
-  if (pendingFlushTimerRef !== null) { clearInterval(pendingFlushTimerRef); pendingFlushTimerRef = null; }
 
   const durationSeconds = Math.floor((Date.now() - recordStartTime) / 1000);
 
   // 用本地变量固定当前 tmpDir，避免后续状态重置后路径变为空字符串
   const sessionTmpDir = tmpDir;
 
-  // 停止 ffmpeg：
-  //   Windows：stdin 写 'q' → ffmpeg 收到后优雅写入 #EXT-X-ENDLIST 再退出
-  //            Windows 上 SIGTERM 等于 SIGKILL，会强杀进程导致末片截断、无 #EXT-X-ENDLIST
-  //   macOS/Linux：发送 SIGTERM，ffmpeg 收到后 flush 最后一个切片后退出
-  //            avfoundation flush 可能需要数秒，给足 15s 兜底
-  await new Promise<void>((resolve) => {
-    if (process.platform === 'win32') {
-      // Windows：通过 stdin 发送 'q'，ffmpeg 优雅退出
-      ffmpegProcess!.stdin?.write('q');
-      ffmpegProcess!.stdin?.end();
-    } else {
-      // macOS / Linux：SIGTERM 触发 ffmpeg flush 并退出
-      ffmpegProcess!.kill('SIGTERM');
-    }
-    ffmpegProcess!.on('close', () => resolve());
-    // 保险：15s 后强杀（avfoundation flush 最后切片可能需要较长时间）
-    setTimeout(() => {
-      try { ffmpegProcess?.kill('SIGKILL'); } catch (_) { /* 已退出 */ }
-      resolve();
-    }, 15000);
-  });
-  ffmpegProcess = null;
+  // ② 通过 cleanup 清理定时器、停止 ffmpeg、关闭 chokidar
+  //    cleanup 不重置 segmentKeys / tmpDir / currentRoomId（finish 接口还需要）
+  await cleanup();
 
-  // 停止文件监听
-  if (watcher) { await watcher.close(); watcher = null; }
-
-  // ffmpeg 退出后扫描临时目录，补传所有还未上传的切片
+  // ③ ffmpeg 退出后扫描临时目录，补传所有还未入队的切片
   // 这里处理两类遗漏：
   //   1. 最后一个不满 HLS_SEGMENT_DURATION 的尾片（用户停止时正在写入，chokidar 已关闭）
   //   2. awaitWriteFinish 稳定期内 chokidar 尚未触发的切片
@@ -652,7 +816,8 @@ async function stop(): Promise<void> {
       if (!queuedFileNames.has(file)) {
         const stat = fs.statSync(path.join(sessionTmpDir, file));
         console.log(`[recorder] 补传遗漏切片：${file}（${stat.size} bytes）`);
-        await uploadSegment(path.join(sessionTmpDir, file));
+        // fire-and-forget：加入 activeUploads，后续 await 统一等待
+        uploadSegment(path.join(sessionTmpDir, file));
       } else {
         console.log(`[recorder] 跳过已入队切片：${file}`);
       }
@@ -661,16 +826,27 @@ async function stop(): Promise<void> {
     console.warn('[recorder] 扫描临时目录失败：', (err as Error).message);
   }
 
-  // 循环等待：activeUploads 完成 → 触发 flushPendingSegments → 新的 upload 加入 activeUploads
-  // 直到两者都为空才退出，确保所有重试链全部完成后再清理目录
-  // 网络持续故障时最多循环 UPLOAD_MAX_RETRIES 轮，不会无限阻塞
+  // ④ 等待所有 activeUploads 完成（含上方补传触发的新 upload）
+  await Promise.allSettled(Array.from(activeUploads));
+
+  // ⑤ 对剩余 pendingQueue 做最后一轮直接补传（最多 UPLOAD_MAX_RETRIES 轮避免无限循环）
+  //    绕过 triggerRetryQueue 的退避逻辑（stop 时用户已等待，尽快上传）
   for (let round = 0; round < UPLOAD_MAX_RETRIES + 1; round++) {
-    await Promise.allSettled(Array.from(activeUploads));
-    if (pendingSegments.length === 0) break;
-    await flushPendingSegments();
+    if (pendingQueue.length === 0) break;
+    console.log(`[recorder] stop 补传第 ${round + 1} 轮，剩余 ${pendingQueue.length} 片`);
+    const batch = pendingQueue.splice(0, pendingQueue.length);
+    for (const filePath of batch) {
+      try {
+        await doUpload(filePath);
+        pushProgress();
+      } catch {
+        // 本轮仍失败：暂不重新入队，等下一轮循环处理
+        pendingQueue.push(filePath);
+      }
+    }
   }
 
-  // 调用 finish 接口
+  // ⑥ 调用 finish 接口
   if (segmentKeys.length > 0) {
     const displayName = `自动录制 ${new Date().toLocaleString('zh-CN', {
       year: 'numeric', month: '2-digit', day: '2-digit',
@@ -713,13 +889,10 @@ async function stop(): Promise<void> {
   sessionId = '';
   tmpDir = '';
   segmentKeys = [];
-  pendingSegments = [];
   uploadedCount = 0;
   currentRoomId = '';
   currentAuthToken = '';
   crashRestartCount = 0;
-  activeUploads.clear();
-  queuedFileNames.clear();
 
   console.log(`[recorder] 录制结束，时长 ${formatDuration(durationSeconds)}`);
 }

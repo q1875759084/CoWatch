@@ -26,5 +26,12 @@ export interface RecordingProgress {
 /**
  * 录制控件状态机：
  *   idle → detecting → ready → recording → finishing → idle
+ *                                 ↓（abortRecording）
+ *                                ready（异常中止后回到可重录状态）
  */
 export type RecorderState = 'idle' | 'detecting' | 'ready' | 'recording' | 'finishing';
+
+/** 主进程 abortRecording 推送的错误事件 payload */
+export interface RecorderError {
+  reason: string;
+}
