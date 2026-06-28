@@ -24,6 +24,9 @@ win:
         - x64            # 64 位，覆盖 Win10/11 主流用户
   # 应用图标（需要在 build/icon.ico 放置，256x256 或更大）
   # icon: build/icon.ico
+  # 跳过 exe 签名和资源编辑（避免从 GitHub 下载 winCodeSign；
+  # todo：正式发布时删除此行）
+  signAndEditExecutable: false
 
 # ─── macOS 配置（仅用于开发机本地验证，不对外发布）─────────────────────────
 mac:

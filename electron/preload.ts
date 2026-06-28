@@ -15,7 +15,7 @@ contextBridge.exposeInMainWorld('electronBridge', {
    * app:// 协议的 host 不含端口，无法从 window.location 推断真实后端地址，
    * 由此字段补全，供 env.ts 的 apiOrigin 使用（WS 地址推断等场景）。
    */
-  apiOrigin: process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002',
+  apiOrigin: (__API_ORIGIN__ as string) || process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002',
 
   // ─── 录制相关 ─────────────────────────────────────────────────────────────
   recorder: {

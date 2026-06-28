@@ -18,6 +18,7 @@
     "electron:preview:test": "npm run electron:build && cross-env ELECTRON_PREVIEW=true ELECTRON_API_ORIGIN=https://test.cowatch.daibao.site electron .",
     "electron:build": "webpack --config webpack.electron-renderer.js && webpack --config webpack.electron.js",
     "electron:pack": "npm run electron:build && electron-builder --win --publish never",
+    "electron:pack:test": "cross-env ELECTRON_API_ORIGIN=https://test.cowatch.daibao.site npm run electron:build && cross-env ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ electron-builder --win --publish never",
     "electron:pack:mac": "npm run electron:build && electron-builder --mac --publish never",
     "electron:release": "npm run electron:build && electron-builder --win --publish always"
   },

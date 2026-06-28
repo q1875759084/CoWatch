@@ -552,14 +552,24 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
       '-i', `${avfIndex}:none`, // 视频设备:音频设备，none 表示不录音
     ];
   } else {
-    // Windows：gdigrab 捕获
-    // 整屏：gdigrab -i desktop（desktopCapturer 的 screen: 前缀源）
-    // 窗口：gdigrab -i title=窗口标题
+    // Windows：ddagrab（Desktop Duplication API）
+    //
+    // 为什么不用 gdigrab：
+    //   gdigrab 使用 GDI BitBlt（纯 CPU），每帧拷贝整个显存到系统内存，
+    //   30fps 下 CPU 占用 ~20% 单核，且 BitBlt 会阻塞 GPU 渲染管线导致游戏卡顿。
+    //   窗口模式（title=）对 DXGI 独占的游戏窗口匹配不可靠。
+    //
+    // ddagrab 的优势：
+    //   基于 Windows Desktop Duplication API（DXGI），GPU 直接读取显存帧缓冲，
+    //   CPU 开销 ≈0，不阻塞游戏渲染。窗口模式通过 DDA API 锁定窗口对象句柄，
+    //   自动跟踪窗口移动/缩放，无需手动 crop。
+    //
+    // 兼容性要求：Windows 8.1+ / Win10 1803+，DX11 显卡驱动（游戏电脑均满足）
     if (sourceId.startsWith('screen:')) {
-      inputArgs = ['-f', 'gdigrab', '-framerate', '30', '-i', 'desktop'];
+      inputArgs = ['-f', 'ddagrab', '-framerate', '30', '-i', '0'];
     } else {
       const safeTitle = displayTitle.replace(/"/g, '\\"');
-      inputArgs = ['-f', 'gdigrab', '-framerate', '30', '-i', `title=${safeTitle}`];
+      inputArgs = ['-f', 'ddagrab', '-framerate', '30', '-window_title', safeTitle, '-i', '0'];
     }
   }
 

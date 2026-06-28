@@ -23,10 +23,11 @@ const DEV_SERVER_URL = 'http://localhost:3001';
 const isPreview = process.env.ELECTRON_PREVIEW === 'true';
 
 // ─── 后端地址 ────────────────────────────────────────────────────────────────
-// 通过环境变量 ELECTRON_API_ORIGIN 在构建/启动时注入：
-//   - 本地 preview：不传，默认 http://localhost:3002
-//   - 发布生产包：ELECTRON_API_ORIGIN=https://cowatch.daibao.site electron-builder ...
-const API_ORIGIN = process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002';
+// 优先级：编译时注入(__API_ORIGIN__) > 运行时环境变量(ELECTRON_API_ORIGIN) > 默认值
+//   - npm run electron:pack:test 传入 ELECTRON_API_ORIGIN → 编译进 bundle
+//   - electron:preview 手动设环境变量 → 运行时读取
+//   - 都没有 → localhost:3002
+const API_ORIGIN = (__API_ORIGIN__ as string) || process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002';
 
 // ─── 注册 app:// 自定义协议 ──────────────────────────────────────────────────
 // 背景：
@@ -127,8 +128,8 @@ function createWindow(): void {
   } else {
     // preview / packaged 模式：通过 app:// 协议加载本地 dist 产物
     win.loadURL('app://localhost/index.html');
-    // preview 模式额外开 DevTools，用于调试打包问题
-    if (isPreview) win.webContents.openDevTools();
+    // preview 模式和 packaged 模式都开 DevTools，用于调试打包问题
+    if (isPreview || app.isPackaged) win.webContents.openDevTools();
   }
 }
 
