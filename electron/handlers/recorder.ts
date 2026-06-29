@@ -624,10 +624,16 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
         '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
     } else {
-      // 窗口录制：gfxcapture，按窗口标题正则匹配
-      // displayTitle 中的特殊正则字符需转义，防止意外匹配
+      // 窗口录制：优先尝试 gfxcapture（Windows.Graphics.Capture API，GPU 零拷贝）
+      //
+      // gfxcapture 限制：
+      //   - 仅支持 DWM 合成窗口（Win10 1803+），经典 GDI 窗口可能无法捕获
+      //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
+      //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
+      //
+      // 如果 gfxcapture 失败（ffmpeg 返回非零退出码），
+      // abortRecording 会触发 → 用户可重新选择整屏录制（ddagrab，100% 可用）
       const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // gfxcapture 帧率不稳定，加 fps=30 确保稳定输出
       inputArgs = [
         '-f', 'lavfi',
         '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
