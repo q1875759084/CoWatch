@@ -298,7 +298,9 @@ async function detectEncoder(): Promise<EncoderDetectResult> {
  * 优先级策略：
  * 1. WASAPI loopback：最推荐，直接录制系统声音，无需额外设置
  * 2. dshow Stereo Mix/Loopback：需要声卡驱动支持，用户可能未启用
- * 3. dshow 默认设备（最后手段）：可能录到麦克风而非系统声音
+ *
+ * 注意：不回退到 dshow 默认设备，因为默认设备通常是麦克风（输入端），
+ * 录下的是环境杂音而非系统声音，比无声更糟糕。
  *
  * macOS 直接返回 false（不支持系统音频录制，需要第三方虚拟声卡）。
  */
@@ -319,7 +321,7 @@ async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
     console.warn('[recorder] WASAPI 不可用:', e instanceof Error ? e.message : e);
   }
 
-  // 策略2：尝试 dshow loopback 设备
+  // 策略2：尝试 dshow loopback 设备（Stereo Mix 等）
   try {
     const dshowResult = await testDshowLoopbackDevices(ffmpeg);
     if (dshowResult) {
@@ -330,19 +332,8 @@ async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
     console.warn('[recorder] dshow Loopback 不可用');
   }
 
-  // 策略3：回退到 dshow 默认设备（可能不是系统声音）
-  try {
-    const defaultResult = await testDshowDefaultDevice(ffmpeg);
-    if (defaultResult) {
-      console.log(`[recorder] ⚠️ 回退到 dshow 默认设备: ${defaultResult.device}（可能录到麦克风）`);
-      return true;
-    }
-  } catch (e) {
-    console.warn('[recorder] dshow 默认设备不可用');
-  }
-
   cachedAudioDeviceInfo = null;
-  console.log('[recorder] ❌ 所有音频录制方式均不可用');
+  console.log('[recorder] ❌ 无可用系统音频录制设备（WASAPI 不支持且无 Stereo Mix），将静音录制');
   return false;
 }
 
@@ -414,40 +405,6 @@ async function testDshowLoopbackDevices(ffmpeg: string): Promise<{ format: strin
         }
       }
       reject(new Error('No dshow loopback device'));
-    });
-
-    proc.on('error', () => reject(new Error('Spawn failed')));
-    setTimeout(() => { try { proc.kill(); } catch (_) {} reject(new Error('Timeout')); }, 5000);
-  });
-}
-
-/**
- * 获取 dshow 第一个音频设备作为默认值。
- */
-async function testDshowDefaultDevice(ffmpeg: string): Promise<{ format: string; device: string } | null> {
-  return new Promise((resolve, reject) => {
-    let stderr = '';
-    const proc = spawn(ffmpeg, [
-      '-f', 'dshow', '-list_devices', 'true', '-i', 'dummy',
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('close', () => {
-      const lines = stderr.split('\n');
-      for (const line of lines) {
-        if (/\(audio\)/i.test(line)) {
-          const nameMatch = line.match(/"(.+?)"/);
-          if (nameMatch) {
-            cachedAudioDeviceInfo = { format: 'dshow', device: nameMatch[1].trim() };
-            resolve(cachedAudioDeviceInfo);
-            return;
-          }
-        }
-      }
-      reject(new Error('No dshow audio devices'));
     });
 
     proc.on('error', () => reject(new Error('Spawn failed')));
@@ -877,42 +834,37 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
     //   - format=yuv420p：编码器要求，hwdownload 输出 bgra 需显式转换
     const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
 
-    if (sourceId.startsWith('screen:')) {
-      // ── 全屏录制：ddagrab（视频） + WASAPI loopback（音频）────────────────
-      // WASAPI loopback 录制用户实际听到的全部声音（所有程序混音输出）。
-      // 优先使用 detectWasapiAvailable 枚举到的精确设备名；
-      // 未枚举到时（cachedWasapiLoopbackDevice 为空）回退用 'default'。
-      const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
-      const audioInfo = cachedAudioDeviceInfo;
-      console.log(`[recorder] 音频输入: ${audioInfo ? `${audioInfo.format} → ${audioInfo.device}` : '无'}`);
+    const audioInfo = cachedAudioDeviceInfo;
+    console.log(`[recorder] 音频输入: ${audioInfo ? `${audioInfo.format} → ${audioInfo.device}` : '无（静音录制）'}`);
 
+    if (sourceId.startsWith('screen:')) {
+      // ── 全屏录制：ddagrab（视频） + 系统音频输入（可选）─────────────────
+      // 音频由 detectWasapiAvailable 预先探测：优先 WASAPI loopback，次选 dshow Stereo Mix。
+      // 两者均不可用时 audioInfo 为 null，不追加音频输入，后续 audioArgs 用 -an 禁音。
+      const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
       inputArgs = [
         '-f', 'lavfi',
         '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
-
       if (audioInfo) {
         inputArgs.push('-f', audioInfo.format, '-i', `audio=${audioInfo.device}`);
       }
     } else {
-      // ── 窗口录制：gfxcapture（视频）+ WASAPI loopback（音频）─────────────
+      // ── 窗口录制：gfxcapture（视频）+ 系统音频输入（可选）───────────────
       //
       // 音频不用 gfxcapture capture_audio=1（只能录该窗口进程的声音），
-      // 改用 WASAPI loopback 录用户听到的全部混音（与全屏保持一致）。
+      // 改用 WASAPI loopback/dshow Stereo Mix 录用户听到的全部混音（与全屏保持一致）。
+      // audioInfo 为 null 时不追加音频输入，后续 audioArgs 用 -an 禁音。
       //
       // gfxcapture 限制：
       //   - 仅支持 DWM 合成窗口（Win10 1803+），经典 GDI 窗口可能无法捕获
       //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
       //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
       const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const audioInfo = cachedAudioDeviceInfo;
-      console.log(`[recorder] 音频输入: ${audioInfo ? `${audioInfo.format} → ${audioInfo.device}` : '无'}`);
-
       inputArgs = [
         '-f', 'lavfi',
-        `-i`, `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
+        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
-
       if (audioInfo) {
         inputArgs.push('-f', audioInfo.format, '-i', `audio=${audioInfo.device}`);
       }
@@ -965,16 +917,17 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
     ? ['-vf', `fps=30,scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0']
     : [];
 
-  // ── Windows 音频参数 ─────────────────────────────────────────────────────
-  // Windows：全屏和窗口均使用 WASAPI loopback 作为第二路输入（输入 1），
-  // 录制用户实际听到的全部声音（所有程序混音），无需 amix。
-  // macOS：avfoundation 以 `${avfIndex}:none` 驱动，不含音频输入，加 -an 禁音。
+  // ── 音频编码参数 ─────────────────────────────────────────────────────────
+  // Windows：有可用音频输入（cachedAudioDeviceInfo 非 null）时编码为 AAC；
+  //          无可用音频输入时加 -an 明确禁音，避免 HLS muxer 警告。
+  // macOS：avfoundation 以 `${avfIndex}:none` 驱动，不含音频输入，始终 -an。
   //
-  // 流索引（Windows）：
+  // 流索引（Windows 有音频时）：
   //   输入 0: lavfi(ddagrab/gfxcapture) → 0:v 视频（无音频流）
-  //   输入 1: wasapi loopback           → 1:a 系统混音
+  //   输入 1: wasapi/dshow loopback     → 1:a 系统混音
   //   → 直接 -c:a aac，ffmpeg 自动 map 唯一音频流，无需 -filter_complex
-  const audioArgs: string[] = process.platform === 'win32'
+  const hasAudioInput = process.platform === 'win32' && cachedAudioDeviceInfo != null;
+  const audioArgs: string[] = hasAudioInput
     ? ['-c:a', 'aac', '-b:a', '128k', '-strict', '-2']
     : ['-an'];
 
