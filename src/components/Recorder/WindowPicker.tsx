@@ -1,16 +1,14 @@
 import { useState } from "react";
 
-import { Checkbox, Modal, Tooltip } from "antd";
+import { Modal } from "antd";
 
-import type { AudioOptions, RecorderSource } from "@/types/recorder";
+import type { RecorderSource } from "@/types/recorder";
 
 import styles from "./index.module.scss";
 
 interface WindowPickerProps {
   sources: RecorderSource[];
-  /** isAudioAvailable = Windows WASAPI 探测结果；false = 音频选项疗化 */
-  isAudioAvailable: boolean;
-  onConfirm: (source: RecorderSource, sourceType: "screen" | "window", audioOptions: AudioOptions) => void;
+  onConfirm: (source: RecorderSource, sourceType: "screen" | "window") => void;
   onCancel: () => void;
   onRefresh?: () => void | Promise<void>;
 }
@@ -23,23 +21,17 @@ interface WindowPickerProps {
  */
 export function WindowPicker({
   sources,
-  isAudioAvailable,
   onConfirm,
   onCancel,
   onRefresh,
 }: WindowPickerProps) {
   const [selectedId, setSelectedId] = useState<string>("");
-  const [withSystemAudio, setWithSystemAudio] = useState(true);
-  const [withMic, setWithMic] = useState(false);
 
   const selectedSource = sources.find((s) => s.id === selectedId) ?? null;
 
   const handleConfirm = () => {
     if (!selectedSource) return;
-    onConfirm(selectedSource, selectedSource.sourceType, {
-      withSystemAudio: isAudioAvailable && withSystemAudio,
-      withMic: isAudioAvailable && withSystemAudio && withMic,
-    });
+    onConfirm(selectedSource, selectedSource.sourceType);
   };
 
   /** 判断缩略图是否为纯黑（整屏录制独占游戏时的预期情况） */
@@ -128,33 +120,6 @@ export function WindowPicker({
             </div>
           ) : null}
 
-          {/* 音频选项：仅 Windows WASAPI 可用时展示 */}
-          <div className={styles.audioOptions}>
-            <Tooltip
-              title={!isAudioAvailable ? 'Windows 10+ 上可用，当前平台或设备不支持音频录制' : ''}
-            >
-              <Checkbox
-                checked={isAudioAvailable && withSystemAudio}
-                disabled={!isAudioAvailable}
-                onChange={(e) => {
-                  setWithSystemAudio(e.target.checked);
-                  if (!e.target.checked) setWithMic(false);
-                }}
-              >
-                录制系统声音
-                <span className={styles.audioHint}>（游戏音效、语音等用户听到的全部声音）</span>
-              </Checkbox>
-            </Tooltip>
-
-            <Checkbox
-              checked={isAudioAvailable && withSystemAudio && withMic}
-              disabled={!isAudioAvailable || !withSystemAudio}
-              onChange={(e) => setWithMic(e.target.checked)}
-              className={styles.audioMicCheck}
-            >
-              同时录制麦克风输入
-            </Checkbox>
-          </div>
         </>
       )}
     </Modal>

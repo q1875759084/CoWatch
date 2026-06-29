@@ -36,7 +36,7 @@ import chokidar, { FSWatcher } from 'chokidar';
 import pRetry from 'p-retry';
 import { v4 as uuidv4 } from 'uuid';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress, AudioOptions } from '../../src/types/recorder';
+import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../src/types/recorder';
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -148,8 +148,12 @@ let apiOrigin = 'http://localhost:3002';
 let detectedEncoder = 'libx264';
 /** 是否为软件编码 */
 let isSoftwareEncoder = false;
-/** 当前录制的音频选项（start 时传入，crash 重启时复用） */
-let currentAudioOptions: AudioOptions = { withSystemAudio: false, withMic: false };
+/**
+ * Windows WASAPI loopback 设备名缓存（由 detectWasapiAvailable 枚举并填充）。
+ * null  = 已探测但未找到 loopback 设备
+ * ''    = 未探测（初始值），spawnFfmpeg 用 'default' 兜底
+ */
+let cachedWasapiLoopbackDevice = '';
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -230,126 +234,6 @@ function getFfmpegPath(): string {
   return raw;
 }
 
-interface AudioDeviceInfo {
-  name: string;
-  index: number;
-}
-
-let cachedSpeakerName: string | null | undefined = undefined;
-let cachedMicName: string | null | undefined = undefined;
-
-function enumerateDshowAudioDevices(): AudioDeviceInfo[] {
-  const ffmpeg = getFfmpegPath();
-  const devices: AudioDeviceInfo[] = [];
-
-  try {
-    const { execSync } = require('child_process');
-    const output = execSync(
-      `"${ffmpeg}" -f dshow -list_devices true -i dummy 2>&1`,
-      { encoding: 'utf8', timeout: 5000 }
-    ) as string;
-
-    const lines = output.split('\n');
-    let index = 0;
-
-    for (const line of lines) {
-      // FFmpeg dshow 音频设备行格式：
-      // [in#0 @ ...] "设备名" (audio)
-      if (/\(audio\)/i.test(line)) {
-        const nameMatch = line.match(/"(.+?)"/);
-        if (nameMatch) {
-          devices.push({ index, name: nameMatch[1].trim() });
-          index++;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('[recorder] dshow 音频设备枚举失败：', e);
-  }
-
-  console.log(`[recorder] 枚举到 ${devices.length} 个音频设备`, devices);
-  return devices;
-}
-
-interface AudioDeviceInfo {
-  format: 'wasapi' | 'dshow';
-  deviceName: string;
-}
-
-let cachedSpeakerInfo: AudioDeviceInfo | null | undefined = undefined;
-let cachedMicInfo: AudioDeviceInfo | null | undefined = undefined;
-
-function getDefaultSpeaker(): AudioDeviceInfo | null {
-  if (cachedSpeakerInfo !== undefined) return cachedSpeakerInfo;
-
-  const ffmpeg = getFfmpegPath();
-
-  // 方案1：WASAPI loopback（推荐，直接录制系统声音）
-  try {
-    const { execSync } = require('child_process');
-    const wasapiOutput = execSync(
-      `"${ffmpeg}" -f wasapi -list_devices true -i dummy 2>&1`,
-      { encoding: 'utf8', timeout: 5000 }
-    ) as string;
-
-    // WASAPI 输出格式：[wasapi @ ...] "设备名" (loopback)
-    const lines = wasapiOutput.split('\n');
-    for (const line of lines) {
-      if (/loopback/i.test(line)) {
-        const nameMatch = line.match(/"(.+?)"/);
-        if (nameMatch) {
-          cachedSpeakerInfo = { format: 'wasapi', deviceName: nameMatch[1].trim() };
-          console.log(`[recorder] ✅ 使用 WASAPI loopback: ${nameMatch[1].trim()}`);
-          return cachedSpeakerInfo;
-        }
-      }
-    }
-    console.log('[recorder] 未找到 WASAPI loopback 设备，尝试 dshow');
-  } catch (e) {
-    console.warn('[recorder] WASAPI 枚举失败:', e);
-  }
-
-  // 方案2：dshow Stereo Mix（回退）
-  const devices = enumerateDshowAudioDevices();
-
-  if (devices.length === 0) {
-    cachedSpeakerInfo = null;
-    return null;
-  }
-
-  // 查找 Stereo Mix / Loopback 设备
-  const loopbackDevice = devices.find(d =>
-    /stereo\s*mix|loopback|what\s*u\s*hear/i.test(d.name)
-  );
-
-  if (loopbackDevice) {
-    cachedSpeakerInfo = { format: 'dshow', deviceName: loopbackDevice.name };
-    console.log(`[recorder] 使用 dshow Loopback: ${loopbackDevice.name}（#${loopbackDevice.index}）`);
-    return cachedSpeakerInfo;
-  }
-
-  // 最终回退：第一个 dshow 设备（可能是麦克风，会录到杂音）
-  cachedSpeakerInfo = { format: 'dshow', deviceName: devices[0].name };
-  console.log(`[recorder] ⚠️ 回退到 dshow 默认设备: ${devices[0].name}（可能不是系统声音）`);
-  console.log(`[recorder] 可用音频设备列表:`, devices);
-  return cachedSpeakerInfo;
-}
-
-function getDefaultMic(): string | null {
-  if (cachedMicName !== undefined) return cachedMicName;
-
-  const devices = enumerateDshowAudioDevices();
-
-  if (devices.length <= 1) {
-    cachedMicName = null;
-    return null;
-  }
-
-  cachedMicName = devices[1].name;
-  console.log(`[recorder] 默认麦克风: ${cachedMicName}（dshow audio 设备 #1）`);
-  return cachedMicName;
-}
-
 /**
  * 推送进度事件到所有渲染进程窗口。
  */
@@ -396,28 +280,32 @@ async function detectEncoder(): Promise<EncoderDetectResult> {
       detectedEncoder = encoder;
       isSoftwareEncoder = encoder === 'libx264';
       console.log(`[recorder] 编码器检测完成：${encoder}，软编=${isSoftwareEncoder}`);
-      // 顺带探测 WASAPI（仅 Windows）
-      const isAudioAvailable = await detectAudioAvailable(ffmpeg);
-      return { encoder, isSoftware: isSoftwareEncoder, isAudioAvailable };
+      // 顺带探测 WASAPI loopback 设备名（仅 Windows），供 spawnFfmpeg 使用
+      await detectWasapiAvailable(ffmpeg);
+      return { encoder, isSoftware: isSoftwareEncoder };
     }
   }
 
   // 兜底：所有都失败时默认 libx264（通常不会到这里）
   detectedEncoder = 'libx264';
   isSoftwareEncoder = true;
-  return { encoder: 'libx264', isSoftware: true, isAudioAvailable: false };
+  return { encoder: 'libx264', isSoftware: true };
 }
 
 /**
- * 探测 Windows 系统音频录制是否可用。
+ * 探测 Windows WASAPI loopback 是否可用，同时缓存 loopback 设备名。
  *
- * 优先级：
- * 1. WASAPI loopback（推荐）：直接录制系统声音，无需 Stereo Mix，Win7+ 原生支持
- * 2. dshow Stereo Mix：需要声卡驱动支持，用户可能未启用
+ * WASAPI 设备枚举 stderr 格式（gyan.dev full build）：
+ *   [wasapi @ ...] "Speakers (Realtek Audio)" (loopback)
+ *   [wasapi @ ...] "Headphones (USB Audio)" (loopback)
+ *   [wasapi @ ...] "Microphone (Realtek Audio)"
  *
- * macOS/Linux 返回 false。
+ * 选取第一个带 (loopback) 标记的设备名作为系统音频输入。
+ * 使用精确设备名而非 'default' 避免 gyan.dev build 对 default 别名支持不完整的问题。
+ *
+ * macOS 直接返回 false（不支持系统音频录制，需要第三方虚拟声卡）。
  */
-async function detectAudioAvailable(ffmpeg: string): Promise<boolean> {
+async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
   if (process.platform !== 'win32') return false;
 
   return new Promise<boolean>((resolve) => {
@@ -430,36 +318,35 @@ async function detectAudioAvailable(ffmpeg: string): Promise<boolean> {
       stderr += chunk.toString();
     });
 
-    proc.on('close', (code) => {
-      const hasWasapi = code === 0 || /loopback/i.test(stderr);
-      console.log(`[recorder] WASAPI 探测结果：${hasWasapi ? '可用' : '不可用'}`);
-
-      if (hasWasapi) {
+    proc.on('close', () => {
+      // 匹配 loopback 设备行："设备名" (loopback)
+      const loopbackMatch = stderr.match(/"([^"]+)"\s*\(loopback\)/i);
+      if (loopbackMatch) {
+        cachedWasapiLoopbackDevice = loopbackMatch[1]!.trim();
+        console.log(`[recorder] WASAPI 探测：找到 loopback 设备 "${cachedWasapiLoopbackDevice}"`);
         resolve(true);
         return;
       }
 
-      // 回退：检查 dshow 是否有音频设备
-      let dshowStderr = '';
-      const dshowProc = spawn(ffmpeg, [
-        '-f', 'dshow', '-list_devices', 'true', '-i', 'dummy',
-      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      // 没有 loopback 标记：判断是否至少有 WASAPI 设备（无 loopback 标记的旧格式）
+      const hasAnyDevice = /\[wasapi\]/i.test(stderr);
+      if (hasAnyDevice) {
+        // 旧版本 gyan.dev build 不输出 (loopback) 标记，回退用 'default'
+        cachedWasapiLoopbackDevice = 'default';
+        console.log('[recorder] WASAPI 探测：未找到 (loopback) 标记，使用 default 兜底');
+        console.log('[recorder] WASAPI 枚举输出：', stderr.split('\n').filter(l => l.includes('wasapi')).join(' | '));
+        resolve(true);
+        return;
+      }
 
-      dshowProc.stderr?.on('data', (chunk: Buffer) => {
-        dshowStderr += chunk.toString();
-      });
-
-      dshowProc.on('close', () => {
-        const hasDshow = /\(audio\)|\[audio\]/i.test(dshowStderr);
-        console.log(`[recorder] dshow 回退探测：${hasDshow ? '可用' : '不可用'}`);
-        resolve(hasDshow);
-      });
-
-      dshowProc.on('error', () => resolve(false));
+      cachedWasapiLoopbackDevice = '';
+      console.log('[recorder] WASAPI 探测：不可用');
+      resolve(false);
     });
 
     proc.on('error', () => resolve(false));
 
+    // 5s 超时保护，避免卡住检测流程
     setTimeout(() => { try { proc.kill(); } catch (_) { /* ignore */ } resolve(false); }, 5000);
   });
 }
@@ -822,10 +709,9 @@ async function cleanup(): Promise<void> {
  * 构造并启动 ffmpeg 进程，写入 tmpDir。
  *
  * @param displayTitle   窗口标题（Windows 窗口录制时用于 gfxcapture window_title 匹配）
- * @param audioOptions   音频录制选项（仅 Windows 生效）
  * @param startNumber    -hls_start_number，crash 重启时传入已上传数量
  */
-function spawnFfmpeg(sourceId: string, displayTitle: string, audioOptions: AudioOptions, startNumber = 0): ChildProcess {
+function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): ChildProcess {
   const ffmpeg = getFfmpegPath();
   // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比，避免失真。
   // 宽度超出上限时等比缩小；宽度未达上限时不放大（原始更小则保持原始）。
@@ -886,63 +772,38 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, audioOptions: Audio
     //   - h=-2：高度自动等比计算，且向下取偶数（H.264 要求）
     //   - format=yuv420p：编码器要求，hwdownload 输出 bgra 需显式转换
     const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
-    const { withSystemAudio, withMic } = audioOptions;
-    console.log(`[recorder] spawnFfmpeg 音频参数 → withSystemAudio=${withSystemAudio}, withMic=${withMic}`);
 
     if (sourceId.startsWith('screen:')) {
-      // ── 全屏录制：ddagrab（视频） + WASAPI loopback（音频，可选）──────────
+      // ── 全屏录制：ddagrab（视频） + WASAPI loopback（音频）────────────────
+      // WASAPI loopback 录制用户实际听到的全部声音（所有程序混音输出）。
+      // 优先使用 detectWasapiAvailable 枚举到的精确设备名；
+      // 未枚举到时（cachedWasapiLoopbackDevice 为空）回退用 'default'。
       const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
+      const loopbackDevice = cachedWasapiLoopbackDevice || 'default';
+      console.log(`[recorder] WASAPI loopback 使用设备: ${loopbackDevice}`);
       inputArgs = [
         '-f', 'lavfi',
-        `-i`, `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
+        '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
+        '-f', 'wasapi', '-i', `audio=${loopbackDevice}`,
       ];
-
-      if (withSystemAudio) {
-        const speakerInfo = getDefaultSpeaker();
-        if (speakerInfo) {
-          inputArgs.push('-f', speakerInfo.format, '-i', `audio=${speakerInfo.deviceName}`);
-        }
-
-        if (withMic) {
-          const micName = getDefaultMic();
-          if (micName) {
-            inputArgs.push('-f', 'dshow', '-i', `audio=${micName}`);
-          }
-        }
-      }
     } else {
-      // ── 窗口录制：gfxcapture（视频） + WASAPI/dshow（音频，可选） ─────────
+      // ── 窗口录制：gfxcapture（视频）+ WASAPI loopback（音频）─────────────
       //
-      // gfxcapture 基于 Windows.Graphics.Capture API，只捕获视频帧不含音频。
-      // 音频必须通过独立输入源采集。
+      // 音频不用 gfxcapture capture_audio=1（只能录该窗口进程的声音），
+      // 改用 WASAPI loopback 录用户听到的全部混音（与全屏保持一致）。
       //
-      // 系统音频策略：
-      //   优先用 WASAPI loopback（-i 'default'），自动指向系统默认输出设备，
-      //   不依赖具体设备名，兼容所有语言/厂商。
-      //   若 WASAPI 不可用则降级到 dshow 按列表顺序取第一个音频设备。
-      //
-      // 麦克风策略：
-      //   通过 dshow 枚举取第二个音频设备（#1），Windows 上通常 #0=扬声器 #1=麦克风。
-      //   不依赖名称匹配，与语言/厂商无关。
+      // gfxcapture 限制：
+      //   - 仅支持 DWM 合成窗口（Win10 1803+），经典 GDI 窗口可能无法捕获
+      //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
+      //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
       const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const loopbackDevice = cachedWasapiLoopbackDevice || 'default';
+      console.log(`[recorder] WASAPI loopback 使用设备: ${loopbackDevice}`);
       inputArgs = [
         '-f', 'lavfi',
-        `-i`, `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
+        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
+        '-f', 'wasapi', '-i', `audio=${loopbackDevice}`,
       ];
-
-      if (withSystemAudio) {
-        const speakerInfo = getDefaultSpeaker();
-        if (speakerInfo) {
-          inputArgs.push('-f', speakerInfo.format, '-i', `audio=${speakerInfo.deviceName}`);
-        }
-      }
-
-      if (withMic) {
-        const micName = getDefaultMic();
-        if (micName) {
-          inputArgs.push('-f', 'dshow', '-i', `audio=${micName}`);
-        }
-      }
     }
   }
 
@@ -992,54 +853,18 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, audioOptions: Audio
     ? ['-vf', `fps=30,scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0']
     : [];
 
-  // ── Windows 音频混流参数 ────────────────────────────────────────────────
-  // 有音频输入时才构造音频编码和混流参数，否则加 -an 明确禁音（避免 HLS muxer 警告）
+  // ── Windows 音频参数 ─────────────────────────────────────────────────────
+  // Windows：全屏和窗口均使用 WASAPI loopback 作为第二路输入（输入 1），
+  // 录制用户实际听到的全部声音（所有程序混音），无需 amix。
+  // macOS：avfoundation 以 `${avfIndex}:none` 驱动，不含音频输入，加 -an 禁音。
   //
-  // 各场景流索引分析：
-  //
-  //   全屏（ddagrab）+ withSystemAudio：
-  //     输入 0: lavfi(ddagrab)  → 0:v 视频（无音频）
-  //     输入 1: wasapi loopback → 1:a 系统音频
-  //     输入 2（有 mic）: dshow → 2:a 麦克风
-  //     混流：amix inputs=2（1:a + 2:a），map 0:v + [amix]
-  //
-  //   窗口（gfxcapture, capture_audio=1）+ withSystemAudio：
-  //     输入 0: lavfi(gfxcapture) → 0:v 视频 + 0:a 窗口音频（lavfi 双路输出）
-  //     输入 1（有 mic）: dshow  → 1:a 麦克风
-  //     混流：amix inputs=2（0:a + 1:a），map 0:v + [amix]
-  //
-  // amix：将多路音频流混合为一路，normalize=0 防止音量自动衰减
-  // aac：HLS 标准音频编码，128k 足够语音+游戏音效场景
-  const { withSystemAudio, withMic } = audioOptions;
-  const hasAudio = process.platform === 'win32' && withSystemAudio;
-  // 有麦克风时需要 amix 混流（无论全屏/窗口）
-  const needsMix = hasAudio && withMic;
-  const isScreenCapture = sourceId.startsWith('screen:');
-
-  let audioArgs: string[];
-  if (!hasAudio) {
-    audioArgs = ['-an'];
-  } else if (needsMix) {
-    // 混流：全屏和窗口的音频流来源不同，-filter_complex 写法相同（均为 2 路）
-    // 全屏：[1:a][2:a] → amix；  窗口：[0:a][1:a] → amix
-    // 用 [0:a][1:a] 统一写法不对全屏，所以按来源分支处理
-    const audioInputs = '[1:a][2:a]amix=inputs=2:normalize=0[amix]';  // 全屏/窗口统一：dshow系统音频(1) + dshow麦克风(2)
-    audioArgs = [
-      '-filter_complex', audioInputs,
-      '-map', '0:v',
-      '-map', '[amix]',
-      '-c:a', 'aac',
-      '-b:a', '128k',
-      '-strict', '-2',
-    ];
-  } else {
-    // 只有系统音频，无需混流
-    audioArgs = [
-      '-c:a', 'aac',
-      '-b:a', '128k',
-      '-strict', '-2',
-    ];
-  }
+  // 流索引（Windows）：
+  //   输入 0: lavfi(ddagrab/gfxcapture) → 0:v 视频（无音频流）
+  //   输入 1: wasapi loopback           → 1:a 系统混音
+  //   → 直接 -c:a aac，ffmpeg 自动 map 唯一音频流，无需 -filter_complex
+  const audioArgs: string[] = process.platform === 'win32'
+    ? ['-c:a', 'aac', '-b:a', '128k', '-strict', '-2']
+    : ['-an'];
 
   const args = [
     ...inputArgs,
@@ -1103,7 +928,7 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
     watcher = null;
   }
 
-  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, currentAudioOptions, uploadedCount);
+  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, uploadedCount);
   attachFfmpegHandlers(displayTitle);
 
   // 注意：chokidar v5 不支持 glob 路径 watch，必须 watch 目录后在回调内过滤扩展名
@@ -1142,14 +967,12 @@ function attachFfmpegHandlers(displayTitle: string): void {
  * @param displayTitle 窗口标题（Windows 窗口录制时使用）
  * @param roomId       所属房间 ID
  * @param authToken    JWT AccessToken
- * @param audioOptions 音频录制选项（仅 Windows 生效）
  */
 async function start(
   windowId: string,
   displayTitle: string,
   roomId: string,
   authToken: string,
-  audioOptions: AudioOptions = { withSystemAudio: false, withMic: false },
 ): Promise<void> {
   if (ffmpegProcess) {
     throw new Error('[recorder] 录制已在进行中');
@@ -1160,7 +983,6 @@ async function start(
   currentRoomId = roomId;
   currentSourceId = windowId;
   currentAuthToken = authToken;
-  currentAudioOptions = audioOptions;
   segmentKeys = [];
   pendingQueue = [];
   uploadedCount = 0;
@@ -1193,7 +1015,7 @@ async function start(
   }
 
   // 启动 ffmpeg
-  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, audioOptions);
+  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle);
   attachFfmpegHandlers(displayTitle);
 
   // 启动 chokidar 监听新增切片文件
@@ -1381,10 +1203,9 @@ export function registerRecorderHandlers(): void {
     displayTitle: string,
     roomId: string,
     authToken: string,
-    audioOptions: AudioOptions,
   ) => {
     try {
-      await start(windowId, displayTitle, roomId, authToken, audioOptions);
+      await start(windowId, displayTitle, roomId, authToken);
     } catch (err) {
       console.error('[recorder] start 异常：', (err as Error).message);
       throw err;
