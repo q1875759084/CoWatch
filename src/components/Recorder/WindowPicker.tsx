@@ -105,7 +105,7 @@ export function WindowPicker({
 
           {windows.length > 0 ? (
             <div className={styles.sourceGroup}>
-              <h4 className={styles.groupTitle}>应用窗口</h4>
+              <h4 className={styles.groupTitle}>应用窗口（高速画面可能卡顿，游戏建议选整屏）</h4>
               <div className={styles.grid}>
                 {windows.map((s) => (
                   <SourceItem
