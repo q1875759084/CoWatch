@@ -305,5 +305,3 @@ npm run electron:pack:test
 - [Desktop Duplication API 微软文档](https://learn.microsoft.com/en-us/windows/win32/direct3ddesktop/dxgi-desktop-duplication)
 
 ---
-
-**祝编译顺利！遇到任何问题把完整的错误输出贴给 AI 即可分析。**

@@ -179,6 +179,40 @@ Main 进程（Electron 层）
 
 ---
 
+### Windows 游戏录制屏幕捕获 API 选型
+
+**背景：** CoWatch 录制功能需要捕获游戏窗口并输出 HLS 切片。Windows 上存在多种捕获 API，选型直接影响游戏性能和录制兼容性。
+
+**三类方案对比：**
+
+| 方案 | CPU 开销 | GPU stall | 独占全屏 | 切片格式 | 代码改动 |
+|------|:--------:|:---------:|:--------:|:--------:|:--------:|
+| `gdigrab`（当前已放弃） | 高（软编）/中（硬编） | ⚠️ 有（BitBlt 同步） | ❌ 黑屏 | 直出 `.ts` | 最小 |
+| `ddagrab`（最终选择） | ≈0%（GPU 零拷贝） | ✅ 无 | ✅ | 直出 `.ts` | 小（仅换 ffmpeg） |
+| `MediaRecorder`（备选） | 低 | ✅ 无（WGC API） | ✅ | WebM（需改后端） | 大（重写管道） |
+
+**gdigrab 放弃原因：**
+- BitBlt 是同步 GDI 调用，强制 GPU pipeline flush，与编码器类型无关，硬编下依然卡顿
+- 窗口模式对独占全屏游戏 100% 黑屏（DWM 被绕过）
+
+**ddagrab 选型理由：**
+- GPU 异步读取已完成帧副本，零 CPU 开销，不阻塞游戏渲染管线
+- 窗口模式通过 DDA API 锁定窗口句柄而非标题字符串，更可靠
+- 代码已就绪，只需替换 ffmpeg 二进制（ffmpeg-static 不含 ddagrab，需自编译）
+- 分发时 `d3d11.dll`/`dxgi.dll` 是 Win10/11 标准系统组件，无需随包携带
+
+**MediaRecorder 放弃原因：**
+- 输出 WebM 容器，不是 `.ts`，HLS 播放链路（后端 generateM3u8 + 切片存储）全部要改
+- `ondataavailable` 切片边界不保证关键帧，切片衔接可能花屏
+- Renderer→Main 进程大量 IPC 传输（raw frames ≈250MB/s）性能极差；走 MediaRecorder 切片也要改后端
+
+**独占全屏黑屏处理策略（对标 OBS）：**
+- 独占全屏（DX12/Vulkan 接管 GPU）：即使 ddagrab 也可能失败，直接放弃，提示用户切无边框模式
+- 无边框全屏（现代游戏默认）：ddagrab 完全兼容
+- 全屏优化（FSE）：ddagrab 可捕获
+
+---
+
 ### 从零搭 Electron 工程 vs 用脚手架的选型
 
 **背景：** 将已有 Web 项目嵌入 Electron 时，有两条路：
@@ -251,6 +285,23 @@ handler 函数内部调用的是 Electron 提供的 `net.fetch()`，底层仍是
 **与 nginx 反向代理的类比：** `protocol.handle` 函数承担的角色和 nginx 的 `location` 块完全相同——根据路径决定将请求代理到哪里。区别在于 nginx 运行在操作系统网络层，`protocol.handle` 运行在 Electron 主进程的 JS 层。
 
 **CORS 含义：** Chromium 的 CORS 机制基于 Origin（协议 + 域名 + 端口）。自定义协议 `app://localhost` 是一个独立的 Origin，与 `http://localhost:3001` 完全不同。`net.fetch` 转发请求时如果原样携带 `Origin: app://localhost`，后端 CORS 白名单里没有这个值，请求被拒绝（DevTools 显示 "Provisional headers are shown"）。修复方式：在 `net.fetch` 调用前从请求头里删除 `Origin`，让后端看不到 `app://` 来源。
+
+---
+
+### Windows 全屏模式分类与捕获 API 能力对照
+
+**背景：** Windows 游戏有三种全屏模式，与屏幕捕获 API 的兼容性截然不同，是游戏录制选型的核心知识点。
+
+| 模式 | 原理 | GDI BitBlt（gdigrab） | DXGI DDA（ddagrab/WGC） | 典型场景 |
+|------|------|-----------------------|------------------------|---------|
+| **独占全屏（Exclusive）** | GPU 直接输出到显示器，完全绕过 DWM | ❌ 黑屏 | ⚠️ DX11 可以，DX12 可能失败 | 老游戏、部分竞技游戏 |
+| **无边框窗口全屏（Borderless Windowed）** | 仍是窗口，DWM 参与合成 | ✅（整屏模式） | ✅ | **现代游戏默认（LOL、Valorant、原神等）** |
+| **全屏优化（FSO/FSE）** | Win10 引入，游戏认为自己独占但 DWM 仍在后台 | ⚠️ 不稳定 | ✅ | Win10/11 下大多数游戏 |
+
+**关键推论：**
+- `desktopCapturer`（Electron 用于获取窗口列表）底层用 WGC，能看到独占全屏窗口的缩略图，但 gdigrab 实际录制时黑屏——这导致 WindowPicker 里显示了游戏截图，用户选择后却录到黑屏，体验极差。
+- 现代游戏（2020 年后发布）绝大多数默认无边框全屏，真正独占全屏的情况已越来越少。
+- OBS 的处理策略：默认用 DXGI/WGC，遇到独占全屏弹窗提示用户切换无边框模式，不强制解决。CoWatch 采用相同策略。
 
 ---
 
@@ -418,6 +469,22 @@ const darwinExtraArgs: string[] = process.platform === 'darwin'
 3. `generateM3u8` 当 `video.duration_seconds` 有值时，最后一片 `#EXTINF` 改为 `totalDuration - 10 × (n-1)`
 
 旧视频和手动上传视频 `duration_seconds` 为 NULL，走原有逻辑，完全向后兼容。
+
+---
+
+### Windows gdigrab 窗口录制黑屏 + 硬编下仍卡顿
+
+**现象：** Windows 下选择游戏窗口录制，ffmpeg 不报错但录制内容全为黑屏。改为整屏录制可以捕获到画面，但游戏出现轻微卡顿——即使编码器检测为硬编（h264_nvenc/qsv），未降级到 480p，卡顿依然存在。
+
+**根因（两个独立问题）：**
+
+1. **黑屏**：`gdigrab -i title=窗口名` 使用 GDI BitBlt，依赖 DWM（Desktop Window Manager）合成层。游戏进入独占全屏后直接接管 GPU 输出，绕过 DWM，GDI 读到的 framebuffer 没有游戏内容，返回黑帧。整屏模式（`-i desktop`）内部切换为 DXGI，可以绕过此限制。
+
+2. **硬编下依然卡顿**：BitBlt 是同步调用，执行时必须等 GPU 完成当前帧写入 framebuffer（GPU pipeline flush）。这在渲染管线中插入了一个同步等待点，导致游戏帧提交被短暂阻塞，表现为微卡顿。这与 CPU 编码负担无关，硬编消除了编码开销但消除不了捕获层的 GPU stall。
+
+**解决：** 改用 `ddagrab`（Desktop Duplication API）。ddagrab 读取 DWM 维护的已完成帧副本，是异步非阻塞操作，不插入 GPU 同步点，CPU 开销 ≈0%。代码已改完（`recorder.ts` Windows 分支），但 `ffmpeg-static` 不含此功能，需自编译 ffmpeg（见 `FFmpeg-ddagrab-编译指南.md`）。
+
+**临时退路（等待自编译）：** Windows 分支改为 `gdigrab -i desktop`（整屏模式），至少解决黑屏问题，接受轻微卡顿。
 
 ---
 

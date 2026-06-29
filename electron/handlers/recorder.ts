@@ -162,31 +162,62 @@ export function setAuthTokenForRecorder(token: string): void {
 
 /**
  * 获取 ffmpeg 可执行文件的实际路径。
- * 打包后，ffmpeg-static 的二进制会被 electron-builder 解包到 app.asar.unpacked，
- * 需要将路径中的 app.asar/ 替换为 app.asar.unpacked/。
+ *
+ * 平台策略：
+ *   macOS  → 始终使用 ffmpeg-static（avfoundation 捕获，无需 ddagrab）
+ *   Windows → 优先使用 electron/bin/ffmpeg.exe（gyan.dev full build，内置 ddagrab filter）
+ *             若不存在则降级到 ffmpeg-static（不含 ddagrab，会录制失败）
+ *
+ * Windows ffmpeg.exe 来源：
+ *   从 https://www.gyan.dev/ffmpeg/builds/ 下载 ffmpeg-release-full.7z
+ *   解压后取 bin/ffmpeg.exe 放入 electron/bin/
+ *   ddagrab 在 full build 中作为 filter 内置，无需自编译。
+ *
+ * Windows ffmpeg.exe 放置位置：
+ *   dev/preview 模式：electron/bin/ffmpeg.exe
+ *   packaged 模式：resources/bin/ffmpeg.exe（由 electron-builder extraResources 打包）
  */
 function getFfmpegPath(): string {
+  // ── Windows：优先用 gyan.dev full build（含 ddagrab filter）────────────
+  if (process.platform === 'win32') {
+    const binName = 'ffmpeg.exe';
+
+    if (app.isPackaged) {
+      // packaged 模式：electron-builder extraResources 将 electron/bin/ 打包到 resources/bin/
+      const bundledPath = path.join(process.resourcesPath, 'bin', binName);
+      if (fs.existsSync(bundledPath)) {
+        console.log('[recorder] 使用 gyan.dev full build ffmpeg（packaged）：', bundledPath);
+        return bundledPath;
+      }
+    } else {
+      // dev/preview 模式：从项目根 electron/bin/ 读取
+      // __dirname 在 webpack 编译后指向 dist-electron/，向上一级是项目根
+      const localBinPath = path.join(__dirname, '..', 'electron', 'bin', binName);
+      if (fs.existsSync(localBinPath)) {
+        console.log('[recorder] 使用 gyan.dev full build ffmpeg（dev）：', localBinPath);
+        return localBinPath;
+      }
+      console.warn('[recorder] electron/bin/ffmpeg.exe 不存在，降级到 ffmpeg-static（不含 ddagrab，录制将失败）');
+    }
+  }
+
+  // ── macOS / Linux / Windows 降级：使用 ffmpeg-static ────────────────────
   // ffmpeg-static 在 webpack 打包后路径可能变为相对路径或被内联，
-  // 需要用 require.resolve 或直接读 package.json 的 bin 字段定位。
-  // 开发/preview 模式：ffmpegPath 是绝对路径（node_modules 下的二进制）
-  // 打包后（isPackaged）：binary 被解包到 app.asar.unpacked
+  // 需要从 package.json bin 字段定位真实二进制
   let raw = ffmpegPath as string;
 
-  // webpack 打包后 ffmpegPath 可能变成相对路径 './ffmpeg' 或 'ffmpeg'，
-  // 此时需要基于项目根目录拼接真实路径
   if (!path.isAbsolute(raw)) {
-    // 从 ffmpeg-static package.json 定位真实二进制
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const pkg = require('ffmpeg-static/package.json') as { bin: string };
       raw = path.join(path.dirname(require.resolve('ffmpeg-static/package.json')), pkg.bin);
     } catch {
-      // 兜底：尝试系统 PATH 中的 ffmpeg
       raw = 'ffmpeg';
     }
   }
 
   if (app.isPackaged) {
+    // ffmpeg-static 二进制被 electron-builder asarUnpack 解包到 app.asar.unpacked
     return raw.replace('app.asar', 'app.asar.unpacked');
   }
   return raw;
@@ -516,20 +547,24 @@ async function cleanup(): Promise<void> {
 /**
  * 构造并启动 ffmpeg 进程，写入 tmpDir。
  *
- * @param displayTitle   窗口标题（Windows gdigrab 使用）
+ * @param displayTitle   窗口标题（Windows 窗口录制时用于 gfxcapture window_title 匹配）
  * @param startNumber    -hls_start_number，crash 重启时传入已上传数量
  */
 function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): ChildProcess {
   const ffmpeg = getFfmpegPath();
-  // 软编降分辨率：854x480；硬编正常档：1600x900
-  const resolution = isSoftwareEncoder ? '854x480' : '1600x900';
+  // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比，避免失真。
+  // 宽度超出上限时等比缩小；宽度未达上限时不放大（原始更小则保持原始）。
+  // -2 确保高度为偶数（H.264 编码器要求宽高均为偶数）。
+  // 软编：最大宽 854（降低 CPU 压力）；硬编：最大宽 1600（高清档）
+  const maxWidth = isSoftwareEncoder ? 854 : 1600;
+
   // ffmpeg 在所有平台上都能正确解析正斜杠路径；
   // Windows path.join 生成反斜杠，部分 ffmpeg 版本（静态构建）可能将 \s \U 等误解析为转义序列
   const segPattern = path.join(tmpDir, 'seg%03d.ts').replace(/\\/g, '/');
   const m3u8Path = path.join(tmpDir, 'index.m3u8').replace(/\\/g, '/');
 
   // ── 平台差异：输入源参数 ─────────────────────────────────────────────────
-  // Windows：gdigrab 通过窗口标题捕获
+  // Windows：ddagrab filter（通过 lavfi 驱动）捕获全屏，零 CPU 开销
   // macOS：avfoundation 通过 desktopCapturer source id（格式 "screen:N:M" 或 "window:N:M"）
   //        avfoundation 设备索引：视频设备从 "Capture screen N" 取索引，音频设备用 none
   let inputArgs: string[];
@@ -552,24 +587,51 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
       '-i', `${avfIndex}:none`, // 视频设备:音频设备，none 表示不录音
     ];
   } else {
-    // Windows：ddagrab（Desktop Duplication API）
+    // Windows：根据录制源类型选择不同的 GPU 零拷贝捕获方案
     //
     // 为什么不用 gdigrab：
     //   gdigrab 使用 GDI BitBlt（纯 CPU），每帧拷贝整个显存到系统内存，
     //   30fps 下 CPU 占用 ~20% 单核，且 BitBlt 会阻塞 GPU 渲染管线导致游戏卡顿。
-    //   窗口模式（title=）对 DXGI 独占的游戏窗口匹配不可靠。
     //
-    // ddagrab 的优势：
-    //   基于 Windows Desktop Duplication API（DXGI），GPU 直接读取显存帧缓冲，
-    //   CPU 开销 ≈0，不阻塞游戏渲染。窗口模式通过 DDA API 锁定窗口对象句柄，
-    //   自动跟踪窗口移动/缩放，无需手动 crop。
+    // 两种 GPU 零拷贝方案：
     //
-    // 兼容性要求：Windows 8.1+ / Win10 1803+，DX11 显卡驱动（游戏电脑均满足）
+    //   【全屏】ddagrab（Desktop Duplication API / DXGI）
+    //     - 捕获整块显示器，output_idx 对应显示器序号
+    //     - 必须通过 -f lavfi -i 语法驱动（不是 input device）
+    //     - 兼容性：Windows 8.1+ / Win10 1803+，DX11 显卡
+    //
+    //   【窗口】gfxcapture（Windows.Graphics.Capture API）
+    //     - 支持按窗口标题正则、进程名、HWND 精确捕获单个窗口
+    //     - 同样是 GPU 硬件帧，CPU 开销 ≈0
+    //     - 兼容性：Windows 10 1803+（Win11 推荐）
+    //     - 不稳定帧率（由合成器决定），需加 fps filter 稳定到 30fps
+    //
+    // 注意：两者均为 filter（非 input device），必须通过 -f lavfi -i 或
+    //   -filter_complex 语法驱动，后接 hwdownload + format=bgra 转为 CPU 可见帧。
+    //
+    // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比。
+    //   scale=w='min(iw,W)':h=-2
+    //   - iw > W 时等比缩小；iw <= W 时保持原始，不放大
+    //   - h=-2：高度自动等比计算，且向下取偶数（H.264 要求）
+    //   - format=yuv420p：编码器要求，hwdownload 输出 bgra 需显式转换
+    const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
+
     if (sourceId.startsWith('screen:')) {
-      inputArgs = ['-f', 'ddagrab', '-framerate', '30', '-i', '0'];
+      // 全屏录制：ddagrab，output_idx 取显示器序号
+      const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
+      inputArgs = [
+        '-f', 'lavfi',
+        '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
+      ];
     } else {
-      const safeTitle = displayTitle.replace(/"/g, '\\"');
-      inputArgs = ['-f', 'ddagrab', '-framerate', '30', '-window_title', safeTitle, '-i', '0'];
+      // 窗口录制：gfxcapture，按窗口标题正则匹配
+      // displayTitle 中的特殊正则字符需转义，防止意外匹配
+      const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // gfxcapture 帧率不稳定，加 fps=30 确保稳定输出
+      inputArgs = [
+        '-f', 'lavfi',
+        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
+      ];
     }
   }
 
@@ -606,25 +668,21 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
     encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
   }
 
-  // macOS avfoundation 屏幕捕获的帧 PTS 全部相同（差值=0），
-  // 导致每帧 duration=0，编码器输出的时间戳全部错误，播放器显示 0:00。
+  // macOS avfoundation 屏幕捕获的帧 PTS 全部相同（差値=0），
+  // 导致每帧 duration=0，编码器输出时间戳错误。
+  // 修复：用 fps filter 重新生成 PTS，同时内联等比缩放（限制最大宽）。
+  // -s 与 -vf 互斥，不能同时使用，缩放必须内联到 -vf filter chain 中。
   //
-  // 修复方案（macOS 专用，仅影响 darwin 分支）：
-  //   -vf fps=30
-  //     通过 fps filter 重新生成 PTS：完全丢弃 avfoundation 提供的原始 PTS，
-  //     按 30fps 均匀重新分配时间戳（第 0 帧=0, 第 1 帧=1/30, 第 2 帧=2/30 ...）。
-  //     这是 avfoundation 屏幕录制的标准处理方式，等价于 OBS 的 "Use CFR" 选项。
-  //
-  //   -bf 0
-  //     禁用 B 帧，使编码器输出的 DTS 严格等于 PTS，消除 HLS muxer 的 DTS 不单调警告。
-  //     屏幕录制场景下 B 帧压缩收益极小（静止帧全为 skip），禁用无实质质量损失。
+  // scale=w='min(iw,W)':h=-2：
+  //   - iw > W 时等比缩小；iw <= W 时保持原始，不放大
+  //   - h=-2：高度自动等比计算，且向下取偶数（H.264 要求）
+  // -bf 0：禁用 B 帧，使 DTS 严格等于 PTS，消除 HLS muxer 的 DTS 不单调警告
   const darwinExtraArgs: string[] = process.platform === 'darwin'
-    ? ['-vf', 'fps=30', '-bf', '0']
+    ? ['-vf', `fps=30,scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0']
     : [];
 
   const args = [
     ...inputArgs,
-    '-s', resolution,
     ...darwinExtraArgs,
     ...encodeArgs,
     '-g', String(30 * HLS_SEGMENT_DURATION), // GOP = framerate × segment_duration
@@ -717,9 +775,10 @@ function attachFfmpegHandlers(displayTitle: string): void {
 /**
  * 开始录制。
  * @param windowId     desktopCapturer source id（格式 "screen:N:M" 或 "window:N:M"）
- *                     macOS avfoundation 模式下用于推导屏幕设备索引；
- *                     Windows gdigrab 模式下不使用（按 displayTitle 定位窗口）
- * @param displayTitle 窗口标题（Windows gdigrab 使用）
+ *                     macOS：推导 avfoundation 屏幕设备索引
+ *                     Windows screen:：推导 ddagrab output_idx
+ *                     Windows window:：type使用 gfxcapture，依赖 displayTitle 匹配
+ * @param displayTitle 窗口标题（Windows 窗口录制时使用）
  * @param roomId       所属房间 ID
  */
 async function start(windowId: string, displayTitle: string, roomId: string, authToken: string): Promise<void> {

@@ -27,6 +27,16 @@ win:
   # 跳过 exe 签名和资源编辑（避免从 GitHub 下载 winCodeSign；
   # todo：正式发布时删除此行）
   signAndEditExecutable: false
+  # gyan.dev full build ffmpeg.exe，仅 Windows 打包时携带。
+  # 来源：https://www.gyan.dev/ffmpeg/builds/ 下载 ffmpeg-release-full.7z，
+  #       解压后取 bin/ffmpeg.exe 放入 electron/bin/（已内置 ddagrab/gfxcapture filter，无需自编译）。
+  # electron/bin/ 目录不存在时此配置自动忽略，不影响 macOS 打包。
+  # getFfmpegPath() 在 packaged 模式下读取 resources/bin/ffmpeg.exe
+  extraResources:
+    - from: "electron/bin/"
+      to: "bin/"
+      filter:
+        - "**/*"
 
 # ─── macOS 配置（仅用于开发机本地验证，不对外发布）─────────────────────────
 mac:
