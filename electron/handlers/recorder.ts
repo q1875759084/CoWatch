@@ -230,6 +230,126 @@ function getFfmpegPath(): string {
   return raw;
 }
 
+interface AudioDeviceInfo {
+  name: string;
+  index: number;
+}
+
+let cachedSpeakerName: string | null | undefined = undefined;
+let cachedMicName: string | null | undefined = undefined;
+
+function enumerateDshowAudioDevices(): AudioDeviceInfo[] {
+  const ffmpeg = getFfmpegPath();
+  const devices: AudioDeviceInfo[] = [];
+
+  try {
+    const { execSync } = require('child_process');
+    const output = execSync(
+      `"${ffmpeg}" -f dshow -list_devices true -i dummy 2>&1`,
+      { encoding: 'utf8', timeout: 5000 }
+    ) as string;
+
+    const lines = output.split('\n');
+    let index = 0;
+
+    for (const line of lines) {
+      // FFmpeg dshow 音频设备行格式：
+      // [in#0 @ ...] "设备名" (audio)
+      if (/\(audio\)/i.test(line)) {
+        const nameMatch = line.match(/"(.+?)"/);
+        if (nameMatch) {
+          devices.push({ index, name: nameMatch[1].trim() });
+          index++;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[recorder] dshow 音频设备枚举失败：', e);
+  }
+
+  console.log(`[recorder] 枚举到 ${devices.length} 个音频设备`, devices);
+  return devices;
+}
+
+interface AudioDeviceInfo {
+  format: 'wasapi' | 'dshow';
+  deviceName: string;
+}
+
+let cachedSpeakerInfo: AudioDeviceInfo | null | undefined = undefined;
+let cachedMicInfo: AudioDeviceInfo | null | undefined = undefined;
+
+function getDefaultSpeaker(): AudioDeviceInfo | null {
+  if (cachedSpeakerInfo !== undefined) return cachedSpeakerInfo;
+
+  const ffmpeg = getFfmpegPath();
+
+  // 方案1：WASAPI loopback（推荐，直接录制系统声音）
+  try {
+    const { execSync } = require('child_process');
+    const wasapiOutput = execSync(
+      `"${ffmpeg}" -f wasapi -list_devices true -i dummy 2>&1`,
+      { encoding: 'utf8', timeout: 5000 }
+    ) as string;
+
+    // WASAPI 输出格式：[wasapi @ ...] "设备名" (loopback)
+    const lines = wasapiOutput.split('\n');
+    for (const line of lines) {
+      if (/loopback/i.test(line)) {
+        const nameMatch = line.match(/"(.+?)"/);
+        if (nameMatch) {
+          cachedSpeakerInfo = { format: 'wasapi', deviceName: nameMatch[1].trim() };
+          console.log(`[recorder] ✅ 使用 WASAPI loopback: ${nameMatch[1].trim()}`);
+          return cachedSpeakerInfo;
+        }
+      }
+    }
+    console.log('[recorder] 未找到 WASAPI loopback 设备，尝试 dshow');
+  } catch (e) {
+    console.warn('[recorder] WASAPI 枚举失败:', e);
+  }
+
+  // 方案2：dshow Stereo Mix（回退）
+  const devices = enumerateDshowAudioDevices();
+
+  if (devices.length === 0) {
+    cachedSpeakerInfo = null;
+    return null;
+  }
+
+  // 查找 Stereo Mix / Loopback 设备
+  const loopbackDevice = devices.find(d =>
+    /stereo\s*mix|loopback|what\s*u\s*hear/i.test(d.name)
+  );
+
+  if (loopbackDevice) {
+    cachedSpeakerInfo = { format: 'dshow', deviceName: loopbackDevice.name };
+    console.log(`[recorder] 使用 dshow Loopback: ${loopbackDevice.name}（#${loopbackDevice.index}）`);
+    return cachedSpeakerInfo;
+  }
+
+  // 最终回退：第一个 dshow 设备（可能是麦克风，会录到杂音）
+  cachedSpeakerInfo = { format: 'dshow', deviceName: devices[0].name };
+  console.log(`[recorder] ⚠️ 回退到 dshow 默认设备: ${devices[0].name}（可能不是系统声音）`);
+  console.log(`[recorder] 可用音频设备列表:`, devices);
+  return cachedSpeakerInfo;
+}
+
+function getDefaultMic(): string | null {
+  if (cachedMicName !== undefined) return cachedMicName;
+
+  const devices = enumerateDshowAudioDevices();
+
+  if (devices.length <= 1) {
+    cachedMicName = null;
+    return null;
+  }
+
+  cachedMicName = devices[1].name;
+  console.log(`[recorder] 默认麦克风: ${cachedMicName}（dshow audio 设备 #1）`);
+  return cachedMicName;
+}
+
 /**
  * 推送进度事件到所有渲染进程窗口。
  */
@@ -277,7 +397,7 @@ async function detectEncoder(): Promise<EncoderDetectResult> {
       isSoftwareEncoder = encoder === 'libx264';
       console.log(`[recorder] 编码器检测完成：${encoder}，软编=${isSoftwareEncoder}`);
       // 顺带探测 WASAPI（仅 Windows）
-      const isAudioAvailable = await detectWasapiAvailable(ffmpeg);
+      const isAudioAvailable = await detectAudioAvailable(ffmpeg);
       return { encoder, isSoftware: isSoftwareEncoder, isAudioAvailable };
     }
   }
@@ -289,21 +409,18 @@ async function detectEncoder(): Promise<EncoderDetectResult> {
 }
 
 /**
- * 探测 Windows WASAPI loopback 是否可用。
+ * 探测 Windows 系统音频录制是否可用。
  *
- * 探测方式：让 ffmpeg 枚举 WASAPI 设备列表（-list_devices true），
- * 只要进程正常退出（code=0 或 stderr 含 device 信息）即判定可用。
+ * 优先级：
+ * 1. WASAPI loopback（推荐）：直接录制系统声音，无需 Stereo Mix，Win7+ 原生支持
+ * 2. dshow Stereo Mix：需要声卡驱动支持，用户可能未启用
  *
- * 兼容性：Windows 10+ 均支持 WASAPI，通常不会失败；
- * 极少数情况（无声卡、远程桌面无音频设备）会返回 false。
- * macOS 直接返回 false（不支持系统音频录制，需要第三方虚拟声卡）。
+ * macOS/Linux 返回 false。
  */
-async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
+async function detectAudioAvailable(ffmpeg: string): Promise<boolean> {
   if (process.platform !== 'win32') return false;
 
   return new Promise<boolean>((resolve) => {
-    // -list_devices true 会输出设备列表到 stderr 后以非零码退出，属正常行为
-    // 只要 stderr 中包含设备行（包含括号格式的设备名），即认为 WASAPI 可用
     let stderr = '';
     const proc = spawn(ffmpeg, [
       '-f', 'wasapi', '-list_devices', 'true', '-i', 'dummy',
@@ -313,16 +430,36 @@ async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
       stderr += chunk.toString();
     });
 
-    proc.on('close', () => {
-      // WASAPI 设备行格式示例："Speakers (Realtek High Definition Audio)"
-      const available = stderr.includes('wasapi') || /\[wasapi\]/i.test(stderr);
-      console.log(`[recorder] WASAPI 探测结果：${available ? '可用' : '不可用'}`);
-      resolve(available);
+    proc.on('close', (code) => {
+      const hasWasapi = code === 0 || /loopback/i.test(stderr);
+      console.log(`[recorder] WASAPI 探测结果：${hasWasapi ? '可用' : '不可用'}`);
+
+      if (hasWasapi) {
+        resolve(true);
+        return;
+      }
+
+      // 回退：检查 dshow 是否有音频设备
+      let dshowStderr = '';
+      const dshowProc = spawn(ffmpeg, [
+        '-f', 'dshow', '-list_devices', 'true', '-i', 'dummy',
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+      dshowProc.stderr?.on('data', (chunk: Buffer) => {
+        dshowStderr += chunk.toString();
+      });
+
+      dshowProc.on('close', () => {
+        const hasDshow = /\(audio\)|\[audio\]/i.test(dshowStderr);
+        console.log(`[recorder] dshow 回退探测：${hasDshow ? '可用' : '不可用'}`);
+        resolve(hasDshow);
+      });
+
+      dshowProc.on('error', () => resolve(false));
     });
 
     proc.on('error', () => resolve(false));
 
-    // 5s 超时保护，避免卡住检测流程
     setTimeout(() => { try { proc.kill(); } catch (_) { /* ignore */ } resolve(false); }, 5000);
   });
 }
@@ -750,51 +887,61 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, audioOptions: Audio
     //   - format=yuv420p：编码器要求，hwdownload 输出 bgra 需显式转换
     const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
     const { withSystemAudio, withMic } = audioOptions;
+    console.log(`[recorder] spawnFfmpeg 音频参数 → withSystemAudio=${withSystemAudio}, withMic=${withMic}`);
 
     if (sourceId.startsWith('screen:')) {
       // ── 全屏录制：ddagrab（视频） + WASAPI loopback（音频，可选）──────────
       const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
       inputArgs = [
         '-f', 'lavfi',
-        '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
+        `-i`, `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
 
       if (withSystemAudio) {
-        // WASAPI loopback：捕获系统输出混音（即用户耳机/扬声器听到的全部声音）
-        // -loopback true：将输出设备切换为 loopback 模式（录已播放的声音而非麦克风）
-        inputArgs.push('-f', 'wasapi', '-loopback', 'true', '-i', 'default');
+        const speakerInfo = getDefaultSpeaker();
+        if (speakerInfo) {
+          inputArgs.push('-f', speakerInfo.format, '-i', `audio=${speakerInfo.deviceName}`);
+        }
 
         if (withMic) {
-          // 再追加一路麦克风输入（dshow 默认音频设备 wave_{default}）
-          // TODO: 需在实机测试中确认此设备 ID 是否通用。若特定设备无法识别，
-          // 可改用 `ffmpeg -list_devices true -f dshow -i dummy` 枚举实际设备名后硬编。
-          inputArgs.push('-f', 'dshow', '-i', 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{default}');
+          const micName = getDefaultMic();
+          if (micName) {
+            inputArgs.push('-f', 'dshow', '-i', `audio=${micName}`);
+          }
         }
       }
     } else {
-      // ── 窗口录制：gfxcapture（视频 + 可选音频） ──────────────────────────
+      // ── 窗口录制：gfxcapture（视频） + WASAPI/dshow（音频，可选） ─────────
       //
-      // gfxcapture 限制：
-      //   - 仅支持 DWM 合成窗口（Win10 1803+），经典 GDI 窗口可能无法捕获
-      //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
-      //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
+      // gfxcapture 基于 Windows.Graphics.Capture API，只捕获视频帧不含音频。
+      // 音频必须通过独立输入源采集。
       //
-      // capture_audio=1：WGC 同步捕获该窗口进程的音频输出（无需额外输入源）
-      //   音频流随视频流一起从 lavfi 输出，ffmpeg 自动识别为第二路流
+      // 系统音频策略：
+      //   优先用 WASAPI loopback（-i 'default'），自动指向系统默认输出设备，
+      //   不依赖具体设备名，兼容所有语言/厂商。
+      //   若 WASAPI 不可用则降级到 dshow 按列表顺序取第一个音频设备。
       //
-      // 如果 gfxcapture 失败（ffmpeg 返回非零退出码），
-      // abortRecording 会触发 → 用户可重新选择整屏录制（ddagrab，100% 可用）
+      // 麦克风策略：
+      //   通过 dshow 枚举取第二个音频设备（#1），Windows 上通常 #0=扬声器 #1=麦克风。
+      //   不依赖名称匹配，与语言/厂商无关。
       const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const captureAudio = withSystemAudio ? 1 : 0;
       inputArgs = [
         '-f', 'lavfi',
-        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30:capture_audio=${captureAudio},fps=30,hwdownload,format=bgra,${winScaleFilter}`,
+        `-i`, `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
 
-      if (withSystemAudio && withMic) {
-        // 窗口音频已在 gfxcapture 内（第 0 路音频流），再追加一路麦克风
-        // TODO: 同全屏路径，默认麦克风设备 ID 需实机验证通用性
-        inputArgs.push('-f', 'dshow', '-i', 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{default}');
+      if (withSystemAudio) {
+        const speakerInfo = getDefaultSpeaker();
+        if (speakerInfo) {
+          inputArgs.push('-f', speakerInfo.format, '-i', `audio=${speakerInfo.deviceName}`);
+        }
+      }
+
+      if (withMic) {
+        const micName = getDefaultMic();
+        if (micName) {
+          inputArgs.push('-f', 'dshow', '-i', `audio=${micName}`);
+        }
       }
     }
   }
@@ -876,9 +1023,7 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, audioOptions: Audio
     // 混流：全屏和窗口的音频流来源不同，-filter_complex 写法相同（均为 2 路）
     // 全屏：[1:a][2:a] → amix；  窗口：[0:a][1:a] → amix
     // 用 [0:a][1:a] 统一写法不对全屏，所以按来源分支处理
-    const audioInputs = isScreenCapture
-      ? '[1:a][2:a]amix=inputs=2:normalize=0[amix]'  // 全屏：wasapi(1) + dshow(2)
-      : '[0:a][1:a]amix=inputs=2:normalize=0[amix]'; // 窗口：gfxcapture(0:a) + dshow(1)
+    const audioInputs = '[1:a][2:a]amix=inputs=2:normalize=0[amix]';  // 全屏/窗口统一：dshow系统音频(1) + dshow麦克风(2)
     audioArgs = [
       '-filter_complex', audioInputs,
       '-map', '0:v',
