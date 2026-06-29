@@ -641,18 +641,30 @@ async function cleanup(): Promise<void> {
   if (watcher) { await watcher.close(); watcher = null; }
 
   // 停止 ffmpeg（若尚未停止）
+  // 正确的停止顺序：
+  // 1. 先停止 audio_capture → pipe:0 关闭，ffmpeg 收到 EOF（音频流结束）
+  // 2. 立即向 ffmpeg stdin 写入 'q' → ffmpeg 收到 'q'，准备退出
+  // 3. ffmpeg 收到 EOF + 'q' 后，立即完成最后一片写入并退出
   if (ffmpegProcess) {
     await new Promise<void>((resolve) => {
       if (process.platform === 'win32') {
-        // Windows 上 SIGTERM 等于 SIGKILL（强杀进程导致末片截断），
-        // 改用 stdin 写入 'q' 让 ffmpeg 优雅退出（flush 编码器缓冲区后关闭）。
-        // 在 write 回调中 end，确保 'q' 字符已刷入管道再关闭 stdin
-        ffmpegProcess!.stdin?.write('q', () => {
-          ffmpegProcess!.stdin?.end();
-        });
+        // 步骤1：先停止 audio_capture
+        if (audioCaptureProcess) {
+          try { audioCaptureProcess.kill('SIGINT'); } catch (_) { /* 已退出 */ }
+          audioCaptureProcess = null;
+        }
+
+        // 步骤2：立即向 ffmpeg 写入 'q'
+        ffmpegProcess!.stdin?.write('q');
+        ffmpegProcess!.stdin?.end();
       } else {
         ffmpegProcess!.kill('SIGTERM');
+        if (audioCaptureProcess) {
+          try { audioCaptureProcess.kill('SIGTERM'); } catch (_) { /* 已退出 */ }
+          audioCaptureProcess = null;
+        }
       }
+
       ffmpegProcess!.on('close', () => resolve());
       setTimeout(() => {
         try { ffmpegProcess?.kill('SIGKILL'); } catch (_) { /* 已退出 */ }
@@ -660,12 +672,17 @@ async function cleanup(): Promise<void> {
       }, 15000);
     });
     ffmpegProcess = null;
-  }
-
-  // 停止 audio_capture（若尚未停止）
-  if (audioCaptureProcess) {
-    try { audioCaptureProcess.kill('SIGTERM'); } catch (_) { /* 已退出 */ }
-    audioCaptureProcess = null;
+  } else {
+    if (audioCaptureProcess) {
+      try {
+        if (process.platform === 'win32') {
+          audioCaptureProcess.kill('SIGINT');
+        } else {
+          audioCaptureProcess.kill('SIGTERM');
+        }
+      } catch (_) { /* 已退出 */ }
+      audioCaptureProcess = null;
+    }
   }
 
   // 重置业务状态（tmpDir 由调用方负责清理目录后再重置）
@@ -795,9 +812,14 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
       '--channels', '2',
       '--bit-depth', '16',
       '--chunk-duration', '0.1',
-    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
     audioCaptureProcess = audioPipe;
+
+    // 捕获 audio_capture 的 stderr（设备检测、初始化失败等错误信息）
+    audioPipe.stderr.on('data', (data) => {
+      console.log(`[audio_capture] ${data.toString().trim()}`);
+    });
 
     // audio_capture 异常退出时打印日志（不触发 crash 重启，音频丢失比崩溃好）
     audioPipe.on('close', (code) => {
@@ -894,7 +916,15 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
 
   // 将 audio_capture 的 PCM 输出 pipe 到 FFmpeg stdin
   if (audioPipe) {
-    audioPipe.stdout!.pipe(proc.stdin!);
+    const stdinPipe = audioPipe.stdout!.pipe(proc.stdin!);
+    stdinPipe.on('error', (err) => {
+      if (err.code === 'EPIPE' || err.message.includes('ERR_STREAM_WRITE_AFTER_END')) {
+        // EPIPE：ffmpeg 先退出，audio_capture 继续写入时触发，正常情况忽略
+        // ERR_STREAM_WRITE_AFTER_END：ffmpeg stdin 已关闭，audio_capture 继续写入时触发，正常情况忽略
+      } else {
+        console.warn('[recorder] audio_capture pipe error:', err.message);
+      }
+    });
   }
 
   // 打印 stderr 用于调试
@@ -938,7 +968,13 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
 
   // 终止旧的 audio_capture 进程（spawnFfmpeg 内部会启动新的）
   if (audioCaptureProcess) {
-    try { audioCaptureProcess.kill('SIGTERM'); } catch (_) { /* 已退出 */ }
+    try {
+      if (process.platform === 'win32') {
+        audioCaptureProcess.kill('SIGINT');
+      } else {
+        audioCaptureProcess.kill('SIGTERM');
+      }
+    } catch (_) { /* 已退出 */ }
     audioCaptureProcess = null;
   }
 
@@ -1081,19 +1117,20 @@ async function stop(): Promise<void> {
   if (!ffmpegProcess && !isUserStopped) return; // 进程未启动且也不在停止流程中，直接返回
   if (isUserStopped) return;                    // 已在停止流程中（abortRecording 可能已触发），避免重复执行
 
-  // ① 提前设置 isUserStopped，阻止后续 uploadSegment 将新失败再次入队
-  isUserStopped = true;
-
+  // ① 提前计算录制时长（在 cleanup 之前，避免停止流程耗时影响时长统计）
   const durationSeconds = Math.floor((Date.now() - recordStartTime) / 1000);
+
+  // ② 提前设置 isUserStopped，阻止后续 uploadSegment 将新失败再次入队
+  isUserStopped = true;
 
   // 用本地变量固定当前 tmpDir，避免后续状态重置后路径变为空字符串
   const sessionTmpDir = tmpDir;
 
-  // ② 通过 cleanup 清理定时器、停止 ffmpeg、关闭 chokidar
+  // ③ 通过 cleanup 清理定时器、停止 ffmpeg、关闭 chokidar
   //    cleanup 不重置 segmentKeys / tmpDir / currentRoomId（finish 接口还需要）
   await cleanup();
 
-  // ③ ffmpeg 退出后扫描临时目录，补传所有还未入队的切片
+  // ④ ffmpeg 退出后扫描临时目录，补传所有还未入队的切片
   // 这里处理两类遗漏：
   //   1. 最后一个不满 HLS_SEGMENT_DURATION 的尾片（用户停止时正在写入，chokidar 已关闭）
   //   2. awaitWriteFinish 稳定期内 chokidar 尚未触发的切片
@@ -1115,10 +1152,10 @@ async function stop(): Promise<void> {
     console.warn('[recorder] 扫描临时目录失败：', (err as Error).message);
   }
 
-  // ④ 等待所有 activeUploads 完成（含上方补传触发的新 upload）
+  // ⑤ 等待所有 activeUploads 完成（含上方补传触发的新 upload）
   await Promise.allSettled(Array.from(activeUploads));
 
-  // ⑤ 对剩余 pendingQueue 做最后一轮直接补传（最多 UPLOAD_MAX_RETRIES 轮避免无限循环）
+  // ⑥ 对剩余 pendingQueue 做最后一轮直接补传（最多 UPLOAD_MAX_RETRIES 轮避免无限循环）
   //    绕过 triggerRetryQueue 的退避逻辑（stop 时用户已等待，尽快上传）
   for (let round = 0; round < UPLOAD_MAX_RETRIES + 1; round++) {
     if (pendingQueue.length === 0) break;
@@ -1135,7 +1172,7 @@ async function stop(): Promise<void> {
     }
   }
 
-  // ⑥ 调用 finish 接口
+  // ⑦ 调用 finish 接口
   if (segmentKeys.length > 0) {
     const displayName = `自动录制 ${new Date().toLocaleString('zh-CN', {
       year: 'numeric', month: '2-digit', day: '2-digit',
