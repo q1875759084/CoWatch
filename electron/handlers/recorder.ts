@@ -149,11 +149,11 @@ let detectedEncoder = 'libx264';
 /** 是否为软件编码 */
 let isSoftwareEncoder = false;
 /**
- * Windows WASAPI loopback 设备名缓存（由 detectWasapiAvailable 枚举并填充）。
- * null  = 已探测但未找到 loopback 设备
- * ''    = 未探测（初始值），spawnFfmpeg 用 'default' 兜底
+ * Windows 音频设备信息缓存（由 detectWasapiAvailable 枚举并填充）。
+ * null  = 已探测但未找到可用设备
+ * ''    = 未探测（初始值）
  */
-let cachedWasapiLoopbackDevice = '';
+let cachedAudioDeviceInfo: { format: string; device: string } | null | undefined = undefined;
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -293,22 +293,64 @@ async function detectEncoder(): Promise<EncoderDetectResult> {
 }
 
 /**
- * 探测 Windows WASAPI loopback 是否可用，同时缓存 loopback 设备名。
+ * 探测 Windows 系统音频录制是否可用，同时缓存最佳音频输入方式。
  *
- * WASAPI 设备枚举 stderr 格式（gyan.dev full build）：
- *   [wasapi @ ...] "Speakers (Realtek Audio)" (loopback)
- *   [wasapi @ ...] "Headphones (USB Audio)" (loopback)
- *   [wasapi @ ...] "Microphone (Realtek Audio)"
- *
- * 选取第一个带 (loopback) 标记的设备名作为系统音频输入。
- * 使用精确设备名而非 'default' 避免 gyan.dev build 对 default 别名支持不完整的问题。
+ * 优先级策略：
+ * 1. WASAPI loopback：最推荐，直接录制系统声音，无需额外设置
+ * 2. dshow Stereo Mix/Loopback：需要声卡驱动支持，用户可能未启用
+ * 3. dshow 默认设备（最后手段）：可能录到麦克风而非系统声音
  *
  * macOS 直接返回 false（不支持系统音频录制，需要第三方虚拟声卡）。
  */
 async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
-  if (process.platform !== 'win32') return false;
+  if (process.platform !== 'win32') {
+    cachedAudioDeviceInfo = null;
+    return false;
+  }
 
-  return new Promise<boolean>((resolve) => {
+  // 策略1：尝试 WASAPI
+  try {
+    const wasapiResult = await testWasapiDevices(ffmpeg);
+    if (wasapiResult) {
+      console.log(`[recorder] ✅ 使用 WASAPI: ${wasapiResult.device}`);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[recorder] WASAPI 不可用:', e instanceof Error ? e.message : e);
+  }
+
+  // 策略2：尝试 dshow loopback 设备
+  try {
+    const dshowResult = await testDshowLoopbackDevices(ffmpeg);
+    if (dshowResult) {
+      console.log(`[recorder] ✅ 使用 dshow Loopback: ${dshowResult.device}`);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[recorder] dshow Loopback 不可用');
+  }
+
+  // 策略3：回退到 dshow 默认设备（可能不是系统声音）
+  try {
+    const defaultResult = await testDshowDefaultDevice(ffmpeg);
+    if (defaultResult) {
+      console.log(`[recorder] ⚠️ 回退到 dshow 默认设备: ${defaultResult.device}（可能录到麦克风）`);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[recorder] dshow 默认设备不可用');
+  }
+
+  cachedAudioDeviceInfo = null;
+  console.log('[recorder] ❌ 所有音频录制方式均不可用');
+  return false;
+}
+
+/**
+ * 测试 WASAPI 是否可用并返回 loopback 设备信息。
+ */
+async function testWasapiDevices(ffmpeg: string): Promise<{ format: string; device: string } | null> {
+  return new Promise((resolve, reject) => {
     let stderr = '';
     const proc = spawn(ffmpeg, [
       '-f', 'wasapi', '-list_devices', 'true', '-i', 'dummy',
@@ -318,36 +360,98 @@ async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
       stderr += chunk.toString();
     });
 
-    proc.on('close', () => {
-      // 匹配 loopback 设备行："设备名" (loopback)
+    proc.on('close', (code) => {
+      if (stderr.includes("Unknown input format: 'wasapi'")) {
+        reject(new Error('WASAPI not supported'));
+        return;
+      }
+
       const loopbackMatch = stderr.match(/"([^"]+)"\s*\(loopback\)/i);
       if (loopbackMatch) {
-        cachedWasapiLoopbackDevice = loopbackMatch[1]!.trim();
-        console.log(`[recorder] WASAPI 探测：找到 loopback 设备 "${cachedWasapiLoopbackDevice}"`);
-        resolve(true);
+        cachedAudioDeviceInfo = { format: 'wasapi', device: loopbackMatch[1]!.trim() };
+        resolve(cachedAudioDeviceInfo);
         return;
       }
 
-      // 没有 loopback 标记：判断是否至少有 WASAPI 设备（无 loopback 标记的旧格式）
-      const hasAnyDevice = /\[wasapi\]/i.test(stderr);
-      if (hasAnyDevice) {
-        // 旧版本 gyan.dev build 不输出 (loopback) 标记，回退用 'default'
-        cachedWasapiLoopbackDevice = 'default';
-        console.log('[recorder] WASAPI 探测：未找到 (loopback) 标记，使用 default 兜底');
-        console.log('[recorder] WASAPI 枚举输出：', stderr.split('\n').filter(l => l.includes('wasapi')).join(' | '));
-        resolve(true);
+      if (/\[wasapi\]/i.test(stderr)) {
+        cachedAudioDeviceInfo = { format: 'wasapi', device: 'default' };
+        resolve(cachedAudioDeviceInfo);
         return;
       }
 
-      cachedWasapiLoopbackDevice = '';
-      console.log('[recorder] WASAPI 探测：不可用');
-      resolve(false);
+      reject(new Error('No WASAPI devices found'));
     });
 
-    proc.on('error', () => resolve(false));
+    proc.on('error', () => reject(new Error('Spawn failed')));
+    setTimeout(() => { try { proc.kill(); } catch (_) {} reject(new Error('Timeout')); }, 5000);
+  });
+}
 
-    // 5s 超时保护，避免卡住检测流程
-    setTimeout(() => { try { proc.kill(); } catch (_) { /* ignore */ } resolve(false); }, 5000);
+/**
+ * 测试 dshow 是否有 Stereo Mix/Loopback 设备。
+ */
+async function testDshowLoopbackDevices(ffmpeg: string): Promise<{ format: string; device: string } | null> {
+  return new Promise((resolve, reject) => {
+    let stderr = '';
+    const proc = spawn(ffmpeg, [
+      '-f', 'dshow', '-list_devices', 'true', '-i', 'dummy',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('close', () => {
+      const lines = stderr.split('\n');
+      for (const line of lines) {
+        if (/\(audio\)/i.test(line)) {
+          const nameMatch = line.match(/"(.+?)"/);
+          if (nameMatch && /stereo\s*mix|loopback|what\s*u\s*hear/i.test(nameMatch[1])) {
+            cachedAudioDeviceInfo = { format: 'dshow', device: nameMatch[1].trim() };
+            resolve(cachedAudioDeviceInfo);
+            return;
+          }
+        }
+      }
+      reject(new Error('No dshow loopback device'));
+    });
+
+    proc.on('error', () => reject(new Error('Spawn failed')));
+    setTimeout(() => { try { proc.kill(); } catch (_) {} reject(new Error('Timeout')); }, 5000);
+  });
+}
+
+/**
+ * 获取 dshow 第一个音频设备作为默认值。
+ */
+async function testDshowDefaultDevice(ffmpeg: string): Promise<{ format: string; device: string } | null> {
+  return new Promise((resolve, reject) => {
+    let stderr = '';
+    const proc = spawn(ffmpeg, [
+      '-f', 'dshow', '-list_devices', 'true', '-i', 'dummy',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('close', () => {
+      const lines = stderr.split('\n');
+      for (const line of lines) {
+        if (/\(audio\)/i.test(line)) {
+          const nameMatch = line.match(/"(.+?)"/);
+          if (nameMatch) {
+            cachedAudioDeviceInfo = { format: 'dshow', device: nameMatch[1].trim() };
+            resolve(cachedAudioDeviceInfo);
+            return;
+          }
+        }
+      }
+      reject(new Error('No dshow audio devices'));
+    });
+
+    proc.on('error', () => reject(new Error('Spawn failed')));
+    setTimeout(() => { try { proc.kill(); } catch (_) {} reject(new Error('Timeout')); }, 5000);
   });
 }
 
@@ -779,13 +883,17 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
       // 优先使用 detectWasapiAvailable 枚举到的精确设备名；
       // 未枚举到时（cachedWasapiLoopbackDevice 为空）回退用 'default'。
       const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
-      const loopbackDevice = cachedWasapiLoopbackDevice || 'default';
-      console.log(`[recorder] WASAPI loopback 使用设备: ${loopbackDevice}`);
+      const audioInfo = cachedAudioDeviceInfo;
+      console.log(`[recorder] 音频输入: ${audioInfo ? `${audioInfo.format} → ${audioInfo.device}` : '无'}`);
+
       inputArgs = [
         '-f', 'lavfi',
         '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
-        '-f', 'wasapi', '-i', `audio=${loopbackDevice}`,
       ];
+
+      if (audioInfo) {
+        inputArgs.push('-f', audioInfo.format, '-i', `audio=${audioInfo.device}`);
+      }
     } else {
       // ── 窗口录制：gfxcapture（视频）+ WASAPI loopback（音频）─────────────
       //
@@ -797,13 +905,17 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
       //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
       //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
       const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const loopbackDevice = cachedWasapiLoopbackDevice || 'default';
-      console.log(`[recorder] WASAPI loopback 使用设备: ${loopbackDevice}`);
+      const audioInfo = cachedAudioDeviceInfo;
+      console.log(`[recorder] 音频输入: ${audioInfo ? `${audioInfo.format} → ${audioInfo.device}` : '无'}`);
+
       inputArgs = [
         '-f', 'lavfi',
-        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
-        '-f', 'wasapi', '-i', `audio=${loopbackDevice}`,
+        `-i`, `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
+
+      if (audioInfo) {
+        inputArgs.push('-f', audioInfo.format, '-i', `audio=${audioInfo.device}`);
+      }
     }
   }
 
