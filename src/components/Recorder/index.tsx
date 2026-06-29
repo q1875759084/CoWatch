@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { message, Modal, Tooltip } from 'antd';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError } from '@/types/recorder';
+import type { AudioOptions, RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError } from '@/types/recorder';
 import { useRecorderState } from '@/context/RecorderContext';
 import { getAccessToken } from '@/utils/token';
 
@@ -135,7 +135,11 @@ export function Recorder({ roomId }: RecorderProps) {
   };
 
   // ── 开始录制 ───────────────────────────────────────────────────────────────
-  const handleConfirmSource = async (source: RecorderSource, _sourceType: 'screen' | 'window') => {
+  const handleConfirmSource = async (
+    source: RecorderSource,
+    _sourceType: 'screen' | 'window',
+    audioOptions: AudioOptions,
+  ) => {
     if (!bridge) return;
     setShowPicker(false);
     try {
@@ -143,7 +147,7 @@ export function Recorder({ roomId }: RecorderProps) {
       tickSecRef.current = 0;
       setProgress({ uploaded: 0, pending: 0 });
       const authToken = getAccessToken() ?? '';
-      await bridge.recorder.start(source.id, source.name, roomId, authToken);
+      await bridge.recorder.start(source.id, source.name, roomId, authToken, audioOptions);
       updateState('recording');
     } catch (err) {
       void message.error((err as Error).message || '录制启动失败');
@@ -232,6 +236,7 @@ export function Recorder({ roomId }: RecorderProps) {
       {showPicker ? (
         <WindowPicker
           sources={sources}
+          isAudioAvailable={encoderInfo?.isAudioAvailable ?? false}
           onConfirm={handleConfirmSource}
           onCancel={() => setShowPicker(false)}
           onRefresh={async () => {

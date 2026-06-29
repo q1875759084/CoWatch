@@ -472,19 +472,96 @@ const darwinExtraArgs: string[] = process.platform === 'darwin'
 
 ---
 
-### Windows gdigrab 窗口录制黑屏 + 硬编下仍卡顿
+### Windows gdigrab 窗口录制黑屏 + 任意录制模式下游戏卡顿
 
-**现象：** Windows 下选择游戏窗口录制，ffmpeg 不报错但录制内容全为黑屏。改为整屏录制可以捕获到画面，但游戏出现轻微卡顿——即使编码器检测为硬编（h264_nvenc/qsv），未降级到 480p，卡顿依然存在。
+**现象：** Windows 下选择游戏窗口录制，ffmpeg 不报错但录制内容全为黑屏。改为整屏录制可以捕获到画面，但游戏出现明显卡顿——即使编码器检测为硬编（h264_nvenc/qsv），未降级到 480p，卡顿依然存在。
 
 **根因（两个独立问题）：**
 
-1. **黑屏**：`gdigrab -i title=窗口名` 使用 GDI BitBlt，依赖 DWM（Desktop Window Manager）合成层。游戏进入独占全屏后直接接管 GPU 输出，绕过 DWM，GDI 读到的 framebuffer 没有游戏内容，返回黑帧。整屏模式（`-i desktop`）内部切换为 DXGI，可以绕过此限制。
+1. **黑屏**：`gdigrab -i title=窗口名` 使用 GDI BitBlt，依赖 DWM（Desktop Window Manager）合成层。游戏进入独占全屏后直接接管 GPU 输出，绕过 DWM，GDI 读到的 framebuffer 没有游戏内容，返回黑帧。整屏模式（`-i desktop`）内部切换为 DXGI，可以绕过此限制，但窗口选择场景无解。
 
 2. **硬编下依然卡顿**：BitBlt 是同步调用，执行时必须等 GPU 完成当前帧写入 framebuffer（GPU pipeline flush）。这在渲染管线中插入了一个同步等待点，导致游戏帧提交被短暂阻塞，表现为微卡顿。这与 CPU 编码负担无关，硬编消除了编码开销但消除不了捕获层的 GPU stall。
 
-**解决：** 改用 `ddagrab`（Desktop Duplication API）。ddagrab 读取 DWM 维护的已完成帧副本，是异步非阻塞操作，不插入 GPU 同步点，CPU 开销 ≈0%。代码已改完（`recorder.ts` Windows 分支），但 `ffmpeg-static` 不含此功能，需自编译 ffmpeg（见 `FFmpeg-ddagrab-编译指南.md`）。
+**最终解决方案：两种场景分别使用不同的 GPU 零拷贝 filter**
 
-**临时退路（等待自编译）：** Windows 分支改为 `gdigrab -i desktop`（整屏模式），至少解决黑屏问题，接受轻微卡顿。
+gdigrab 整体废弃，改为 ddagrab + gfxcapture。两者均为 ffmpeg **filter**（非 input device），必须通过 `-f lavfi -i '...'` 语法驱动，不能用 `-f ddagrab`。
+
+**全屏录制 → `ddagrab`（Desktop Duplication API / DXGI）**
+
+```
+-f lavfi -i 'ddagrab=output_idx=0:framerate=30,hwdownload,format=bgra,scale=w=min(iw\,1600):h=-2,format=yuv420p'
+```
+
+- `output_idx`：显示器序号（0 = 主屏）
+- `hwdownload,format=bgra`：将 GPU 帧转为 CPU 可见的 BGRA 格式
+- `scale=w='min(iw,W)':h=-2`：等比缩放，限制最大宽度，`-2` 保证高度为偶数（H.264 要求）；**不能用 `-s W×H`**，`-s` 对 lavfi filter graph 输出无效
+- 兼容性：Windows 8.1+ / Win10 1803+，DX11 显卡
+
+**窗口录制 → `gfxcapture`（Windows.Graphics.Capture API / WGC）**
+
+```
+-f lavfi -i 'gfxcapture=window_title=<窗口标题正则>:max_framerate=30,fps=30,hwdownload,format=bgra,scale=...,format=yuv420p'
+```
+
+- `window_title`：正则匹配，中文等特殊字符需转义（`displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')`）
+- `fps=30`：WGC 帧率由 DWM 决定，不是严格等间隔，**必须加 `fps=30` 重新生成 PTS**，否则编码器时间戳错误，视频表现为轻微卡顿
+- 兼容性：Windows 10 1803+
+
+**关于 ffmpeg 二进制：**
+
+`ffmpeg-static` npm 包**不含** ddagrab/gfxcapture filter。需从 [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-full.7z`，解压取 `bin/ffmpeg.exe` 放入 `electron/bin/`，无需自编译。`electron-builder.yml` 的 `extraResources` 配置会将其打包到 `resources/bin/`。
+
+**gdigrab 时代参数备忘（对照参考）：**
+
+```
+整屏：-f gdigrab -framerate 30 -i desktop
+窗口：-f gdigrab -framerate 30 -i title=<窗口标题>
+缩放：-s 1600x900（独立参数，对 lavfi 无效，切换到 ddagrab 后必须改为 filter 内 scale）
+```
+
+gdigrab 在 f23a95c 提交时通过 Windows 真机测试，录制画质/帧率均正常，可作为回退基准对比。
+
+---
+
+### Windows 录制音频方案选型与实现
+
+**背景：** CoWatch 录制功能最初仅捕获视频，无音频。需要支持：a) 录制用户当时听到的全部系统声音；b) 可选同时录制麦克风输入。
+
+**核心挑战：** ddagrab（全屏）和 gfxcapture（窗口）均为纯视频 filter，需要分别搭配不同的音频输入源，且混流时流索引不同。
+
+**各场景音频方案：**
+
+| 场景 | 视频来源 | 系统音频来源 | 麦克风混入 |
+|------|---------|------------|---------|
+| 全屏（ddagrab） | lavfi 输入 0（仅 0:v） | `-f wasapi -loopback true -i default`（输入 1:a） | `-f dshow -i audio=...`（输入 2:a） |
+| 窗口（gfxcapture） | lavfi 输入 0（0:v + 0:a） | `capture_audio=1` 参数内嵌，无需额外输入源 | `-f dshow -i audio=...`（输入 1:a） |
+
+**amix 混流流索引差异（重要）：**
+
+```
+全屏 + 麦克风：-filter_complex '[1:a][2:a]amix=inputs=2:normalize=0[amix]'
+窗口 + 麦克风：-filter_complex '[0:a][1:a]amix=inputs=2:normalize=0[amix]'
+```
+
+两者写法相同但流索引不同，必须按 `sourceId.startsWith('screen:')` 分支处理，不能用统一写法。
+
+**WASAPI 可用性探测：**
+
+```ts
+// -list_devices true 会向 stderr 输出设备列表后以非零码退出（属正常行为）
+// 只要 stderr 含 [wasapi] 字样即判定可用
+spawn(ffmpeg, ['-f', 'wasapi', '-list_devices', 'true', '-i', 'dummy'])
+// macOS 直接返回 false（不支持系统音频录制，需第三方虚拟声卡如 BlackHole）
+```
+
+探测在 `detectEncoder` 完成后顺带执行，结果通过 `EncoderDetectResult.isAudioAvailable` 返回给前端，Windows 10+ 通常均可用（极少数无声卡或远程桌面场景返回 false），探测加 5s 超时保护。
+
+**UI 设计：**
+- `WindowPicker` 底部加两个 Checkbox：「录制系统声音」（默认勾选）和「同时录制麦克风输入」（依赖前者开启）
+- `isAudioAvailable=false` 时 Checkbox 置灰，Tooltip 说明原因
+- `AudioOptions` 类型从 Renderer 透传到主进程 `start()`，crash 重启时通过 `currentAudioOptions` 模块变量复用
+
+**无音频时加 `-an`：** macOS、或用户未勾选系统声音时，显式加 `-an` 参数，避免 HLS muxer 因无音频流输出警告。
 
 ---
 

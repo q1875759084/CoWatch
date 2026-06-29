@@ -26,12 +26,18 @@ contextBridge.exposeInMainWorld('electronBridge', {
     /**
      * 开始录制
      * @param windowId     desktopCapturer source id
-     * @param displayTitle 窗口标题（ffmpeg gdigrab 使用）
+     * @param displayTitle 窗口标题（Windows gfxcapture/gdigrab 使用）
      * @param roomId       房间 ID
      * @param authToken    JWT AccessToken，主进程上传切片时带入 Authorization header
+     * @param audioOptions 音频选项（仅 Windows 生效；macOS 传入但被忽略）
      */
-    start: (windowId: string, displayTitle: string, roomId: string, authToken: string) =>
-      ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken),
+    start: (
+      windowId: string,
+      displayTitle: string,
+      roomId: string,
+      authToken: string,
+      audioOptions: { withSystemAudio: boolean; withMic: boolean },
+    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, audioOptions),
     /** 停止录制（等待剩余切片上传完成后通知后端） */
     stop: () => ipcRenderer.invoke('recorder:stop'),
     /** 注册每秒录制计时回调，seconds 为已录秒数 */

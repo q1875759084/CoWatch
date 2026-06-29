@@ -36,7 +36,7 @@ import chokidar, { FSWatcher } from 'chokidar';
 import pRetry from 'p-retry';
 import { v4 as uuidv4 } from 'uuid';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../src/types/recorder';
+import type { RecorderSource, EncoderDetectResult, RecordingProgress, AudioOptions } from '../../src/types/recorder';
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -47,10 +47,10 @@ const HLS_SEGMENT_DURATION = 10;
 const MAX_RECORD_MS = 2 * 60 * 60 * 1000;
 
 /**
- * doUpload 内 pRetry 重试次数（1+1=2 次）。
+ * doUpload 内 pRetry 重试次数（共 2 次尝试 = 1 次首发 + 1 次 retry）。
  * 首次上传只处理瞬时抖动（1s 间隔），持续故障快速失败进 pendingQueue，
- * 交由 triggerRetryQueue 的指数退避兜底，避免 4 次重试最坏阻塞 ~15s。
- * 两路合计重试能力不减弱：triggerRetryQueue 里 doUpload 同样 pRetry。
+ * 交由 triggerRetryQueue 的指数退避兜底，避免多次重试长时间阻塞切片写入。
+ * 两路合计重试能力不减弱：triggerRetryQueue 里 doUpload 同样走 pRetry。
  */
 const UPLOAD_MAX_RETRIES = 1;
 
@@ -130,19 +130,26 @@ let currentRoomId = '';
  *
  * 设计说明：
  *   渲染进程通过 auth:setToken IPC 主动推送 token，覆盖场景：
- *   1. 陆制开始时 → start() 传入当前 token
+ *   1. 录制开始时 → start() 传入当前 token
  *   2. token 无感刷新后 → 渲染进程调用 updateAuthToken(newToken)
  *   主进程不主动请求，始终使用最近一次推送的 token。
  */
 let currentAuthToken = '';
-/** 当前录制源 id（desktopCapturer source id，crash 重启时需要 */
+/** 当前录制源 id（desktopCapturer source id），crash 重启时需要 */
 let currentSourceId = '';
+/**
+ * macOS avfoundation 视频设备索引缓存（start 时通过枚举确定，crash 重启时复用）。
+ * -1 表示未初始化，spawnFfmpeg 会用 screenSeq + 1 做兜底。
+ */
+let cachedAvfIndex = -1;
 /** 后端 origin，由 main.ts 通过 setApiOrigin 注入 */
 let apiOrigin = 'http://localhost:3002';
 /** 检测到的编码器 */
 let detectedEncoder = 'libx264';
 /** 是否为软件编码 */
 let isSoftwareEncoder = false;
+/** 当前录制的音频选项（start 时传入，crash 重启时复用） */
+let currentAudioOptions: AudioOptions = { withSystemAudio: false, withMic: false };
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -269,14 +276,144 @@ async function detectEncoder(): Promise<EncoderDetectResult> {
       detectedEncoder = encoder;
       isSoftwareEncoder = encoder === 'libx264';
       console.log(`[recorder] 编码器检测完成：${encoder}，软编=${isSoftwareEncoder}`);
-      return { encoder, isSoftware: isSoftwareEncoder };
+      // 顺带探测 WASAPI（仅 Windows）
+      const isAudioAvailable = await detectWasapiAvailable(ffmpeg);
+      return { encoder, isSoftware: isSoftwareEncoder, isAudioAvailable };
     }
   }
 
   // 兜底：所有都失败时默认 libx264（通常不会到这里）
   detectedEncoder = 'libx264';
   isSoftwareEncoder = true;
-  return { encoder: 'libx264', isSoftware: true };
+  return { encoder: 'libx264', isSoftware: true, isAudioAvailable: false };
+}
+
+/**
+ * 探测 Windows WASAPI loopback 是否可用。
+ *
+ * 探测方式：让 ffmpeg 枚举 WASAPI 设备列表（-list_devices true），
+ * 只要进程正常退出（code=0 或 stderr 含 device 信息）即判定可用。
+ *
+ * 兼容性：Windows 10+ 均支持 WASAPI，通常不会失败；
+ * 极少数情况（无声卡、远程桌面无音频设备）会返回 false。
+ * macOS 直接返回 false（不支持系统音频录制，需要第三方虚拟声卡）。
+ */
+async function detectWasapiAvailable(ffmpeg: string): Promise<boolean> {
+  if (process.platform !== 'win32') return false;
+
+  return new Promise<boolean>((resolve) => {
+    // -list_devices true 会输出设备列表到 stderr 后以非零码退出，属正常行为
+    // 只要 stderr 中包含设备行（包含括号格式的设备名），即认为 WASAPI 可用
+    let stderr = '';
+    const proc = spawn(ffmpeg, [
+      '-f', 'wasapi', '-list_devices', 'true', '-i', 'dummy',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('close', () => {
+      // WASAPI 设备行格式示例："Speakers (Realtek High Definition Audio)"
+      const available = stderr.includes('wasapi') || /\[wasapi\]/i.test(stderr);
+      console.log(`[recorder] WASAPI 探测结果：${available ? '可用' : '不可用'}`);
+      resolve(available);
+    });
+
+    proc.on('error', () => resolve(false));
+
+    // 5s 超时保护，避免卡住检测流程
+    setTimeout(() => { try { proc.kill(); } catch (_) { /* ignore */ } resolve(false); }, 5000);
+  });
+}
+
+/**
+ * 动态枚举 avfoundation 视频设备，找到对应 desktopCapturer sourceId 的实际索引。
+ *
+ * 问题背景：
+ *   avfoundation 视频设备列表不固定。文档示例写的是 [0]=FaceTime摄像头、[1]=主屏，
+ *   但实际上：
+ *   - 无摄像头的 Mac（如 Mac mini）：[0]=主屏、[1]=第二屏
+ *   - 有摄像头但摄像头被禁用：视频设备列表里无摄像头项
+ *   - 外接多屏时屏幕数量动态变化
+ *   因此固定用 screenSeq + 1 会在无摄像头环境下 off-by-one 导致 Invalid device index。
+ *
+ * 解决方案：
+ *   运行 `ffmpeg -list_devices true -f avfoundation -i dummy` 枚举实际设备列表，
+ *   从 stderr 中解析 "Capture screen N" 条目（N = desktopCapturer 屏幕序号），
+ *   获取其对应的 avfoundation 索引号，作为 -i 参数使用。
+ *
+ * 兜底策略：
+ *   - 枚举失败 / 找不到对应屏幕：返回 screenSeq + 1（旧逻辑，保证向后兼容）
+ *   - 窗口录制（window: 前缀）：目标屏幕序号取 0（降级为主屏捕获）
+ */
+async function resolveAvfIndex(sourceId: string): Promise<number> {
+  const ffmpeg = getFfmpegPath();
+
+  const screenSeq = sourceId.startsWith('screen:')
+    ? parseInt(sourceId.split(':')[1] ?? '0', 10)
+    : 0;
+
+  const fallback = screenSeq + 1; // 旧兜底逻辑
+
+  return new Promise<number>((resolve) => {
+    let stderr = '';
+    const proc = spawn(ffmpeg, [
+      '-list_devices', 'true',
+      '-f', 'avfoundation',
+      '-i', 'dummy',
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('close', () => {
+      // stderr 示例（视频设备区段）：
+      //   [AVFoundation indev @ ...] AVFoundation video devices:
+      //   [AVFoundation indev @ ...] [0] FaceTime HD Camera
+      //   [AVFoundation indev @ ...] [1] Capture screen 0
+      //   [AVFoundation indev @ ...] [2] Capture screen 1
+      //   [AVFoundation indev @ ...] AVFoundation audio devices:
+      //
+      // 或无摄像头时：
+      //   [AVFoundation indev @ ...] [0] Capture screen 0
+      //   [AVFoundation indev @ ...] [1] Capture screen 1
+
+      // 只解析视频设备区段（音频设备区段之前的内容）
+      const videoSection = stderr.split(/AVFoundation audio devices/i)[0] ?? stderr;
+
+      // 匹配 "[N] Capture screen M" 格式，N = avfoundation 索引，M = desktopCapturer 屏幕序号
+      const pattern = /\[(\d+)\]\s+Capture screen\s+(\d+)/gi;
+      let match: RegExpExecArray | null;
+      while ((match = pattern.exec(videoSection)) !== null) {
+        const avfIdx = parseInt(match[1]!, 10);
+        const screenNum = parseInt(match[2]!, 10);
+        if (screenNum === screenSeq) {
+          console.log(`[recorder] avfoundation 设备枚举：Capture screen ${screenSeq} → 索引 ${avfIdx}`);
+          resolve(avfIdx);
+          return;
+        }
+      }
+
+      // 找不到匹配项（可能是新系统格式变化），使用兜底值
+      console.warn(`[recorder] avfoundation 未找到 Capture screen ${screenSeq}，使用兜底索引 ${fallback}`);
+      console.debug('[recorder] avfoundation 枚举输出：\n', videoSection);
+      resolve(fallback);
+    });
+
+    proc.on('error', () => {
+      console.warn(`[recorder] avfoundation 枚举失败，使用兜底索引 ${fallback}`);
+      resolve(fallback);
+    });
+
+    // 5s 超时保护
+    setTimeout(() => {
+      try { proc.kill(); } catch (_) { /* ignore */ }
+      console.warn(`[recorder] avfoundation 枚举超时，使用兜底索引 ${fallback}`);
+      resolve(fallback);
+    }, 5000);
+  });
 }
 
 // ─── 窗口列表 ──────────────────────────────────────────────────────────────────
@@ -380,7 +517,7 @@ async function doUpload(filePath: string): Promise<void> {
 /**
  * 录制上传（fire-and-forget）。
  * chokidar 发现新切片时调用，上传失败时将文件路径推入 pendingQueue，不中断录制。
- * 职责：仅负责首次上传（pRetry 4 次），不感知补录队列。
+ * 职责：仅负责首次上传（pRetry UPLOAD_MAX_RETRIES 次），不感知补录队列。
  */
 function uploadSegment(filePath: string): void {
   const segmentName = path.basename(filePath);
@@ -391,8 +528,8 @@ function uploadSegment(filePath: string): void {
       pushProgress();
     })
     .catch(() => {
-      // 4 次全部失败：进入补录队列等待 triggerRetryQueue 处理
-      if (isUserStopped) return; // stop 之后不再入队（Bug 2 修复）
+      // pRetry 全部失败：进入补录队列等待 triggerRetryQueue 处理
+      if (isUserStopped) return; // stop 之后不再入队
       console.error(`[recorder] 切片上传全部失败：${segmentName}，加入 pendingQueue`);
       if (pendingQueue.length >= MAX_PENDING) {
         // 积压超限：触发录制中止（不再入队，避免无限膨胀）
@@ -548,9 +685,10 @@ async function cleanup(): Promise<void> {
  * 构造并启动 ffmpeg 进程，写入 tmpDir。
  *
  * @param displayTitle   窗口标题（Windows 窗口录制时用于 gfxcapture window_title 匹配）
+ * @param audioOptions   音频录制选项（仅 Windows 生效）
  * @param startNumber    -hls_start_number，crash 重启时传入已上传数量
  */
-function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): ChildProcess {
+function spawnFfmpeg(sourceId: string, displayTitle: string, audioOptions: AudioOptions, startNumber = 0): ChildProcess {
   const ffmpeg = getFfmpegPath();
   // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比，避免失真。
   // 宽度超出上限时等比缩小；宽度未达上限时不放大（原始更小则保持原始）。
@@ -565,21 +703,15 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
 
   // ── 平台差异：输入源参数 ─────────────────────────────────────────────────
   // Windows：ddagrab filter（通过 lavfi 驱动）捕获全屏，零 CPU 开销
-  // macOS：avfoundation 通过 desktopCapturer source id（格式 "screen:N:M" 或 "window:N:M"）
-  //        avfoundation 设备索引：视频设备从 "Capture screen N" 取索引，音频设备用 none
+  // macOS：avfoundation 通过动态枚举得到的视频设备索引（见 resolveAvfIndex）
   let inputArgs: string[];
   if (process.platform === 'darwin') {
-    // sourceId 格式：'screen:0:0' 或 'window:12345:0'
-    // avfoundation 设备布局（macOS）：
-    //   [0] FaceTime 摄像头（始终占据索引 0）
-    //   [1] Capture screen 0（主屏，对应 desktopCapturer screenId 中序号 0）
-    //   [2] Capture screen 1（第二屏，对应序号 1）
-    // 因此：avfoundation 索引 = desktopCapturer 屏幕序号 + 1
-    // 窗口录制（window: 前缀）降级为主屏（avfoundation 不支持按窗口 id 捕获）
+    // cachedAvfIndex 由 start() 调用 resolveAvfIndex() 预先填充。
+    // 若未缓存（理论上不应发生），以 screenSeq + 1 做降级兜底（旧逻辑）。
     const screenSeq = sourceId.startsWith('screen:')
       ? parseInt(sourceId.split(':')[1] ?? '0', 10)
       : 0;
-    const avfIndex = screenSeq + 1; // 跳过摄像头占据的 [0]
+    const avfIndex = cachedAvfIndex >= 0 ? cachedAvfIndex : screenSeq + 1;
     inputArgs = [
       '-f', 'avfoundation',
       '-framerate', '30',
@@ -593,18 +725,20 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
     //   gdigrab 使用 GDI BitBlt（纯 CPU），每帧拷贝整个显存到系统内存，
     //   30fps 下 CPU 占用 ~20% 单核，且 BitBlt 会阻塞 GPU 渲染管线导致游戏卡顿。
     //
-    // 两种 GPU 零拷贝方案：
+    // 两种 GPU 零拷贝视频捕获方案：
     //
     //   【全屏】ddagrab（Desktop Duplication API / DXGI）
     //     - 捕获整块显示器，output_idx 对应显示器序号
     //     - 必须通过 -f lavfi -i 语法驱动（不是 input device）
     //     - 兼容性：Windows 8.1+ / Win10 1803+，DX11 显卡
+    //     - 音频：ddagrab 本身不含音频，需额外加 WASAPI loopback 输入
     //
     //   【窗口】gfxcapture（Windows.Graphics.Capture API）
     //     - 支持按窗口标题正则、进程名、HWND 精确捕获单个窗口
     //     - 同样是 GPU 硬件帧，CPU 开销 ≈0
     //     - 兼容性：Windows 10 1803+（Win11 推荐）
     //     - 不稳定帧率（由合成器决定），需加 fps filter 稳定到 30fps
+    //     - 音频：capture_audio=1 可直接捕获该窗口进程的音频输出（WGC 会话内同步）
     //
     // 注意：两者均为 filter（非 input device），必须通过 -f lavfi -i 或
     //   -filter_complex 语法驱动，后接 hwdownload + format=bgra 转为 CPU 可见帧。
@@ -615,29 +749,53 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
     //   - h=-2：高度自动等比计算，且向下取偶数（H.264 要求）
     //   - format=yuv420p：编码器要求，hwdownload 输出 bgra 需显式转换
     const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
+    const { withSystemAudio, withMic } = audioOptions;
 
     if (sourceId.startsWith('screen:')) {
-      // 全屏录制：ddagrab，output_idx 取显示器序号
+      // ── 全屏录制：ddagrab（视频） + WASAPI loopback（音频，可选）──────────
       const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
       inputArgs = [
         '-f', 'lavfi',
         '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
+
+      if (withSystemAudio) {
+        // WASAPI loopback：捕获系统输出混音（即用户耳机/扬声器听到的全部声音）
+        // -loopback true：将输出设备切换为 loopback 模式（录已播放的声音而非麦克风）
+        inputArgs.push('-f', 'wasapi', '-loopback', 'true', '-i', 'default');
+
+        if (withMic) {
+          // 再追加一路麦克风输入（dshow 默认音频设备 wave_{default}）
+          // TODO: 需在实机测试中确认此设备 ID 是否通用。若特定设备无法识别，
+          // 可改用 `ffmpeg -list_devices true -f dshow -i dummy` 枚举实际设备名后硬编。
+          inputArgs.push('-f', 'dshow', '-i', 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{default}');
+        }
+      }
     } else {
-      // 窗口录制：优先尝试 gfxcapture（Windows.Graphics.Capture API，GPU 零拷贝）
+      // ── 窗口录制：gfxcapture（视频 + 可选音频） ──────────────────────────
       //
       // gfxcapture 限制：
       //   - 仅支持 DWM 合成窗口（Win10 1803+），经典 GDI 窗口可能无法捕获
       //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
       //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
       //
+      // capture_audio=1：WGC 同步捕获该窗口进程的音频输出（无需额外输入源）
+      //   音频流随视频流一起从 lavfi 输出，ffmpeg 自动识别为第二路流
+      //
       // 如果 gfxcapture 失败（ffmpeg 返回非零退出码），
       // abortRecording 会触发 → 用户可重新选择整屏录制（ddagrab，100% 可用）
       const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const captureAudio = withSystemAudio ? 1 : 0;
       inputArgs = [
         '-f', 'lavfi',
-        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
+        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30:capture_audio=${captureAudio},fps=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
+
+      if (withSystemAudio && withMic) {
+        // 窗口音频已在 gfxcapture 内（第 0 路音频流），再追加一路麦克风
+        // TODO: 同全屏路径，默认麦克风设备 ID 需实机验证通用性
+        inputArgs.push('-f', 'dshow', '-i', 'audio=@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\\wave_{default}');
+      }
     }
   }
 
@@ -687,10 +845,62 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
     ? ['-vf', `fps=30,scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0']
     : [];
 
+  // ── Windows 音频混流参数 ────────────────────────────────────────────────
+  // 有音频输入时才构造音频编码和混流参数，否则加 -an 明确禁音（避免 HLS muxer 警告）
+  //
+  // 各场景流索引分析：
+  //
+  //   全屏（ddagrab）+ withSystemAudio：
+  //     输入 0: lavfi(ddagrab)  → 0:v 视频（无音频）
+  //     输入 1: wasapi loopback → 1:a 系统音频
+  //     输入 2（有 mic）: dshow → 2:a 麦克风
+  //     混流：amix inputs=2（1:a + 2:a），map 0:v + [amix]
+  //
+  //   窗口（gfxcapture, capture_audio=1）+ withSystemAudio：
+  //     输入 0: lavfi(gfxcapture) → 0:v 视频 + 0:a 窗口音频（lavfi 双路输出）
+  //     输入 1（有 mic）: dshow  → 1:a 麦克风
+  //     混流：amix inputs=2（0:a + 1:a），map 0:v + [amix]
+  //
+  // amix：将多路音频流混合为一路，normalize=0 防止音量自动衰减
+  // aac：HLS 标准音频编码，128k 足够语音+游戏音效场景
+  const { withSystemAudio, withMic } = audioOptions;
+  const hasAudio = process.platform === 'win32' && withSystemAudio;
+  // 有麦克风时需要 amix 混流（无论全屏/窗口）
+  const needsMix = hasAudio && withMic;
+  const isScreenCapture = sourceId.startsWith('screen:');
+
+  let audioArgs: string[];
+  if (!hasAudio) {
+    audioArgs = ['-an'];
+  } else if (needsMix) {
+    // 混流：全屏和窗口的音频流来源不同，-filter_complex 写法相同（均为 2 路）
+    // 全屏：[1:a][2:a] → amix；  窗口：[0:a][1:a] → amix
+    // 用 [0:a][1:a] 统一写法不对全屏，所以按来源分支处理
+    const audioInputs = isScreenCapture
+      ? '[1:a][2:a]amix=inputs=2:normalize=0[amix]'  // 全屏：wasapi(1) + dshow(2)
+      : '[0:a][1:a]amix=inputs=2:normalize=0[amix]'; // 窗口：gfxcapture(0:a) + dshow(1)
+    audioArgs = [
+      '-filter_complex', audioInputs,
+      '-map', '0:v',
+      '-map', '[amix]',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-strict', '-2',
+    ];
+  } else {
+    // 只有系统音频，无需混流
+    audioArgs = [
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-strict', '-2',
+    ];
+  }
+
   const args = [
     ...inputArgs,
     ...darwinExtraArgs,
     ...encodeArgs,
+    ...audioArgs,
     '-g', String(30 * HLS_SEGMENT_DURATION), // GOP = framerate × segment_duration
     '-f', 'hls',
     '-hls_time', String(HLS_SEGMENT_DURATION),
@@ -748,7 +958,7 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
     watcher = null;
   }
 
-  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, uploadedCount);
+  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, currentAudioOptions, uploadedCount);
   attachFfmpegHandlers(displayTitle);
 
   // 注意：chokidar v5 不支持 glob 路径 watch，必须 watch 目录后在回调内过滤扩展名
@@ -783,11 +993,19 @@ function attachFfmpegHandlers(displayTitle: string): void {
  * @param windowId     desktopCapturer source id（格式 "screen:N:M" 或 "window:N:M"）
  *                     macOS：推导 avfoundation 屏幕设备索引
  *                     Windows screen:：推导 ddagrab output_idx
- *                     Windows window:：type使用 gfxcapture，依赖 displayTitle 匹配
+ *                     Windows window:：使用 gfxcapture，依赖 displayTitle 匹配
  * @param displayTitle 窗口标题（Windows 窗口录制时使用）
  * @param roomId       所属房间 ID
+ * @param authToken    JWT AccessToken
+ * @param audioOptions 音频录制选项（仅 Windows 生效）
  */
-async function start(windowId: string, displayTitle: string, roomId: string, authToken: string): Promise<void> {
+async function start(
+  windowId: string,
+  displayTitle: string,
+  roomId: string,
+  authToken: string,
+  audioOptions: AudioOptions = { withSystemAudio: false, withMic: false },
+): Promise<void> {
   if (ffmpegProcess) {
     throw new Error('[recorder] 录制已在进行中');
   }
@@ -797,6 +1015,7 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
   currentRoomId = roomId;
   currentSourceId = windowId;
   currentAuthToken = authToken;
+  currentAudioOptions = audioOptions;
   segmentKeys = [];
   pendingQueue = [];
   uploadedCount = 0;
@@ -804,6 +1023,7 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
   isRetryScheduled = false;
   consecutiveFailRounds = 0;
   crashRestartCount = 0;
+  cachedAvfIndex = -1;
   recordStartTime = Date.now();
   activeUploads.clear();
   queuedFileNames.clear();
@@ -822,8 +1042,13 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
   }
   console.log(`[recorder] 临时目录：${tmpDir}`);
 
+  // macOS：动态枚举 avfoundation 设备列表，确定正确的屏幕设备索引
+  if (process.platform === 'darwin') {
+    cachedAvfIndex = await resolveAvfIndex(windowId);
+  }
+
   // 启动 ffmpeg
-  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle);
+  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, audioOptions);
   attachFfmpegHandlers(displayTitle);
 
   // 启动 chokidar 监听新增切片文件
@@ -834,7 +1059,7 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
   });
   watcher.on('add', (filePath) => {
-    if (filePath.endsWith('.ts')) uploadSegment(filePath);
+    if (filePath.endsWith('.ts')) void uploadSegment(filePath);
   });
 
   // 启动 tick 计时器
@@ -872,8 +1097,8 @@ async function start(windowId: string, displayTitle: string, roomId: string, aut
  *   6. 调用 finish 接口 → 清理临时目录 → 重置状态
  */
 async function stop(): Promise<void> {
-  if (!ffmpegProcess && !isUserStopped) return; // 没有在录制，直接返回
-  if (isUserStopped) return;                    // 已在停止流程（abortRecording 可能已触发）
+  if (!ffmpegProcess && !isUserStopped) return; // 进程未启动且也不在停止流程中，直接返回
+  if (isUserStopped) return;                    // 已在停止流程中（abortRecording 可能已触发），避免重复执行
 
   // ① 提前设置 isUserStopped，阻止后续 uploadSegment 将新失败再次入队
   isUserStopped = true;
@@ -992,7 +1217,7 @@ export function registerRecorderHandlers(): void {
       return await detectEncoder();
     } catch (err) {
       console.error('[recorder] detectEncoder 异常：', (err as Error).message);
-      return { encoder: 'libx264', isSoftware: true };
+      return { encoder: 'libx264', isSoftware: true, isAudioAvailable: false };
     }
   });
 
@@ -1005,9 +1230,16 @@ export function registerRecorderHandlers(): void {
     }
   });
 
-  ipcMain.handle('recorder:start', async (_event, windowId: string, displayTitle: string, roomId: string, authToken: string) => {
+  ipcMain.handle('recorder:start', async (
+    _event,
+    windowId: string,
+    displayTitle: string,
+    roomId: string,
+    authToken: string,
+    audioOptions: AudioOptions,
+  ) => {
     try {
-      await start(windowId, displayTitle, roomId, authToken);
+      await start(windowId, displayTitle, roomId, authToken, audioOptions);
     } catch (err) {
       console.error('[recorder] start 异常：', (err as Error).message);
       throw err;

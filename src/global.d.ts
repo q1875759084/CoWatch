@@ -58,8 +58,17 @@ interface ElectronBridge {
     detectEncoder: () => Promise<import('./types/recorder').EncoderDetectResult>;
     /** 获取可录制的窗口/整屏列表 */
     getSources: () => Promise<import('./types/recorder').RecorderSource[]>;
-    /** 开始录制 */
-    start: (windowId: string, displayTitle: string, roomId: string, authToken: string) => Promise<void>;
+    /**
+     * 开始录制
+     * @param audioOptions 音频选项（仅 Windows 生效；macOS 传入但被忽略）
+     */
+    start: (
+      windowId: string,
+      displayTitle: string,
+      roomId: string,
+      authToken: string,
+      audioOptions: import('./types/recorder').AudioOptions,
+    ) => Promise<void>;
     /** 停止录制（等待剩余切片上传完成后调用 finish 接口） */
     stop: () => Promise<void>;
     /** 注册录制计时回调（每秒触发，seconds 为已录秒数） */
