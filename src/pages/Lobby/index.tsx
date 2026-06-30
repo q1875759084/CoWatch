@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, type MutableRefObject } from 'react';
 import { useMemoizedFn } from 'ahooks';
 import { message } from 'antd';
-import { useParams } from 'react-router-dom';
+import { useParams, Navigate } from 'react-router-dom';
 import { useUser } from '@/context/UserContext';
 import { getAccessToken } from '@/utils/token';
 import { useRoom } from '@/context/RoomContext';
@@ -62,6 +62,8 @@ function RoomPageInner() {
         return () => window.removeEventListener('beforeunload', handleBeforeUnload);
     }, [recorderState]);
     const { roomState, initRoom, setActiveVideoUrl } = useRoom();
+    /** 房间初始化失败时的错误信息（非空表示加载失败，不再 loading） */
+    const [roomInitError, setRoomInitError] = useState<string | null>(null);
     /**
      * 当前激活视频的 objectKey（与签名 URL 无关的稳定标识）
      * 用于 VideoList 高亮当前播放项，以及切换视频时发送 SWITCH_VIDEO WS 消息
@@ -195,11 +197,12 @@ function RoomPageInner() {
                 controllerId: info.controllerId,
             });
         }).catch((err: unknown) => {
-            // 初始化失败：roomState 将永远是 null，页面会卡在 Loading。
-            // 此处展示错误原因，让用户知道发生了什么，并可刷新重试。
+            // 初始化失败：设置错误状态终止 loading，显示错误提示。
             // request.ts 拦截器已将 4xx/业务错误包成 ApiError（含中文 message），
             // 网络超时等情况则透传原始 Error。
-            void message.error(err instanceof Error ? err.message : '房间加载失败，请刷新重试');
+            const errMsg = err instanceof Error ? err.message : '房间加载失败，请刷新重试';
+            setRoomInitError(errMsg);
+            void message.error(errMsg);
         });
     }, [roomId]);
 
@@ -689,8 +692,16 @@ function RoomPageInner() {
         sendMessage('TAG_SEEK', { time });
     });
 
+    if (roomInitError) {
+        return <Navigate to="/" replace />;
+    }
+
     if (!roomState) {
-        return <LoadingSpinner fullPage text="加载房间..." />;
+        return (
+            <div className={styles.loadingArea}>
+                <LoadingSpinner text="加载房间..." />
+            </div>
+        );
     }
 
     if (roomMeta?.planLevel === 'free') {

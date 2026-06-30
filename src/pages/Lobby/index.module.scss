@@ -7,6 +7,15 @@
   position: relative; // NotePanel 绝对定位的锚点
 }
 
+// 房间加载中 / 加载失败的占位区域（仅占右侧内容区，不覆盖左侧 RoomList）
+.loadingArea {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0a0f1e;
+}
+
 .content {
   flex: 1;
   display: flex;
