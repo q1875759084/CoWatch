@@ -215,6 +215,9 @@ export default function VideoList({
                       )}
                     </div>
                   )}
+                  {v.uploaderNickname && (
+                    <span className={styles.uploaderName}>上传：{v.uploaderNickname}</span>
+                  )}
                   <span className={styles.uploadTime}>
                     {new Date(v.createdAt).toLocaleString('zh-CN', {
                       month: '2-digit',

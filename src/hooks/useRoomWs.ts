@@ -245,6 +245,7 @@ export function useRoomWs({
               videoUrl: d.videoUrl,
               fileName: d.fileName,
               uploaderId: d.uploaderId,
+              uploaderNickname: d.uploaderNickname,
               createdAt: d.createdAt,
             });
             // 通知 VideoUploader：切片完成，传 videoId（uuid，每次写入 DB 唯一）

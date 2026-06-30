@@ -1881,15 +1881,28 @@ if (currentSourceId.startsWith('window:')) {
 
 | 层次 | 方案 | 覆盖场景 |
 |------|------|---------|
-| 客户端 | `before-quit` 钩子调用 `stop()`（尽力而为） | 用户正常点关闭按钮 |
-| 后端 | 超时自动收尾（超过 N 分钟无新切片且无 finish → 用已有切片重建 m3u8） | 进程崩溃、强杀、网络断开 |
+| 客户端 | `before-quit` 钩子调用 `stop()`（尽力而为） | 用户正常点关闭按钮，减少最后一片丢失 |
+| 后端 | `recording_sessions` 超时自动收尾 | 进程崩溃、强杀、网络断开等所有异常退出 |
 
-**后端超时收尾要点：**
-- 每次切片上传时更新 `session.lastUploadAt`
-- 定时任务（每 5min）扫描未结束且超时的 session，触发强制 finish
-- finish 逻辑需幂等（防客户端正常 finish 与后端超时收尾并发）
+**`before-quit` 的定位：** 辅助优化，不是核心保全路径。它能减少最后一片丢失（让 FFmpeg 优雅 flush），但无法覆盖 crash / OOM / 任务管理器强杀场景。核心保全靠后端超时收尾。
 
-**当前状态：** `before-quit` 钩子未实现，后端超时收尾未实现。用户录制 1 小时后程序崩溃会全部丢失——这是已知的高优先级缺口，需后端配合实现。
+**后端超时收尾实现（`jobs/recordingTimeout.ts`）：**
+
+1. **session 跟踪**：切片上传路由（`/recording/segment`）解析 `X-Object-Key` 提取 `sessionId`，fire-and-forget 地写 `recording_sessions` 表：
+   - 首片：`createRecordingSession`（`ON CONFLICT DO NOTHING` 幂等）
+   - 后续片：`appendSegmentKey`（PostgreSQL `jsonb || jsonb` 追加，同时刷新 `last_segment_at`）
+   - **fire-and-forget 原因：** session 跟踪是辅助功能，失败不能阻塞切片上传主路径；用 `.catch()` 打 warn 日志即可
+
+2. **状态机：** `recording → finished`（客户端正常调 finish）或 `recording → auto_finished`（后端超时收尾），两者互斥，防并发重复处理
+
+3. **定时扫描：** 每 3min 扫 `status = 'recording' AND last_segment_at < now - 3min` 的 session，用已有 `segmentKeys` 重建 `hlsPrefix`，写 `room_videos`，广播 `VIDEO_ADDED`
+
+4. **超时阈值设计（3min）：**
+   - HLS 每片 10s，正常录制下 `last_segment_at` 每 10s 刷新一次
+   - 网络抖动最坏情况：pRetry 重试约 30s，指数退避最长约 150s（5 轮）
+   - 3min > 最坏网络抖动，不会误判正在录制的 session 为超时
+   - 3min < 用户可忍受的"视频出现延迟"，崩溃后约 3~6min 视频自动可见
+   - 服务启动时立即执行一次（处理上次宕机遗留的超时 session）
 
 ---
 

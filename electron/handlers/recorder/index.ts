@@ -334,25 +334,30 @@ function getAudioCapturePath(): string | null {
  *   - 无摄像头的 Mac（如 Mac mini）：[0]=主屏、[1]=第二屏
  *   - 有摄像头但摄像头被禁用：视频设备列表里无摄像头项
  *   - 外接多屏时屏幕数量动态变化
- *   因此固定用 screenSeq + 1 会在无摄像头环境下 off-by-one 导致 Invalid device index。
+ *   因此固定用索引推算会导致 Invalid device index。
+ *
+ * 关键陷阱：
+ *   desktopCapturer 在 macOS 返回的屏幕 id 格式是 "screen:DISPLAY_ID:0"，
+ *   其中 DISPLAY_ID 是系统内部的 CGDirectDisplayID（如 69732833），
+ *   而不是屏幕的枚举序号（0、1、2…）。
+ *   avfoundation 的 "Capture screen M" 中 M 是 0-indexed 枚举序号，
+ *   与 DISPLAY_ID 完全无关，不能直接解析 sourceId 中的数字来匹配。
  *
  * 解决方案：
- *   运行 `ffmpeg -list_devices true -f avfoundation -i dummy` 枚举实际设备列表，
- *   从 stderr 中解析 "Capture screen N" 条目（N = desktopCapturer 屏幕序号），
- *   获取其对应的 avfoundation 索引号，作为 -i 参数使用。
+ *   由调用方在 desktopCapturer.getSources 结果中找到目标 sourceId 的位置（0-indexed rank），
+ *   将 rank 作为 screenRank 参数传入，与 avfoundation "Capture screen rank" 匹配。
  *
  * 兜底策略：
- *   - 枚举失败 / 找不到对应屏幕：返回 screenSeq + 1（旧逻辑，保证向后兼容）
- *   - 窗口录制（window: 前缀）：目标屏幕序号取 0（降级为主屏捕获）
+ *   - 枚举失败 / 找不到对应屏幕：返回 screenRank（avfoundation 条目数 = 屏幕数，rank 即索引）
+ *   - 窗口录制（window: 前缀）：screenRank 传 0（降级为主屏捕获）
+ *
+ * @param screenRank sourceId 在 desktopCapturer 屏幕列表中的 0-indexed 位置
  */
-async function resolveAvfIndex(sourceId: string): Promise<number> {
+async function resolveAvfIndex(screenRank: number): Promise<number> {
   const ffmpeg = getFfmpegPath();
 
-  const screenSeq = sourceId.startsWith('screen:')
-    ? parseInt(sourceId.split(':')[1] ?? '0', 10)
-    : 0;
-
-  const fallback = screenSeq + 1; // 旧兜底逻辑
+  // 无摄像头时 avfoundation 直接从 [0] 开始列屏幕，rank 即为索引，作为兜底值
+  const fallback = screenRank;
 
   return new Promise<number>((resolve) => {
     let stderr = '';
@@ -381,21 +386,21 @@ async function resolveAvfIndex(sourceId: string): Promise<number> {
       // 只解析视频设备区段（音频设备区段之前的内容）
       const videoSection = stderr.split(/AVFoundation audio devices/i)[0] ?? stderr;
 
-      // 匹配 "[N] Capture screen M" 格式，N = avfoundation 索引，M = desktopCapturer 屏幕序号
+      // 匹配 "[N] Capture screen M" 格式，N = avfoundation 索引，M = 屏幕枚举序号（0-indexed）
       const pattern = /\[(\d+)\]\s+Capture screen\s+(\d+)/gi;
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(videoSection)) !== null) {
         const avfIdx = parseInt(match[1]!, 10);
         const screenNum = parseInt(match[2]!, 10);
-        if (screenNum === screenSeq) {
-          console.log(`[recorder] avfoundation 设备枚举：Capture screen ${screenSeq} → 索引 ${avfIdx}`);
+        if (screenNum === screenRank) {
+          console.log(`[recorder] avfoundation 设备枚举：Capture screen ${screenRank} → 索引 ${avfIdx}`);
           resolve(avfIdx);
           return;
         }
       }
 
       // 找不到匹配项（可能是新系统格式变化），使用兜底值
-      console.warn(`[recorder] avfoundation 未找到 Capture screen ${screenSeq}，使用兜底索引 ${fallback}`);
+      console.warn(`[recorder] avfoundation 未找到 Capture screen ${screenRank}，使用兜底索引 ${fallback}`);
       console.debug('[recorder] avfoundation 枚举输出：\n', videoSection);
       resolve(fallback);
     });
@@ -1100,8 +1105,25 @@ async function start(
   console.log(`[recorder] 临时目录：${tmpDir}`);
 
   // macOS：动态枚举 avfoundation 设备列表，确定正确的屏幕设备索引
+  // 注意：desktopCapturer 屏幕 id 格式为 "screen:DISPLAY_ID:0"，DISPLAY_ID 是系统内部标识，
+  // 与 avfoundation "Capture screen M" 中的 M（枚举序号）无关。
+  // 需要通过 getSources 枚举所有屏幕，用目标 sourceId 在列表中的位置（rank）来匹配。
   if (process.platform === 'darwin') {
-    cachedAvfIndex = await resolveAvfIndex(windowId);
+    let screenRank = 0;
+    if (windowId.startsWith('screen:')) {
+      try {
+        const allSources = await desktopCapturer.getSources({
+          types: ['screen'],
+          thumbnailSize: { width: 0, height: 0 },
+        });
+        const idx = allSources.findIndex((s) => s.id === windowId);
+        screenRank = idx >= 0 ? idx : 0;
+        console.log(`[recorder] 屏幕 rank 解析：${windowId} → rank=${screenRank}（共 ${allSources.length} 块屏幕）`);
+      } catch {
+        console.warn('[recorder] getSources 枚举失败，屏幕 rank 降级为 0');
+      }
+    }
+    cachedAvfIndex = await resolveAvfIndex(screenRank);
   }
 
   // 启动 ffmpeg

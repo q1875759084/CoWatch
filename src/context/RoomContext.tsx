@@ -143,7 +143,8 @@ export function RoomProvider({ children }: { children: ReactNode }) {
       if (!prev) return prev;
       const idx = prev.videos.findIndex((v) => v.id === video.id);
       if (idx === -1) {
-        return { ...prev, videos: [...prev.videos, video] };
+        // 列表按 createdAt DESC 排序，新视频插入头部保持一致
+        return { ...prev, videos: [video, ...prev.videos] };
       }
       const updated = [...prev.videos];
       updated[idx] = { ...updated[idx], ...video };

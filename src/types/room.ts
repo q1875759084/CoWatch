@@ -44,6 +44,8 @@ export interface VideoItem {
   /** 用户自定义展示名，未设置时为 null/undefined，前端 fallback 到 fileName */
   displayName?: string | null;
   uploaderId: string;
+  /** 上传人昵称，由后端接口返回，仅用于展示 */
+  uploaderNickname?: string;
   createdAt: number;
   /** 视频标签，最多 3 个，每个最多 8 个字 */
   labels?: string[];
@@ -180,6 +182,8 @@ export interface VideoAddedData {
   videoUrl: string;
   fileName: string;
   uploaderId: string;
+  /** 上传人昵称，由后端广播附带 */
+  uploaderNickname?: string;
   createdAt: number;
 }
 

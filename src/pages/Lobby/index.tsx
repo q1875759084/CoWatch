@@ -182,6 +182,7 @@ function RoomPageInner() {
                 fileName: v.fileName,
                 displayName: v.displayName ?? null,
                 uploaderId: v.uploaderId,
+                uploaderNickname: v.uploaderNickname,
                 createdAt: v.createdAt,
                 labels: v.labels ?? [],
             }));

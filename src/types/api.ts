@@ -74,6 +74,8 @@ export interface VideoItemResponse {
   /** 用户自定义展示名，未设置时为 null，前端 fallback 到 fileName */
   displayName?: string | null;
   uploaderId: string;
+  /** 上传人昵称，由后端接口返回 */
+  uploaderNickname?: string;
   createdAt: number;
   /** HLS 切片状态：'pending' | 'done' | 'error' */
   hlsStatus?: 'pending' | 'done' | 'error';
