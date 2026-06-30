@@ -399,11 +399,14 @@ async function resolveAvfIndex(sourceId: string): Promise<number> {
     });
 
     // 5s 超时保护
-    setTimeout(() => {
+    const killTimer = setTimeout(() => {
       try { proc.kill(); } catch (_) { /* ignore */ }
       console.warn(`[recorder] avfoundation 枚举超时，使用兜底索引 ${fallback}`);
       resolve(fallback);
     }, 5000);
+    // 正常退出时清除超时，避免 5s 后无意义地 kill 已退出的进程
+    proc.on('close', () => clearTimeout(killTimer));
+    proc.on('error', () => clearTimeout(killTimer));
   });
 }
 
@@ -641,22 +644,35 @@ async function cleanup(): Promise<void> {
   if (watcher) { await watcher.close(); watcher = null; }
 
   // 停止 ffmpeg（若尚未停止）
-  // 正确的停止顺序：
-  // 1. 先停止 audio_capture → pipe:0 关闭，ffmpeg 收到 EOF（音频流结束）
-  // 2. 立即向 ffmpeg stdin 写入 'q' → ffmpeg 收到 'q'，准备退出
-  // 3. ffmpeg 收到 EOF + 'q' 后，立即完成最后一片写入并退出
+  // 正确的停止顺序（Windows，双输入流场景）：
+  // 1. 先停止 audio_capture → pipe:0 关闭，FFmpeg 收到音频流 EOF
+  // 2. 等待 200ms → 让 FFmpeg muxer 完成对 EOF 的消化（时序保护）
+  // 3. 向 ffmpeg stdin 写入 'q' → 触发优雅退出，flush 最后一片 HLS 切片
+  //
+  // 背景：FFmpeg 有 pipe:0（音频）+ lavfi（视频，无限流）两个输入。
+  //   若立即发 'q'，EOF 与 'q' 时序竞争：随机出现尾片丢失（丢片）或多录一段静音（多片）。
+  //   macOS 只有单个 avfoundation 输入，直接 SIGTERM 即可。
   if (ffmpegProcess) {
     await new Promise<void>((resolve) => {
       if (process.platform === 'win32') {
-        // 步骤1：先停止 audio_capture
+        // 步骤1：先停止 audio_capture（pipe:0 关闭，FFmpeg 收到音频流 EOF）
         if (audioCaptureProcess) {
           try { audioCaptureProcess.kill('SIGINT'); } catch (_) { /* 已退出 */ }
           audioCaptureProcess = null;
         }
 
-        // 步骤2：立即向 ffmpeg 写入 'q'
-        ffmpegProcess!.stdin?.write('q');
-        ffmpegProcess!.stdin?.end();
+        // 步骤2：等待 FFmpeg 消化音频 EOF 后再发 'q'
+        //
+        // 问题根因：FFmpeg 有两个输入（pipe:0 音频 + lavfi 视频），lavfi 是无限流。
+        //   若立即发 'q'：pipe:0 EOF 尚未被 FFmpeg 消化，两者时序竞争，
+        //   导致 HLS 尾片要么未 flush（丢片），要么多录一段静音（多片）。
+        //
+        // 修复：等待 200ms 让音频 EOF 先被 muxer 处理，再发 'q' 触发优雅退出，
+        //   确保 FFmpeg 能正确 flush 最后一片 HLS 切片后再退出。
+        setTimeout(() => {
+          ffmpegProcess?.stdin?.write('q');
+          ffmpegProcess?.stdin?.end();
+        }, 200);
       } else {
         ffmpegProcess!.kill('SIGTERM');
         if (audioCaptureProcess) {
@@ -916,8 +932,9 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
 
   // 将 audio_capture 的 PCM 输出 pipe 到 FFmpeg stdin
   if (audioPipe) {
-    const stdinPipe = audioPipe.stdout!.pipe(proc.stdin!);
-    stdinPipe.on('error', (err) => {
+    audioPipe.stdout!.pipe(proc.stdin!);
+    // pipe() 返回 destination（即 proc.stdin），error 事件挂在 stdin 上
+    proc.stdin!.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EPIPE' || err.message.includes('ERR_STREAM_WRITE_AFTER_END')) {
         // EPIPE：ffmpeg 先退出，audio_capture 继续写入时触发，正常情况忽略
         // ERR_STREAM_WRITE_AFTER_END：ffmpeg stdin 已关闭，audio_capture 继续写入时触发，正常情况忽略
@@ -1155,9 +1172,10 @@ async function stop(): Promise<void> {
   // ⑤ 等待所有 activeUploads 完成（含上方补传触发的新 upload）
   await Promise.allSettled(Array.from(activeUploads));
 
-  // ⑥ 对剩余 pendingQueue 做最后一轮直接补传（最多 UPLOAD_MAX_RETRIES 轮避免无限循环）
-  //    绕过 triggerRetryQueue 的退避逻辑（stop 时用户已等待，尽快上传）
-  for (let round = 0; round < UPLOAD_MAX_RETRIES + 1; round++) {
+  // ⑥ 对剩余 pendingQueue 做最后一轮直接补传（最多 2 轮，绕过退避逻辑）
+  //    注意：doUpload 内部已含 pRetry，此处轮数仅控制整体补传轮次，不再叠加 pRetry 次数
+  const STOP_RETRY_ROUNDS = 2;
+  for (let round = 0; round < STOP_RETRY_ROUNDS; round++) {
     if (pendingQueue.length === 0) break;
     console.log(`[recorder] stop 补传第 ${round + 1} 轮，剩余 ${pendingQueue.length} 片`);
     const batch = pendingQueue.splice(0, pendingQueue.length);
@@ -1235,7 +1253,7 @@ export function registerRecorderHandlers(): void {
       return await detectEncoder();
     } catch (err) {
       console.error('[recorder] detectEncoder 异常：', (err as Error).message);
-      return { encoder: 'libx264', isSoftware: true, isAudioAvailable: false };
+      return { encoder: 'libx264', isSoftware: true };
     }
   });
 
