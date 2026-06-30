@@ -1786,3 +1786,125 @@ getRoomInfoApi(roomId).then(async (info) => {
   1. **应用层心跳**：服务端每 30s 发 PING 帧，客户端响应 PONG；超过 2 次无响应则主动 close
   2. **指数退避重连**：客户端断线后不立即重连，按 `min(base * 2^n, maxDelay)` 退避，避免服务端重启时大量客户端同时重连造成雪崩
   3. **随机抖动（jitter）**：在退避延迟上叠加随机量 `delay * Math.random()`，将重连请求分散到时间窗口内，防止同时在线用户同步重连的"惊群"问题
+
+---
+
+### pipe:0 + lavfi 双输入流下 HLS 尾片时序竞争
+
+**现象：** 引入 audio_capture.exe（WASAPI Loopback）后，录制时长出现随机偏差：录制 12s → 视频 10s（丢一片）；录制 17s → 视频 20s（多一片）。无音频时（单输入）录制时长完全正常。
+
+**根因：** FFmpeg 有两个输入——`pipe:0`（音频 PCM）和 `lavfi` 驱动的 gfxcapture/ddagrab（视频，无限流）。`kill audio_capture` 后，pipe:0 EOF 需经过多跳传播才能被 muxer 感知：
+
+```
+audio_capture 退出 → OS 关闭管道写端 → FFmpeg 读线程读到 EOF → demuxer 标记音频流 finished → muxer 感知
+```
+
+这条链路在 OS 调度下是**异步**的（约 0~50ms）。若立即发 `q`，两个信号时序竞争：
+- `q` 先到：FFmpeg 准备退出，但 lavfi 无限流不会自动结束，继续录制直到音频 EOF → 多录一段 → 多片
+- 音频 EOF 先到但未消化完：FFmpeg 在 muxer 状态不一致时退出 → 尾片未 flush → 丢片
+
+**解决：** 先 kill audio_capture，**等待 200ms** 让 pipe:0 EOF 完成在 FFmpeg 内部的传播，再发 `q` + end stdin。
+
+```typescript
+// cleanup() 的 Windows 分支
+audioCaptureProcess.kill('SIGINT');
+audioCaptureProcess = null;
+setTimeout(() => {
+  ffmpegProcess?.stdin?.write('q');
+  ffmpegProcess?.stdin?.end();
+}, 200);
+```
+
+**200ms 依据：** FFmpeg 读线程通常 1~2 个调度周期（10~30ms）完成 EOF 处理，200ms 留出 6~20 倍裕量覆盖高负载场景，对用户感知的停止延迟无影响。
+
+**注意：** 多录几秒（尾片完整写出）比少录更可接受（不丢内容）。`q` 让 FFmpeg 等当前 GOP/分片写完再退出，所以在 hls_time=10 的场景下，停止后最多多录约 10s，这是 lavfi 无限流的固有行为，不算 bug。
+
+---
+
+### 窗口录制目标窗口关闭时 FFmpeg 误判为 crash 并无意义重启
+
+**现象：** gfxcapture 录制时，目标窗口被用户关闭或进程崩溃，FFmpeg 立刻退出（exit code 非 0），`handleFfmpegCrash` 触发，用相同 `displayTitle` 重启 3 次，全部失败（窗口已不存在），最终推 `recorder:error`。整个过程耗时约数秒，体验差。
+
+**根因：** gfxcapture 底层使用 `Windows.Graphics.Capture` API，依赖目标窗口的 `GraphicsCaptureItem`。窗口销毁时 WGC capture session 抛出 `ObjectDisposed` 异常，gfxcapture filter 向 FFmpeg 报告输入错误，FFmpeg 进程退出。原有 `handleFfmpegCrash` 逻辑无法区分"窗口消失导致的预期退出"和"真正的 FFmpeg 崩溃"。
+
+**解决（双层防护）：**
+
+**主路径（毫秒级，handleFfmpegCrash 内）：** crash 发生时先做单次 `desktopCapturer` 枚举，窗口消失则直接 `stop()` 优雅收尾，不进重启流程：
+
+```typescript
+// handleFfmpegCrash() 最顶部
+if (currentSourceId.startsWith('window:')) {
+  const alive = await isWindowAlive(currentSourceId);
+  if (!alive) {
+    void stop(); // 优雅收尾：上传尾片 + 调用 finish 接口
+    return;      // 不重启
+  }
+}
+// 窗口存在 → 真实 crash → 正常重启逻辑
+```
+
+**兜底路径（5s 轮询，windowWatchTimer）：** 覆盖 FFmpeg 假死、gfxcapture 不 crash 只是黑屏等极端情况。每 5s 通过 `desktopCapturer.getSources({ thumbnailSize: { width: 0, height: 0 } })` 枚举窗口列表，发现 sourceId 消失则触发 `stop()`。单次枚举约 1~5ms（不截图），仅在 `window:` 模式下启动。
+
+**代码位置：** `electron/handlers/recorder/window-watch.ts`（独立模块，通过回调与 recorder 解耦）。
+
+---
+
+### 窗口录制健壮性方案选型：独立 setInterval vs tickTimer 搭车 vs sentinel.exe
+
+**背景：** 需要检测被录制窗口是否存活，以便在窗口消失时优雅停止录制。
+
+**三种方案对比：**
+
+| 方案 | 响应延迟 | 维护成本 | 架构 | 适用性 |
+|------|---------|---------|------|-------|
+| **独立 setInterval（选用）** | 最坏 5s | 低，单职责 | 清晰，一个定时器对应一个职责 | ✅ |
+| tickTimer 搭车（1s 计数器） | 最坏 5s | 低，但职责混用 | 稍混乱，tick 计时器干了窗口检测的活 | 可用但不优雅 |
+| sentinel.exe（Rust + SetWinEventHook） | <100ms（事件驱动） | 高，需维护 Rust 项目 + 编译 + IPC 集成 | 最清晰，但对此场景 over-engineering | ⚠️ 长期备选 |
+
+**选用独立 setInterval 的原因：** 对"窗口关闭触发录制结束"这个场景，5s 响应延迟完全可接受（用户关窗到录制停止慢几秒无感知），维护成本比 sentinel.exe 低一个数量级，架构上比搭车方案更符合单一职责原则。
+
+**性能误区：** tickTimer 搭车并不比独立 setInterval 更轻——两者都是每 5s 触发一次真正的 `desktopCapturer` 枚举，差别只是前者每秒多一次整数加法（纳秒级），可以忽略。
+
+**sentinel.exe 现状：** Rust 源码已产出（`electron/sentinel-src/`，windows-rs crate），逻辑完整，但需要编译工具链和打包配置，暂不集成。未来若 5s 延迟不可接受（如竞技场景），再考虑引入。
+
+---
+
+### CoWatch 异常退出时录制内容保全
+
+**问题：** CoWatch 进程被强杀（crash / OOM / 任务管理器）时，`before-quit` 不会触发，录制的 `stop()` 不会执行，`finish` 接口不会调用。后端不知道录制已结束，不会合并切片生成视频，导致内容丢失。
+
+**HLS 切片的增量特性：** FFmpeg 的 HLS muxer 每生成一片完整 `.ts` 文件后立刻更新 m3u8（增量追加）。CoWatch 通过 chokidar 监听，每片生成后 fire-and-forget 触发上传。**数据本身没有丢**，只是缺少"收尾信号"。
+
+**实际丢失量（网络正常时）：** 崩溃前最后一片（最多 10s，即 hls_time）尚未完成写入或上传。其余全部已上传到后端/COS。
+
+**完整解决方案（两层）：**
+
+| 层次 | 方案 | 覆盖场景 |
+|------|------|---------|
+| 客户端 | `before-quit` 钩子调用 `stop()`（尽力而为） | 用户正常点关闭按钮 |
+| 后端 | 超时自动收尾（超过 N 分钟无新切片且无 finish → 用已有切片重建 m3u8） | 进程崩溃、强杀、网络断开 |
+
+**后端超时收尾要点：**
+- 每次切片上传时更新 `session.lastUploadAt`
+- 定时任务（每 5min）扫描未结束且超时的 session，触发强制 finish
+- finish 逻辑需幂等（防客户端正常 finish 与后端超时收尾并发）
+
+**当前状态：** `before-quit` 钩子未实现，后端超时收尾未实现。用户录制 1 小时后程序崩溃会全部丢失——这是已知的高优先级缺口，需后端配合实现。
+
+---
+
+### 进程间竞态（IPC Race Condition）与前端异步竞态的区别
+
+**本质相同**：两种并发操作的完成顺序与预期不符。
+
+**关键差异：**
+
+| 维度 | 前端异步竞态 | 进程间竞态（IPC） |
+|------|------------|-----------------|
+| 竞争主体 | 同一进程内的多个 Promise / 事件循环任务 | 跨进程的 OS 信号（pipe EOF、SIGINT）与 stdin 写入 |
+| 调度者 | JS 事件循环（单线程，可预测） | OS 进程调度器（多核，不可预测） |
+| 可见性 | 同一内存空间，可用标志位/AbortController 协调 | 不同地址空间，只能通过信号顺序控制 + 时间裕量 |
+| 典型修复 | `AbortController`、`isFresh` 标志、`useEffect` 清理 | 信号顺序控制 + 等待足够时间裕量（如 200ms） |
+| 复现稳定性 | 通常可稳定复现（相同事件顺序） | 依赖 OS 调度，表现为"偶发、方向随机" |
+
+**洞察：** 前端竞态的根因是"逻辑顺序与响应顺序不一致"，修复是取消/忽略过期操作。IPC 竞态的根因是"信号传递路径跨越进程边界，延迟不可控"，修复是主动制造时间裕量，让第一个信号的副作用在接收方完成传播后再发第二个。

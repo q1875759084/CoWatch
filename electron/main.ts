@@ -2,7 +2,7 @@ import { app, BrowserWindow, protocol, net } from 'electron';
 import path from 'path';
 import { URL } from 'url';
 import { initHlsCache, setApiOrigin, isHlsSegment, handleHlsSegment } from './handlers/cache';
-import { registerRecorderHandlers, setApiOriginForRecorder } from './handlers/recorder';
+import { registerRecorderHandlers, setApiOriginForRecorder } from './handlers/recorder/index';
 
 // ─── 三种运行模式 ────────────────────────────────────────────────────────────
 //
@@ -149,5 +149,29 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// ─── TODO: before-quit 优雅停止录制 ─────────────────────────────────────────
+//
+// 目标：用户正常退出 CoWatch 时（关窗、Cmd+Q、任务栏退出），若录制进行中，
+//       弹窗告知用户并让其决定是否丢弃未上传切片后退出。
+//
+// 交互设计：
+//   1. app.on('before-quit') 触发时，检查是否正在录制（需暴露 isRecording() 函数）
+//   2. 若正在录制：
+//      a. event.preventDefault() 阻止立即退出
+//      b. 向渲染进程发送 IPC 消息 'recorder:quit-while-recording'
+//      c. 渲染进程弹出 Dialog：
+//           "录制进行中，xxx 片段尚未上传，确认退出将丢弃这部分内容。"
+//           [取消] / [确认退出]
+//      d. 用户点"确认退出"：
+//           - 调用 stop()（丢弃 pendingQueue，但已成功上传的片段不受影响）
+//           - 后端定时任务会在 3~6 分钟后对已上传片段自动收尾生成视频
+//           - app.quit() 真正退出
+//      e. 用户点"取消"：无事发生，继续录制
+//
+// 注意事项：
+//   - 进程崩溃/强杀不触发 before-quit，由后端超时自动收尾（方案B）兜底
+//   - stop() 内有网络请求，需设超时（建议 10s），防止网络故障导致永远无法退出
+//   - isRecording() 需从 recorder/index.ts 导出
 
 // ─── 录制 IPC 处理器已通过 registerRecorderHandlers() 注册（见上方 whenReady）────

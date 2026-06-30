@@ -24,6 +24,7 @@
 | 登录/注册 | `/auth` | 账号注册与登录 |
 | Dashboard | `/` | 我的房间列表、创建/加入房间入口；顶栏用户信息面板（hover 弹出：头像（可换图）+ 昵称（可改名）+ uid + 退出登录） |
 | 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 + 进度条 Tag 标注（主控在时间轴打标注，点击跳转并同步给所有成员）+ 鼠标共享（Canvas PainterLayer 蒙层，多端实时同步光标位置）+ 协同绘制（绘制模式下按住左键画笔迹，WS 广播同步，支持黑/白/红三色，清空画布） |
+| Electron 客户端录制 | 房间主页内悬浮控件 | **`vip:pro` 专属**。ffmpeg HLS 实时编码 → chokidar 监听切片 → `net.fetch` 上传后端 → COS。Windows 音频：`audio_capture.exe`（WASAPI Loopback）pipe:0 传入 FFmpeg；macOS 静音。视频：Windows 全屏 ddagrab / 窗口 gfxcapture（GPU 零拷贝），macOS avfoundation。健壮性：窗口录制双层检测（crash 时单次枚举 + 5s 轮询兜底），目标窗口消失时优雅 stop()。代码：`electron/handlers/recorder/`（index.ts + window-watch.ts）。|
 
 ### 技术栈
 

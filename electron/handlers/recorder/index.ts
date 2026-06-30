@@ -36,7 +36,9 @@ import chokidar, { FSWatcher } from 'chokidar';
 import pRetry from 'p-retry';
 import { v4 as uuidv4 } from 'uuid';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../src/types/recorder';
+import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../../src/types/recorder';
+import { startWindowWatcher, isWindowAlive } from './window-watch';
+import type { WindowWatcher } from './window-watch';
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -102,6 +104,11 @@ let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
  * 保证退避期间不被外部时钟打断。
  */
 let retryTimerRef: ReturnType<typeof setInterval> | null = null;
+/**
+ * 窗口存活检测定时器（仅窗口录制模式下启动）。
+ * 实现见 window-watch.ts。
+ */
+let windowWatcher: WindowWatcher | null = null;
 /**
  * 补录队列互斥锁：triggerRetryQueue 运行期间（含退避等待）置为 true。
  * setInterval 回调检查此标志，为 true 时直接跳过，不重复触发。
@@ -639,6 +646,7 @@ async function cleanup(): Promise<void> {
   if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
   if (timeoutTimer !== null) { clearTimeout(timeoutTimer); timeoutTimer = null; }
   if (retryTimerRef !== null) { clearInterval(retryTimerRef); retryTimerRef = null; }
+  if (windowWatcher !== null) { windowWatcher.stop(); windowWatcher = null; }
 
   // 关闭文件监听
   if (watcher) { await watcher.close(); watcher = null; }
@@ -957,9 +965,24 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
 /**
  * ffmpeg 进程异常退出时的处理逻辑。
  * 等待当前上传完成后，以 -hls_start_number 重启 ffmpeg 续录。
+ *
+ * 窗口录制特殊处理：
+ *   crash 发生时先检查目标窗口是否还存在。
+ *   - 窗口已消失：crash 属于预期行为（WGC session 失效），直接 stop() 优雅收尾，不重启。
+ *   - 窗口仍存在：真正的 ffmpeg crash，走正常重启逻辑。
  */
 async function handleFfmpegCrash(displayTitle: string): Promise<void> {
   if (isUserStopped) return;
+
+  // 窗口录制模式：先检查目标窗口是否还存在
+  if (currentSourceId.startsWith('window:')) {
+    const alive = await isWindowAlive(currentSourceId);
+    if (!alive) {
+      console.log('[recorder] 窗口录制目标已消失，ffmpeg crash 属预期行为，触发优雅停止');
+      void stop();
+      return;
+    }
+  }
 
   crashRestartCount++;
   if (crashRestartCount > MAX_CRASH_RESTARTS) {
@@ -1109,6 +1132,15 @@ async function start(
     console.log('[recorder] 达到最大录制时长 2 小时，自动停止');
     void stop();
   }, MAX_RECORD_MS);
+
+  // 窗口存活检测（仅窗口录制模式）
+  if (currentSourceId.startsWith('window:')) {
+    windowWatcher = startWindowWatcher(
+      currentSourceId,
+      () => { void stop(); },
+      () => isUserStopped,
+    );
+  }
 
   // 补录定时器：每 30s 检查一次
   // isRetryScheduled 互斥判断前置在此回调里，保证退避期间不被外部时钟打断
