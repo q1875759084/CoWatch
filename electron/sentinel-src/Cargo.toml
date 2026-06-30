@@ -1,0 +1,19 @@
+[package]
+name = "window_sentinel"
+version = "0.1.0"
+edition = "2021"
+description = "Monitors a target window for closure and notifies via stdout"
+
+[dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
+
+[profile.release]
+opt-level = "z"     # 最小体积优化
+lto = true          # Link-Time Optimization
+strip = true        # 剽弃调试符号
+codegen-units = 1   # 单编译单元（更小体积）
+panic = "abort"     # panic 时直接退出（不展开，减小 runtime）
