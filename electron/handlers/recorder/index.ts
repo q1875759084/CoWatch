@@ -735,8 +735,8 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
   // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比，避免失真。
   // 宽度超出上限时等比缩小；宽度未达上限时不放大（原始更小则保持原始）。
   // -2 确保高度为偶数（H.264 编码器要求宽高均为偶数）。
-  // 软编：最大宽 854（降低 CPU 压力）；硬编：最大宽 1600（高清档）
-  const maxWidth = isSoftwareEncoder ? 854 : 1600;
+  // 软编：最大宽 854（降低 CPU 压力）；硬编：最大宽 1280（720p 档）
+  const maxWidth = isSoftwareEncoder ? 854 : 1280;
 
   // ffmpeg 在所有平台上都能正确解析正斜杠路径；
   // Windows path.join 生成反斜杠，部分 ffmpeg 版本（静态构建）可能将 \s \U 等误解析为转义序列
@@ -872,33 +872,34 @@ function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): C
   }
 
   // ── 编码参数 ─────────────────────────────────────────────────────────────
-  // 质量基准：游戏录屏（高动态）场景，软编 CRF 28 为保底质量标准。
+  // 质量基准：游戏录屏（高动态）场景，720p 硬编 CRF 30 / 软编 CRF 30 为标准。
+  //   720p CRF 30 在游戏复盘场景（需看清操作但非画质赏析）视觉差异可接受。
   //
   // 软编（libx264）：
-  //   -crf 28：恒定质量模式，游戏场景保底画质，动态画面自动升码率
+  //   -crf 30：恒定质量模式
   //   -preset veryfast：实时录制必须用快速 preset，medium 及以上会导致 CPU 过高积压掉帧
   //
   // 硬编：各引擎均使用"质量优先"模式，而非固定码率 VBR。
   //   原因：固定码率会导致静止帧浪费码率、动态场景画质下降（块状失真）。
-  //   目标场景：游戏录屏（高动态），对标软编 CRF 28（保底）的视觉质量。
+  //   目标场景：游戏录屏（高动态），720p CRF 30 视觉质量为保底标准。
   //   -maxrate 5000k -bufsize 10000k：为游戏高动态瞬间留足峰值空间，防止块状失真。
   //
-  //   h264_nvenc：-rc vbr -cq 28
-  //     CQ（Constant Quality）是 nvenc 唯一的质量恒定模式，CQ 28 ≈ libx264 CRF 28
+  //   h264_nvenc：-rc vbr -cq 30
+  //     CQ（Constant Quality）是 nvenc 唯一的质量恒定模式，CQ 30 ≈ libx264 CRF 30
   //     必须配合 -b:v 0 让编码器自由分配码率
   //
-  //   h264_qsv：-global_quality 28 -look_ahead 1
+  //   h264_qsv：-global_quality 30 -look_ahead 1
   //     QSV 的质量参数，功能等同于 CRF；look_ahead 开启前向参考，稍微提升编码效率
   //
   //   h264_amf：-quality quality -b:v 0
   //     AMF 无 CQ 模式，-quality quality 指定质量优先策略，放开目标码率让其自行分配
   let encodeArgs: string[];
   if (isSoftwareEncoder) {
-    encodeArgs = ['-c:v', detectedEncoder, '-crf', '28', '-preset', 'veryfast'];
+    encodeArgs = ['-c:v', detectedEncoder, '-crf', '30', '-preset', 'veryfast'];
   } else if (detectedEncoder === 'h264_nvenc') {
-    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '28', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
+    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '30', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
   } else if (detectedEncoder === 'h264_qsv') {
-    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '28', '-look_ahead', '1', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
+    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '30', '-look_ahead', '1', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
   } else {
     // h264_amf 及其他未知硬编，使用质量优先 VBR
     encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];

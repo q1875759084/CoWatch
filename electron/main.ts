@@ -129,7 +129,7 @@ function createWindow(): void {
     // preview / packaged 模式：通过 app:// 协议加载本地 dist 产物
     win.loadURL('app://localhost/index.html');
     // preview 模式和 packaged 模式都开 DevTools，用于调试打包问题
-    if (isPreview || app.isPackaged) win.webContents.openDevTools();
+    if (isPreview) win.webContents.openDevTools();
   }
 }
 
