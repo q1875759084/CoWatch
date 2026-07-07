@@ -14,11 +14,14 @@
  *   - 不直接依赖 recorder.ts 的任何状态，通过回调解耦
  *   - thumbnailSize 设为 0×0 跳过截图，单次枚举开销约 1~5ms
  *   - 枚举失败不中断录制，静默等下一轮重试
+ *   - 连续 3 次检测不到才判定为消失（避免短暂消失导致误判）
+ *   - 支持窗口标题模糊匹配作为备用检测手段
  */
 
 import { desktopCapturer } from 'electron';
 
 const POLL_INTERVAL_MS = 5000;
+const MAX_CONSECUTIVE_MISSES = 3;  // 连续 3 次（15 秒）都找不到才判定为消失
 
 export interface WindowWatcher {
   /** 停止轮询并清理定时器 */
@@ -32,15 +35,41 @@ export interface WindowWatcher {
  * 应跳过重启直接走 stop()，而不是无意义地重试 3 次再报错。
  *
  * @param sourceId  目标窗口的 desktopCapturer source id
+ * @param windowTitle  目标窗口的标题（可选，用于模糊匹配备用检测）
  * @returns         true = 窗口仍存在；false = 窗口已消失或枚举失败（保守判断为消失）
  */
-export async function isWindowAlive(sourceId: string): Promise<boolean> {
+export async function isWindowAlive(
+  sourceId: string,
+  windowTitle?: string,
+): Promise<boolean> {
   try {
     const sources = await desktopCapturer.getSources({
       types: ['window'],
       thumbnailSize: { width: 0, height: 0 },
     });
-    return sources.some((s) => s.id === sourceId);
+    
+    // 优先匹配 sourceId
+    const byId = sources.some((s) => s.id === sourceId);
+    if (byId) return true;
+    
+    // 备用：标题模糊匹配（如果提供了 windowTitle）
+    if (windowTitle) {
+      const byTitle = sources.some((s) => {
+        // 精确匹配
+        if (s.name === windowTitle) return true;
+        // 模糊匹配：source.name 包含 windowTitle 的核心部分
+        // 例如：windowTitle="Endfield" 可以匹配 "Endfield [60 FPS]"
+        const normalizedSource = s.name.toLowerCase();
+        const normalizedTitle = windowTitle.toLowerCase();
+        return normalizedSource.includes(normalizedTitle);
+      });
+      if (byTitle) {
+        console.log(`[window-watch] 窗口 id 匹配失败，但标题匹配成功：${windowTitle}`);
+        return true;
+      }
+    }
+    
+    return false;
   } catch {
     // 枚举失败时保守判断为"已消失"，避免对不存在的窗口反复重启
     return false;
@@ -51,15 +80,18 @@ export async function isWindowAlive(sourceId: string): Promise<boolean> {
  * 启动窗口存活检测轮询。
  *
  * @param sourceId    目标窗口的 desktopCapturer source id（必须以 "window:" 开头）
+ * @param windowTitle 目标窗口的标题（可选，用于模糊匹配备用检测）
  * @param onGone      目标窗口消失时的回调（仅触发一次）
  * @param isStopped   外部停止守卫，返回 true 时跳过检测（防止与主动停止竞争）
  * @returns           WindowWatcher，调用 stop() 可提前终止轮询
  */
 export function startWindowWatcher(
   sourceId: string,
+  windowTitle: string | undefined,
   onGone: () => void,
   isStopped: () => boolean,
 ): WindowWatcher {
+  let consecutiveMisses = 0;
   let timer: ReturnType<typeof setInterval> | null = setInterval(async () => {
     if (isStopped()) {
       // 外部已主动停止，清理自身
@@ -72,11 +104,37 @@ export function startWindowWatcher(
         types: ['window'],
         thumbnailSize: { width: 0, height: 0 },
       });
-      const alive = sources.some((s) => s.id === sourceId);
+      
+      // 检测窗口是否存在（优先 id 匹配，备用标题匹配）
+      const alive = sources.some((s) => {
+        // 精确匹配 sourceId
+        if (s.id === sourceId) return true;
+        
+        // 备用：标题模糊匹配
+        if (windowTitle) {
+          const normalizedSource = s.name.toLowerCase();
+          const normalizedTitle = windowTitle.toLowerCase();
+          return normalizedSource.includes(normalizedTitle);
+        }
+        
+        return false;
+      });
+      
       if (!alive) {
-        console.log(`[window-watch] 目标窗口消失（${sourceId}），触发优雅停止`);
-        if (timer !== null) { clearInterval(timer); timer = null; }
-        onGone();
+        consecutiveMisses++;
+        console.log(`[window-watch] 窗口未找到（${sourceId}），连续失败次数：${consecutiveMisses}/${MAX_CONSECUTIVE_MISSES}`);
+        
+        if (consecutiveMisses >= MAX_CONSECUTIVE_MISSES) {
+          console.log(`[window-watch] 目标窗口消失（${sourceId}），触发优雅停止`);
+          if (timer !== null) { clearInterval(timer); timer = null; }
+          onGone();
+        }
+      } else {
+        // 重置连续失败计数
+        if (consecutiveMisses > 0) {
+          console.log(`[window-watch] 窗口恢复（${sourceId}），连续失败次数已重置`);
+        }
+        consecutiveMisses = 0;
       }
     } catch (err) {
       // 枚举失败（如权限变更）不中断录制，等下一轮

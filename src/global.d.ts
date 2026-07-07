@@ -79,6 +79,14 @@ interface ElectronBridge {
     onError: (cb: (err: import('./types/recorder').RecorderError) => void) => void;
     /** 移除录制异常中止回调 */
     offError: () => void;
+    /** 获取本地持久化的待补传录制列表 */
+    getPendingRecordings: () => Promise<import('./types/recorder').PendingRecording[]>;
+    /** 启动补传单条持久化录制 */
+    resumePending: (sessionId: string, authToken: string) => Promise<void>;
+    /** 注册补传进度更新回调（复用 progress 通道） */
+    onPendingUpdate: (cb: (list: import('./types/recorder').PendingRecording[]) => void) => void;
+    /** 移除补传进度更新回调 */
+    offPendingUpdate: () => void;
   };
 
   /** 推送最新 JWT token 给主进程，token 无感刷新后调用，防止录制上传用过期 token */

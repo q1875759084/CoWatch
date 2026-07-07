@@ -15,7 +15,9 @@
 
 **身份方案：** 注册登录账号体系，JWT 双 Token（短期 `accessToken` 存内存/LS + 长期 `refreshToken` 存 HttpOnly Cookie），前端 axios 拦截器实现无感刷新。
 
-**会员与房间等级：** 两级会员 `vip:basic` / `vip:pro`，admin 通过 Dashboard 手动赋予。功能权限绑定**房间等级**（`rooms.plan_level: 'free' | 'vip:basic' | 'vip:pro'`）而非用户等级；房间创建时继承房主最高 plan；房主会员过期后每日凌晨 3:00 降级 job 检查，无独立订阅来源时降为 `free`；Lobby 拿到 `planLevel=free` 时渲染过期遮挡页。
+**会员体系：** 两级会员，`vip:basic`（普通会员）和 `vip:pro`（高级会员），存储在 `user_subscriptions` 表（plan 字段为字符串）。等级继承：`vip:pro` 自动满足所有 `vip:basic` 校验（后端 `planGuard.ts` 的 `PLAN_HIERARCHY` 数值表实现）。内测期间不开放前端充值入口，admin 通过 dashboard 手动赋予（`POST /api/admin/cowatch/users/:userId/plans`）。
+
+**房间等级体系：** 功能权限绑定**房间等级**（`rooms.plan_level: 'free' | 'vip:basic' | 'vip:pro'`），而非直接绑定用户等级。房间在创建时继承房主当前最高会员等级；房主会员过期后每日凌晨 3:00 降级 job（`jobs/roomDowngrade.ts`）自动检查并降级为 `free`（不可用状态）。`room_subscriptions` 表统一管理订阅来源（`user_membership` / `admin_grant` / `room_package`），`admin_grant` 和 `room_package` 来源的有效订阅不受用户会员状态影响。后端 `requireRoomActive()` 中间件守卫操作型接口，`plan_level=free` 时 403；`GET /:roomId` 不挂守卫，前端 Lobby 拿到 `planLevel=free` 时渲染过期遮挡页。Admin 可通过 Dashboard 房间管理页手动设置房间等级（`POST /api/admin/cowatch/rooms/:roomId/plan-level`）。
 
 ### 功能模块
 
@@ -23,8 +25,16 @@
 |------|------|------|
 | 登录/注册 | `/auth` | 账号注册与登录 |
 | Dashboard | `/` | 我的房间列表、创建/加入房间入口；顶栏用户信息面板（hover 弹出：头像（可换图）+ 昵称（可改名）+ uid + 退出登录） |
-| 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板 + 进度条 Tag 标注（主控在时间轴打标注，点击跳转并同步给所有成员）+ 鼠标共享（Canvas PainterLayer 蒙层，多端实时同步光标位置）+ 协同绘制（绘制模式下按住左键画笔迹，WS 广播同步，支持黑/白/红三色，清空画布） |
+| 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板（合并了原 lobby 和 watch 两个页面）+ 进度条 Tag 标注 + 鼠标共享（Canvas PainterLayer 蒙层，多端实时同步光标位置）+ 协同绘制（绘制模式下按住左键画笔迹，WS 广播同步，支持黑/白/红三色）+ 开庭记录（右上角浮层，主控可编辑，节流 1000ms WS 广播同步，全员可导出为 txt）+ 聊天（右上角独立浮层按钮，全员可发，WS 广播含发送者自身，内存缓存最近 50 条，新成员加入时通过 ROOM_STATE 下发历史记录，不落库）+ 复盘/自由模式（非主控专属：跟随模式默认跟随主控进度；自由模式可独立操作播放器、切换房间内任意视频，不显示/发送画布笔迹；主控可一键拉回所有人至当前状态并强制恢复跟随） |
 | Electron 客户端录制 | 房间主页内悬浮控件 | **`vip:pro` 专属**。ffmpeg HLS 实时编码 → chokidar 监听切片 → `net.fetch` 上传后端 → COS。Windows 音频：`audio_capture.exe`（WASAPI Loopback）pipe:0 传入 FFmpeg；macOS 静音。视频：Windows 全屏 ddagrab / 窗口 gfxcapture（GPU 零拷贝），macOS avfoundation。健壮性：窗口录制双层检测（crash 时单次枚举 + 5s 轮询兜底），目标窗口消失时优雅 stop()。代码：`electron/handlers/recorder/`（index.ts + window-watch.ts）。|
+
+### 控制权机制
+
+- **指定模式（唯一模式）**：某成员为进度控制者（主控），`canControl` 只判断 `controller_id === userId`
+- 自由模式已移除（多发送方造成竞态，与防回环计数器冲突，弊大于利）
+- **主控自动分配**：第一个进入房间的人自动成为主控（`onlineIds.size === 1` 时 `setControllerId` 并广播 `CONTROL_CHANGED`）
+- **转让权限**：主控和管理员均可触发 `TRANSFER_CONTROL`（`canControl(userId, room) || is_admin === 1`）
+- **离线兜底**：主控断线时按优先级转让 → 在线管理员 → 任意在线成员 → null（房间已空时）
 
 ### 技术栈
 
@@ -32,7 +42,7 @@
 |----|------|
 | 前端 | React 19 + Webpack 5 + TypeScript + antd 5.x，Node 20 |
 | 后端 | Node.js 20 + Express + ws 库 + **PostgreSQL**（postgres.js 连接池），用 `tsx` 直接运行 TS |
-| 视频存储 | 腾讯云 COS（预签名直传）或本地 `/uploads` 目录（开发环境） |
+| 视频存储 | 腾讯云 COS（后端代理中转上传）或本地 `/uploads` 目录（开发环境）；HLS 切片通过后端代理路径分发（`/api/rooms/.../segments/seg.ts` → 后端鉴权 → 302 → CDN），不在 m3u8 中直接暴露 CDN 签名 URL |
 | 头像存储 | 腾讯云 COS static 桶（public read），CDN 域名 `static.daibao.site`，路径 `avatar/{userId}.jpg`；无需签名直接访问；本地开发写入 `uploads/avatar/` 目录 |
 | 实时通信 | WebSocket（ws 库），服务端广播房间事件 |
 
@@ -44,6 +54,19 @@
 - WS 连接时发 `MEMBER_JOINED`（含 `isOnline: true`），断线时发 `MEMBER_OFFLINE`（只标记离线，不删除）
 - 成员列表含 `isOnline` 字段，离线成员仍保留在列表中（灰显）
 - `MEMBER_LEFT` 保留给未来退群/踢人功能，当前不触发
+
+## 部署与环境变量体系
+
+- **部署由 `infra` 仓库统一管理**，前后端各自触发 `repository_dispatch` 事件 → `infra/.github/workflows/deploy-cowatch.yml` 执行部署；CoWatch 和 CoWatch-backend 仓库**不含任何部署逻辑**
+- **服务器是无状态的**，不存在任何 `.env` 文件，不需要也不应该 SSH 到服务器手动维护环境变量
+- **敏感变量唯一存储位置：infra 仓库的 GitHub Actions Secrets**（`JWT_SECRET`、`PG_PASSWORD`、`COS_SECRET_ID` 等），通过 `envs` 加密通道注入容器，不出现在命令行/日志
+- **非敏感变量**（如 `PORT`、`NODE_ENV`）直接硬编码在 `infra/cowatch/docker-compose.yml` 的 `environment:` 块中
+- **新增环境变量的完整流程**：
+  1. 敏感值 → infra 仓库 Settings → Secrets 新增
+  2. `deploy-cowatch.yml` 的 `env:` 块和 `envs:` 列表追加该变量名
+  3. `infra/cowatch/docker-compose.yml` 的 `backend.environment:` 中用 `- VAR=${VAR}` 引用
+  4. 非敏感变量跳过前两步，直接在第 3 步硬编码值
+- `.env` 文件**仅用于本地开发**（已加入 `.gitignore`），线上完全无关，不要在分析线上问题时将其纳入考虑
 
 ## 关键约定
 

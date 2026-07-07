@@ -1,21 +1,18 @@
 /**
- * Electron 实时录制主进程处理器
+ * Electron 实时录制主进程处理器（协调层）
  *
- * 职责：
+ * 职责（重构后）：
  *   - 编码器检测（h264_nvenc → h264_amf → h264_qsv → libx264 兜底）
  *   - 窗口/整屏列表获取
- *   - ffmpeg HLS 录制生命周期管理（start / stop / crash 自动重启）
- *   - 切片文件监听 + 上传到后端（后端再转存 COS）
+ *   - 协调三层：recording / transcoding / upload
+ *   - 录制开始/停止生命周期管理
+ *   - 切片文件监听（委托 transcoding 层）
  *   - 录制结束调用 /recording/finish 接口
  *
- * 切片上传流程（双队列容错架构）：
- *   ffmpeg 生成 seg*.ts → chokidar add → uploadSegment（fire-and-forget）
- *     → doUpload（pRetry 4 次）
- *       ├─ 成功：更新 segmentKeys / 删除临时文件
- *       └─ 全败：推入 pendingQueue
- *   retryTimerRef（setInterval 30s）→ isRetryScheduled 互斥 → triggerRetryQueue
- *     → 指数退避（10s→20s→40s→80s→160s）+ 批量补录（最多 RETRY_BATCH 片）
- *     → 连续全败 MAX_FAIL_ROUNDS 轮（质：网络不可用）或 积压 MAX_PENDING 片（量：速率跟不上）→ abortRecording
+ * 三层架构：
+ *   recording/  → FFmpeg 录制，管理临时目录
+ *   transcoding/ → 逐片转码（chokidar 监听 → 串行转码队列）
+ *   upload/      → 串行上传队列 + 指数退避
  *
  * IPC 通道（ipcMain.handle / webContents.send）：
  *   recorder:detectEncoder  → detectEncoder()
@@ -28,125 +25,89 @@
 
 import fs from 'fs';
 import path from 'path';
-import { spawn, ChildProcess } from 'child_process';
-
-import { app, desktopCapturer, ipcMain, net, BrowserWindow } from 'electron';
-import ffmpegPath from 'ffmpeg-static';
-import chokidar, { FSWatcher } from 'chokidar';
-import pRetry from 'p-retry';
+import { app, desktopCapturer, ipcMain, BrowserWindow, net } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 
 import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../../src/types/recorder';
-import { startWindowWatcher, isWindowAlive } from './window-watch';
-import type { WindowWatcher } from './window-watch';
+
+// ─── 三层模块 ──────────────────────────────────────────────────────────────────
+import {
+  startRecording,
+  stopRecording,
+  restartRecording,
+  checkWindowAlive,
+  setEncoderInfo,
+  getTmpDir,
+  isRecording,
+} from './recording';
+
+import {
+  startTranscodingWatcher,
+  stopTranscodingWatcher,
+  enqueueExistingRawFiles,
+  waitForTranscodeQueue,
+} from './transcoding';
+
+import {
+  initUploader,
+  enqueueUpload,
+  enqueueRawUpload,
+  enqueueMissingFiles,
+  waitForUploadQueue,
+  flushPendingQueue,
+  cleanupUploader,
+  updateAuthToken,
+  getActiveUploads,
+  getPendingQueue,
+  getSegmentKeys,
+  getUploadedCount,
+} from './upload';
+
+import {
+  persistRecording,
+  listPendingRecordings,
+  resumeUpload,
+} from './persistence';
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
-
-/** 每个 HLS 切片的目标时长（秒）——与后端 hlsService.ts 保持一致 */
-const HLS_SEGMENT_DURATION = 10;
 
 /** 最长录制时长（毫秒），到时自动停止 */
 const MAX_RECORD_MS = 2 * 60 * 60 * 1000;
 
-/**
- * doUpload 内 pRetry 重试次数（共 2 次尝试 = 1 次首发 + 1 次 retry）。
- * 首次上传只处理瞬时抖动（1s 间隔），持续故障快速失败进 pendingQueue，
- * 交由 triggerRetryQueue 的指数退避兜底，避免多次重试长时间阻塞切片写入。
- * 两路合计重试能力不减弱：triggerRetryQueue 里 doUpload 同样走 pRetry。
- */
-const UPLOAD_MAX_RETRIES = 1;
-
-/** 补录队列：整批全败的连续轮次上限，超过则判定为持续不可用，触发 abortRecording */
-const MAX_FAIL_ROUNDS = 5;
-/**
- * 补录队列容量上限：网络可用但上传速率持续低于录制速率时触发 abortRecording。
- * 推导：ffmpeg 每 10s 一片，每个 setInterval 周期（30s）最多产生 3 片进入 pendingQueue。
- * 设定为 MAX_FAIL_ROUNDS × 3 = 15，语义：积压量等价于"5 轮周期内完全无消化"，
- * 与 reround 条件覆盖同一时间窗口（≈2.5 分钟），形成质量（reround）和数量（积压）的双保险。
- */
-const MAX_PENDING = 15;
-/** 每次补录最多处理的切片数（避免单次补录耗时过长） */
-const RETRY_BATCH = 5;
-/** 补录退避基础时间（ms），指数退避基准：10s, 20s, 40s, 80s, 160s */
-const RETRY_BASE_MS = 10_000;
+/** Stop 时的切片积压阈值：≤5 片等排空，>5 片持久化不等待 */
+const STOP_PENDING_THRESHOLD = 5;
 
 /** 编码器候选列表，依次探测，取第一个可用的 */
 const ENCODER_CANDIDATES = ['h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'] as const;
 
-// ─── 模块级录制状态 ───────────────────────────────────────────────────────────
+// ─── 模块级状态 ─────────────────────────────────────────────────────────────────
 
 /** 当前会话 ID，录制开始时生成，结束后清空 */
 let sessionId = '';
-/** 录制临时目录（存放 ffmpeg 生成的 seg*.ts 和 index.m3u8） */
+/** 录制临时目录（存放 ffmpeg 生成的 seg*.ts 和转码后的 seg*_opt.ts） */
 let tmpDir = '';
-/** 当前 ffmpeg 子进程 */
-let ffmpegProcess: ChildProcess | null = null;
-/** 已上传成功的 objectKey 列表（有序） */
-let segmentKeys: string[] = [];
-/**
- * 补录队列：pRetry 全败后入队，等待 triggerRetryQueue 补传。
- * 替代原 pendingSegments，配合双队列容错架构。
- */
-let pendingQueue: string[] = [];
-/** 已上传切片数量，用于 crash 重启时的 -hls_start_number */
-let uploadedCount = 0;
-/** 正在进行中的上传 Promise 集合（用于 stop 时等待所有上传完成） */
-const activeUploads = new Set<Promise<void>>();
-/** 已入队上传的文件名集合（用于 stop 时去重扫描） */
-const queuedFileNames = new Set<string>();
 /** 计时器：每秒推 recorder:tick */
 let tickTimer: ReturnType<typeof setInterval> | null = null;
 /** 定时器：最长录制时间到后自动停止 */
 let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-/**
- * 补录定时器：每 30s 由 setInterval 检查，若 isRetryScheduled=false 则触发 triggerRetryQueue。
- * isRetryScheduled 互斥判断前置在 setInterval 回调里（不在 triggerRetryQueue 内部），
- * 保证退避期间不被外部时钟打断。
- */
-let retryTimerRef: ReturnType<typeof setInterval> | null = null;
-/**
- * 窗口存活检测定时器（仅窗口录制模式下启动）。
- * 实现见 window-watch.ts。
- */
-let windowWatcher: WindowWatcher | null = null;
-/**
- * 补录队列互斥锁：triggerRetryQueue 运行期间（含退避等待）置为 true。
- * setInterval 回调检查此标志，为 true 时直接跳过，不重复触发。
- */
-let isRetryScheduled = false;
-/**
- * 补录整批全败的连续轮次计数。
- * 有任意一片成功即归零（代表网络可用只是不稳定）。
- * 达到 MAX_FAIL_ROUNDS 时触发 abortRecording。
- */
-let consecutiveFailRounds = 0;
-/** chokidar 文件监听器 */
-let watcher: FSWatcher | null = null;
 /** 用户主动停止标志，区分正常停止和 ffmpeg crash */
 let isUserStopped = false;
 /** ffmpeg crash 重启次数，超过上限后放弃重启 */
 let crashRestartCount = 0;
-/** crash 重启最大次数 */
-const MAX_CRASH_RESTARTS = 3;
 /** 录制开始时间戳（ms），用于计算时长 */
 let recordStartTime = 0;
 /** 当前房间 ID，上传和 finish 接口需要 */
 let currentRoomId = '';
 /**
  * 当前用户的 JWT AccessToken，上传接口鉴权用。
- *
- * 设计说明：
- *   渲染进程通过 auth:setToken IPC 主动推送 token，覆盖场景：
- *   1. 录制开始时 → start() 传入当前 token
- *   2. token 无感刷新后 → 渲染进程调用 updateAuthToken(newToken)
- *   主进程不主动请求，始终使用最近一次推送的 token。
  */
 let currentAuthToken = '';
 /** 当前录制源 id（desktopCapturer source id），crash 重启时需要 */
 let currentSourceId = '';
+/** 当前录制窗口的标题（用于 window-watch 备用检测），crash 重启时需要 */
+let currentWindowTitle = '';
 /**
  * macOS avfoundation 视频设备索引缓存（start 时通过枚举确定，crash 重启时复用）。
- * -1 表示未初始化，spawnFfmpeg 会用 screenSeq + 1 做兜底。
  */
 let cachedAvfIndex = -1;
 /** 后端 origin，由 main.ts 通过 setApiOrigin 注入 */
@@ -155,11 +116,6 @@ let apiOrigin = 'http://localhost:3002';
 let detectedEncoder = 'libx264';
 /** 是否为软件编码 */
 let isSoftwareEncoder = false;
-/**
- * audio_capture 子进程（Windows 系统音频录制）。
- * null = 未启动或已终止
- */
-let audioCaptureProcess: ChildProcess | null = null;
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -167,86 +123,20 @@ export function setApiOriginForRecorder(origin: string): void {
   apiOrigin = origin;
 }
 
-/**
- * 更新主进程持有的 JWT token。
- * 由 main.ts 在 token 刷新时调用（渲染进程通过 auth:setToken IPC 触发）。
- */
 export function setAuthTokenForRecorder(token: string): void {
   currentAuthToken = token;
+  updateAuthToken(token);
 }
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
-
-/**
- * 获取 ffmpeg 可执行文件的实际路径。
- *
- * 平台策略：
- *   macOS  → 始终使用 ffmpeg-static（avfoundation 捕获，无需 ddagrab）
- *   Windows → 优先使用 electron/bin/ffmpeg.exe（gyan.dev full build，内置 ddagrab filter）
- *             若不存在则降级到 ffmpeg-static（不含 ddagrab，会录制失败）
- *
- * Windows ffmpeg.exe 来源：
- *   从 https://www.gyan.dev/ffmpeg/builds/ 下载 ffmpeg-release-full.7z
- *   解压后取 bin/ffmpeg.exe 放入 electron/bin/
- *   ddagrab 在 full build 中作为 filter 内置，无需自编译。
- *
- * Windows ffmpeg.exe 放置位置：
- *   dev/preview 模式：electron/bin/ffmpeg.exe
- *   packaged 模式：resources/bin/ffmpeg.exe（由 electron-builder extraResources 打包）
- */
-function getFfmpegPath(): string {
-  // ── Windows：优先用 gyan.dev full build（含 ddagrab filter）────────────
-  if (process.platform === 'win32') {
-    const binName = 'ffmpeg.exe';
-
-    if (app.isPackaged) {
-      // packaged 模式：electron-builder extraResources 将 electron/bin/ 打包到 resources/bin/
-      const bundledPath = path.join(process.resourcesPath, 'bin', binName);
-      if (fs.existsSync(bundledPath)) {
-        console.log('[recorder] 使用 gyan.dev full build ffmpeg（packaged）：', bundledPath);
-        return bundledPath;
-      }
-    } else {
-      // dev/preview 模式：从项目根 electron/bin/ 读取
-      // __dirname 在 webpack 编译后指向 dist-electron/，向上一级是项目根
-      const localBinPath = path.join(__dirname, '..', 'electron', 'bin', binName);
-      if (fs.existsSync(localBinPath)) {
-        console.log('[recorder] 使用 gyan.dev full build ffmpeg（dev）：', localBinPath);
-        return localBinPath;
-      }
-      console.warn('[recorder] electron/bin/ffmpeg.exe 不存在，降级到 ffmpeg-static（不含 ddagrab，录制将失败）');
-    }
-  }
-
-  // ── macOS / Linux / Windows 降级：使用 ffmpeg-static ────────────────────
-  // ffmpeg-static 在 webpack 打包后路径可能变为相对路径或被内联，
-  // 需要从 package.json bin 字段定位真实二进制
-  let raw = ffmpegPath as string;
-
-  if (!path.isAbsolute(raw)) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pkg = require('ffmpeg-static/package.json') as { bin: string };
-      raw = path.join(path.dirname(require.resolve('ffmpeg-static/package.json')), pkg.bin);
-    } catch {
-      raw = 'ffmpeg';
-    }
-  }
-
-  if (app.isPackaged) {
-    // ffmpeg-static 二进制被 electron-builder asarUnpack 解包到 app.asar.unpacked
-    return raw.replace('app.asar', 'app.asar.unpacked');
-  }
-  return raw;
-}
 
 /**
  * 推送进度事件到所有渲染进程窗口。
  */
 function pushProgress(): void {
   const info: RecordingProgress = {
-    uploaded: uploadedCount,
-    pending: pendingQueue.length,
+    uploaded: getUploadedCount(),
+    pending: getPendingQueue().length,
   };
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send('recorder:progress', info);
@@ -265,178 +155,43 @@ function formatDuration(seconds: number): string {
 
 // ─── 编码器检测 ───────────────────────────────────────────────────────────────
 
-/**
- * 依次探测 ENCODER_CANDIDATES，返回第一个可用的编码器。
- * 探测方式：用 lavfi null source 生成 1 秒视频，检查返回码。
- */
 async function detectEncoder(): Promise<EncoderDetectResult> {
-  const ffmpeg = getFfmpegPath();
+  // 优先用系统 ffmpeg（含 ddagrab）
+  const ffmpegPaths = [
+    path.join(__dirname, '..', 'electron', 'bin', 'ffmpeg.exe'),   // dev
+    path.join(process.resourcesPath ?? '', 'bin', 'ffmpeg.exe'),   // packaged
+    'ffmpeg',                                                       // PATH
+  ];
 
-  for (const encoder of ENCODER_CANDIDATES) {
-    const result = await new Promise<boolean>((resolve) => {
-      const proc = spawn(ffmpeg, [
-        '-f', 'lavfi', '-i', 'nullsrc', '-t', '1',
-        '-c:v', encoder, '-f', 'null', '-',
-      ], { stdio: 'ignore' });
-      proc.on('close', (code) => resolve(code === 0));
-      proc.on('error', () => resolve(false));
-    });
-
-    if (result) {
-      detectedEncoder = encoder;
-      isSoftwareEncoder = encoder === 'libx264';
-      console.log(`[recorder] 编码器检测完成：${encoder}，软编=${isSoftwareEncoder}`);
-      return { encoder, isSoftware: isSoftwareEncoder };
+  for (const enc of ENCODER_CANDIDATES) {
+    for (const ffmpeg of ffmpegPaths) {
+      const result = await new Promise<boolean>((resolve) => {
+        const proc = require('child_process').spawn(ffmpeg, [
+          '-f', 'lavfi', '-i', 'nullsrc', '-t', '1',
+          '-c:v', enc, '-f', 'null', '-',
+        ], { stdio: 'ignore' });
+        proc.on('close', (code: number) => resolve(code === 0));
+        proc.on('error', () => resolve(false));
+      });
+      if (result) {
+        detectedEncoder = enc;
+        isSoftwareEncoder = enc === 'libx264';
+        setEncoderInfo(enc, isSoftwareEncoder);
+        console.log(`[recorder] 编码器检测完成：${enc}，软编=${isSoftwareEncoder}`);
+        return { encoder: enc, isSoftware: isSoftwareEncoder };
+      }
     }
   }
 
-  // 兜底：所有都失败时默认 libx264（通常不会到这里）
   detectedEncoder = 'libx264';
   isSoftwareEncoder = true;
+  setEncoderInfo('libx264', true);
   return { encoder: 'libx264', isSoftware: true };
-}
-
-/**
- * 获取 audio_capture 可执行文件路径（仅 Windows）。
- *
- * audio_capture 是独立可执行文件，通过 WASAPI Loopback 采集系统声音，
- * 输出原始 PCM（s16le）到 stdout，由调用方 pipe 到 FFmpeg stdin。
- *
- * 来源：https://github.com/huxinhai/audio-capture/releases
- *   下载 audio_capture-windows-x64，重命名为 audio_capture.exe，放入 electron/bin/
- *
- * macOS 静音录制，始终返回 null。
- */
-function getAudioCapturePath(): string | null {
-  // macOS 不使用 audio_capture，静音录制
-  if (process.platform !== 'win32') return null;
-
-  const binName = 'audio_capture.exe';
-
-  if (app.isPackaged) {
-    const bundledPath = path.join(process.resourcesPath, 'bin', binName);
-    if (fs.existsSync(bundledPath)) return bundledPath;
-  } else {
-    const localPath = path.join(__dirname, '..', 'electron', 'bin', binName);
-    if (fs.existsSync(localPath)) return localPath;
-  }
-
-  console.warn('[recorder] audio_capture.exe 未找到，将静音录制（从 https://github.com/huxinhai/audio-capture/releases 下载并放入 electron/bin/）');
-  return null;
-}
-
-/**
- * 动态枚举 avfoundation 视频设备，找到对应 desktopCapturer sourceId 的实际索引。
- *
- * 问题背景：
- *   avfoundation 视频设备列表不固定。文档示例写的是 [0]=FaceTime摄像头、[1]=主屏，
- *   但实际上：
- *   - 无摄像头的 Mac（如 Mac mini）：[0]=主屏、[1]=第二屏
- *   - 有摄像头但摄像头被禁用：视频设备列表里无摄像头项
- *   - 外接多屏时屏幕数量动态变化
- *   因此固定用索引推算会导致 Invalid device index。
- *
- * 关键陷阱：
- *   desktopCapturer 在 macOS 返回的屏幕 id 格式是 "screen:DISPLAY_ID:0"，
- *   其中 DISPLAY_ID 是系统内部的 CGDirectDisplayID（如 69732833），
- *   而不是屏幕的枚举序号（0、1、2…）。
- *   avfoundation 的 "Capture screen M" 中 M 是 0-indexed 枚举序号，
- *   与 DISPLAY_ID 完全无关，不能直接解析 sourceId 中的数字来匹配。
- *
- * 解决方案：
- *   由调用方在 desktopCapturer.getSources 结果中找到目标 sourceId 的位置（0-indexed rank），
- *   将 rank 作为 screenRank 参数传入，与 avfoundation "Capture screen rank" 匹配。
- *
- * 兜底策略：
- *   - 枚举失败 / 找不到对应屏幕：返回 screenRank（avfoundation 条目数 = 屏幕数，rank 即索引）
- *   - 窗口录制（window: 前缀）：screenRank 传 0（降级为主屏捕获）
- *
- * @param screenRank sourceId 在 desktopCapturer 屏幕列表中的 0-indexed 位置
- */
-async function resolveAvfIndex(screenRank: number): Promise<number> {
-  const ffmpeg = getFfmpegPath();
-
-  // 无摄像头时 avfoundation 直接从 [0] 开始列屏幕，rank 即为索引，作为兜底值
-  const fallback = screenRank;
-
-  return new Promise<number>((resolve) => {
-    let stderr = '';
-    const proc = spawn(ffmpeg, [
-      '-list_devices', 'true',
-      '-f', 'avfoundation',
-      '-i', 'dummy',
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
-
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-
-    proc.on('close', () => {
-      // stderr 示例（视频设备区段）：
-      //   [AVFoundation indev @ ...] AVFoundation video devices:
-      //   [AVFoundation indev @ ...] [0] FaceTime HD Camera
-      //   [AVFoundation indev @ ...] [1] Capture screen 0
-      //   [AVFoundation indev @ ...] [2] Capture screen 1
-      //   [AVFoundation indev @ ...] AVFoundation audio devices:
-      //
-      // 或无摄像头时：
-      //   [AVFoundation indev @ ...] [0] Capture screen 0
-      //   [AVFoundation indev @ ...] [1] Capture screen 1
-
-      // 只解析视频设备区段（音频设备区段之前的内容）
-      const videoSection = stderr.split(/AVFoundation audio devices/i)[0] ?? stderr;
-
-      // 匹配 "[N] Capture screen M" 格式，N = avfoundation 索引，M = 屏幕枚举序号（0-indexed）
-      const pattern = /\[(\d+)\]\s+Capture screen\s+(\d+)/gi;
-      let match: RegExpExecArray | null;
-      while ((match = pattern.exec(videoSection)) !== null) {
-        const avfIdx = parseInt(match[1]!, 10);
-        const screenNum = parseInt(match[2]!, 10);
-        if (screenNum === screenRank) {
-          console.log(`[recorder] avfoundation 设备枚举：Capture screen ${screenRank} → 索引 ${avfIdx}`);
-          resolve(avfIdx);
-          return;
-        }
-      }
-
-      // 找不到匹配项（可能是新系统格式变化），使用兜底值
-      console.warn(`[recorder] avfoundation 未找到 Capture screen ${screenRank}，使用兜底索引 ${fallback}`);
-      console.debug('[recorder] avfoundation 枚举输出：\n', videoSection);
-      resolve(fallback);
-    });
-
-    proc.on('error', () => {
-      console.warn(`[recorder] avfoundation 枚举失败，使用兜底索引 ${fallback}`);
-      resolve(fallback);
-    });
-
-    // 5s 超时保护
-    const killTimer = setTimeout(() => {
-      try { proc.kill(); } catch (_) { /* ignore */ }
-      console.warn(`[recorder] avfoundation 枚举超时，使用兜底索引 ${fallback}`);
-      resolve(fallback);
-    }, 5000);
-    // 正常退出时清除超时，避免 5s 后无意义地 kill 已退出的进程
-    proc.on('close', () => clearTimeout(killTimer));
-    proc.on('error', () => clearTimeout(killTimer));
-  });
 }
 
 // ─── 窗口列表 ──────────────────────────────────────────────────────────────────
 
-/**
- * 获取可录制的窗口和整屏列表。
- *
- * macOS 注意事项：
- *   - 首次调用前用 systemPreferences.askForMediaAccess('screen') 主动请求授权，
- *     未授权时 desktopCapturer.getSources 会抛出 "Failed to get sources."
- *   - screen 类型 source 在独占全屏应用（游戏）场景下 thumbnail 可能为黑图，属正常行为
- *   - window 类型过滤掉 thumbnail 尺寸为 0 的条目（最小化窗口）
- */
 async function getSources(): Promise<RecorderSource[]> {
-  // macOS 注意：desktopCapturer.getSources 在权限未授予时抛出 "Failed to get sources."
-  // 权限弹窗由系统在首次调用时自动弹出（需要进程重启后生效）
-  // getMediaAccessStatus('screen') 对 Electron 裸进程无效，不做预检
   const sources = await desktopCapturer.getSources({
     types: ['screen', 'window'],
     thumbnailSize: { width: 256, height: 144 },
@@ -444,9 +199,7 @@ async function getSources(): Promise<RecorderSource[]> {
 
   return sources
     .filter((s) => {
-      // screen 类型始终保留（即使 thumbnail 为黑图，独占全屏场景下属正常）
       if (s.id.startsWith('screen:')) return true;
-      // window 类型：过滤掉 thumbnail 为空或尺寸为 0 的条目（最小化窗口）
       return s.thumbnail && s.thumbnail.getSize().width > 0;
     })
     .map((s) => ({
@@ -457,620 +210,15 @@ async function getSources(): Promise<RecorderSource[]> {
     }));
 }
 
-// ─── 切片上传 ──────────────────────────────────────────────────────────────────
-
-/**
- * 底层上传单个切片：发起 net.fetch + pRetry，成功 resolve，彻底失败时 reject。
- * 供 uploadSegment（录制流）和 triggerRetryQueue（补录流）共同调用。
- * 成功后自动删除本地临时文件。
- */
-async function doUpload(filePath: string): Promise<void> {
-  const segmentName = path.basename(filePath);
-  const objectKey = `cowatch/${currentRoomId}/recordings/${sessionId}/${segmentName}`;
-
-  await pRetry(
-    async () => {
-      const buffer = fs.readFileSync(filePath);
-      // 15s 超时：防止后端宕机时 TCP 进入 TIME_WAIT 导致 fetch 永久 hang
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15_000);
-      let response: Response;
-      try {
-        response = await net.fetch(
-          `${apiOrigin}/api/rooms/${currentRoomId}/recording/segment`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'video/MP2T',
-              'X-Object-Key': objectKey,
-              ...(currentAuthToken ? { 'Authorization': `Bearer ${currentAuthToken}` } : {}),
-            },
-            body: buffer,
-            duplex: 'half',
-            signal: controller.signal,
-          } as RequestInit,
-        );
-      } finally {
-        clearTimeout(timeoutId);
-      }
-
-      if (!response.ok) {
-        throw new Error(`上传失败 HTTP ${response.status}：${segmentName}`);
-      }
-    },
-    {
-      retries: UPLOAD_MAX_RETRIES,
-      factor: 2,
-      minTimeout: 1000,
-      maxTimeout: 8000,
-      randomize: true,
-      onFailedAttempt: (ctx) => {
-        console.warn(
-          `[recorder] 切片上传失败，第 ${ctx.attemptNumber} 次：${segmentName}，错误：${ctx.error.message}`,
-        );
-      },
-    },
-  );
-
-  // 上传成功：更新状态、删除临时文件
-  segmentKeys.push(objectKey);
-  uploadedCount = segmentKeys.length;
-  fs.unlink(filePath, (err) => {
-    if (err) console.warn('[recorder] 删除临时文件失败：', filePath, err.message);
-  });
-}
-
-/**
- * 录制上传（fire-and-forget）。
- * chokidar 发现新切片时调用，上传失败时将文件路径推入 pendingQueue，不中断录制。
- * 职责：仅负责首次上传（pRetry UPLOAD_MAX_RETRIES 次），不感知补录队列。
- */
-function uploadSegment(filePath: string): void {
-  const segmentName = path.basename(filePath);
-  queuedFileNames.add(segmentName);
-
-  const uploadPromise = doUpload(filePath)
-    .then(() => {
-      pushProgress();
-    })
-    .catch(() => {
-      // pRetry 全部失败：进入补录队列等待 triggerRetryQueue 处理
-      if (isUserStopped) return; // stop 之后不再入队
-      console.error(`[recorder] 切片上传全部失败：${segmentName}，加入 pendingQueue`);
-      if (pendingQueue.length >= MAX_PENDING) {
-        // 积压超限：触发录制中止（不再入队，避免无限膨胀）
-        void abortRecording('网络持续异常，切片积压过多');
-        return;
-      }
-      pendingQueue.push(filePath);
-      pushProgress();
-    })
-    .finally(() => {
-      activeUploads.delete(uploadPromise);
-    });
-
-  activeUploads.add(uploadPromise);
-}
-
-/**
- * 补录队列执行函数（由 retryTimerRef 定时器调用）。
- * 互斥锁 isRetryScheduled 的判断由外部 setInterval 回调前置执行，
- * 本函数不重复判断，职责更单一。
- * 流程：终止判断 → 指数退避 → 批量补传 → 健康状态更新 → 释放锁。
- */
-async function triggerRetryQueue(): Promise<void> {
-  // isUserStopped 兜底（abortRecording 触发后退避期间 stop 可能介入）
-  if (isUserStopped) return;
-  // 无需补传：队列为空且无连续失败记录
-  if (pendingQueue.length === 0 && consecutiveFailRounds === 0) return;
-
-  // 终止条件判断（优先于退避逻辑）
-  if (consecutiveFailRounds >= MAX_FAIL_ROUNDS || pendingQueue.length >= MAX_PENDING) {
-    void abortRecording('网络持续异常，上传已中止');
-    return;
-  }
-
-  isRetryScheduled = true;
-
-  try {
-    // 指数退避 + 随机抖动
-    // consecutiveFailRounds=0（首次补录）时立即执行，无需等待
-    const jitter = Math.random() * 2000;
-    const backoffMs = consecutiveFailRounds === 0
-      ? 0
-      : Math.min(RETRY_BASE_MS * Math.pow(2, consecutiveFailRounds - 1), 160_000) + jitter;
-
-    if (backoffMs > 0) {
-      console.log(`[recorder] 补录退避 ${Math.round(backoffMs / 1000)}s（连续失败轮次：${consecutiveFailRounds}）`);
-      await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
-    }
-
-    if (isUserStopped) return; // 退避期间用户停止录制，放弃补录
-
-    // 取最多 RETRY_BATCH 片进行补录
-    const batch = pendingQueue.splice(0, RETRY_BATCH);
-    if (batch.length === 0) return;
-
-    console.log(`[recorder] 开始补录 ${batch.length} 个切片（队列剩余：${pendingQueue.length}）`);
-
-    let batchHasSuccess = false;
-    for (const filePath of batch) {
-      if (isUserStopped) break;
-      try {
-        await doUpload(filePath);
-        batchHasSuccess = true;
-        console.log(`[recorder] 补录成功：${path.basename(filePath)}`);
-        pushProgress();
-      } catch {
-        // 本批次这片补录失败：重新推回队列头部（保持顺序）
-        pendingQueue.unshift(filePath);
-        console.warn(`[recorder] 补录失败（将重试）：${path.basename(filePath)}`);
-      }
-    }
-
-    if (batchHasSuccess) {
-      // 有任意一片成功 → 网络可用，重置失败轮次
-      consecutiveFailRounds = 0;
-    } else {
-      // 整批全败 → 网络不可用，轮次 +1
-      consecutiveFailRounds += 1;
-      console.warn(`[recorder] 补录整批失败，连续失败轮次：${consecutiveFailRounds}/${MAX_FAIL_ROUNDS}`);
-    }
-  } finally {
-    // 无论成功、失败或异常，都必须释放锁
-    isRetryScheduled = false;
-  }
-}
-
-/**
- * 录制异常中止（网络持续不可用 / 积压超限）。
- * 通知渲染进程 + 调用 cleanup 重置状态。
- * 注意：不等待 activeUploads，直接放弃未完成的上传。
- */
-async function abortRecording(reason: string): Promise<void> {
-  if (isUserStopped) return; // 已经在停止流程中，避免重复触发
-  console.error(`[recorder] 录制中止：${reason}`);
-  isUserStopped = true;
-
-  // 通知渲染进程
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('recorder:error', { reason });
-  }
-
-  await cleanup();
-}
-
-/**
- * 统一清理所有录制资源（定时器 + ffmpeg + watcher + 状态重置）。
- * stop() 和 abortRecording() 均调用此函数。
- * 注意：tmpDir 清理与 finish 接口调用在 stop() 中单独处理，
- *       abortRecording 路径下不调用 finish（无需通知后端生成视频）。
- */
-async function cleanup(): Promise<void> {
-  // 清理定时器
-  if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
-  if (timeoutTimer !== null) { clearTimeout(timeoutTimer); timeoutTimer = null; }
-  if (retryTimerRef !== null) { clearInterval(retryTimerRef); retryTimerRef = null; }
-  if (windowWatcher !== null) { windowWatcher.stop(); windowWatcher = null; }
-
-  // 关闭文件监听
-  if (watcher) { await watcher.close(); watcher = null; }
-
-  // 停止 ffmpeg（若尚未停止）
-  // 正确的停止顺序（Windows，双输入流场景）：
-  // 1. 先停止 audio_capture → pipe:0 关闭，FFmpeg 收到音频流 EOF
-  // 2. 等待 200ms → 让 FFmpeg muxer 完成对 EOF 的消化（时序保护）
-  // 3. 向 ffmpeg stdin 写入 'q' → 触发优雅退出，flush 最后一片 HLS 切片
-  //
-  // 背景：FFmpeg 有 pipe:0（音频）+ lavfi（视频，无限流）两个输入。
-  //   若立即发 'q'，EOF 与 'q' 时序竞争：随机出现尾片丢失（丢片）或多录一段静音（多片）。
-  //   macOS 只有单个 avfoundation 输入，直接 SIGTERM 即可。
-  if (ffmpegProcess) {
-    await new Promise<void>((resolve) => {
-      if (process.platform === 'win32') {
-        // 步骤1：先停止 audio_capture（pipe:0 关闭，FFmpeg 收到音频流 EOF）
-        if (audioCaptureProcess) {
-          try { audioCaptureProcess.kill('SIGINT'); } catch (_) { /* 已退出 */ }
-          audioCaptureProcess = null;
-        }
-
-        // 步骤2：等待 FFmpeg 消化音频 EOF 后再发 'q'
-        //
-        // 问题根因：FFmpeg 有两个输入（pipe:0 音频 + lavfi 视频），lavfi 是无限流。
-        //   若立即发 'q'：pipe:0 EOF 尚未被 FFmpeg 消化，两者时序竞争，
-        //   导致 HLS 尾片要么未 flush（丢片），要么多录一段静音（多片）。
-        //
-        // 修复：等待 200ms 让音频 EOF 先被 muxer 处理，再发 'q' 触发优雅退出，
-        //   确保 FFmpeg 能正确 flush 最后一片 HLS 切片后再退出。
-        setTimeout(() => {
-          ffmpegProcess?.stdin?.write('q');
-          ffmpegProcess?.stdin?.end();
-        }, 200);
-      } else {
-        ffmpegProcess!.kill('SIGTERM');
-        if (audioCaptureProcess) {
-          try { audioCaptureProcess.kill('SIGTERM'); } catch (_) { /* 已退出 */ }
-          audioCaptureProcess = null;
-        }
-      }
-
-      ffmpegProcess!.on('close', () => resolve());
-      setTimeout(() => {
-        try { ffmpegProcess?.kill('SIGKILL'); } catch (_) { /* 已退出 */ }
-        resolve();
-      }, 15000);
-    });
-    ffmpegProcess = null;
-  } else {
-    if (audioCaptureProcess) {
-      try {
-        if (process.platform === 'win32') {
-          audioCaptureProcess.kill('SIGINT');
-        } else {
-          audioCaptureProcess.kill('SIGTERM');
-        }
-      } catch (_) { /* 已退出 */ }
-      audioCaptureProcess = null;
-    }
-  }
-
-  // 重置业务状态（tmpDir 由调用方负责清理目录后再重置）
-  pendingQueue = [];
-  consecutiveFailRounds = 0;
-  isRetryScheduled = false;
-  activeUploads.clear();
-  queuedFileNames.clear();
-}
-
-// ─── ffmpeg 启动 ──────────────────────────────────────────────────────────────
-
-/**
- * 构造并启动 ffmpeg 进程，写入 tmpDir。
- *
- * @param displayTitle   窗口标题（Windows 窗口录制时用于 gfxcapture window_title 匹配）
- * @param startNumber    -hls_start_number，crash 重启时传入已上传数量
- */
-function spawnFfmpeg(sourceId: string, displayTitle: string, startNumber = 0): ChildProcess {
-  const ffmpeg = getFfmpegPath();
-  // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比，避免失真。
-  // 宽度超出上限时等比缩小；宽度未达上限时不放大（原始更小则保持原始）。
-  // -2 确保高度为偶数（H.264 编码器要求宽高均为偶数）。
-  // 软编：最大宽 854（降低 CPU 压力）；硬编：最大宽 1280（720p 档）
-  const maxWidth = isSoftwareEncoder ? 854 : 1280;
-
-  // ffmpeg 在所有平台上都能正确解析正斜杠路径；
-  // Windows path.join 生成反斜杠，部分 ffmpeg 版本（静态构建）可能将 \s \U 等误解析为转义序列
-  const segPattern = path.join(tmpDir, 'seg%03d.ts').replace(/\\/g, '/');
-  const m3u8Path = path.join(tmpDir, 'index.m3u8').replace(/\\/g, '/');
-
-  // ── 平台差异：输入源参数 ─────────────────────────────────────────────────
-  // Windows：ddagrab filter（通过 lavfi 驱动）捕获全屏，零 CPU 开销
-  // macOS：avfoundation 通过动态枚举得到的视频设备索引（见 resolveAvfIndex）
-  let inputArgs: string[];
-  if (process.platform === 'darwin') {
-    // cachedAvfIndex 由 start() 调用 resolveAvfIndex() 预先填充。
-    // 若未缓存（理论上不应发生），以 screenSeq + 1 做降级兜底（旧逻辑）。
-    const screenSeq = sourceId.startsWith('screen:')
-      ? parseInt(sourceId.split(':')[1] ?? '0', 10)
-      : 0;
-    const avfIndex = cachedAvfIndex >= 0 ? cachedAvfIndex : screenSeq + 1;
-    inputArgs = [
-      '-f', 'avfoundation',
-      '-framerate', '30',
-      '-capture_cursor', '1',
-      '-i', `${avfIndex}:none`, // 视频设备:音频设备，none 表示不录音
-    ];
-  } else {
-    // Windows：根据录制源类型选择不同的 GPU 零拷贝捕获方案
-    //
-    // 为什么不用 gdigrab：
-    //   gdigrab 使用 GDI BitBlt（纯 CPU），每帧拷贝整个显存到系统内存，
-    //   30fps 下 CPU 占用 ~20% 单核，且 BitBlt 会阻塞 GPU 渲染管线导致游戏卡顿。
-    //
-    // 两种 GPU 零拷贝视频捕获方案：
-    //
-    //   【全屏】ddagrab（Desktop Duplication API / DXGI）
-    //     - 捕获整块显示器，output_idx 对应显示器序号
-    //     - 必须通过 -f lavfi -i 语法驱动（不是 input device）
-    //     - 兼容性：Windows 8.1+ / Win10 1803+，DX11 显卡
-    //     - 音频：ddagrab 本身不含音频，需额外加 WASAPI loopback 输入
-    //
-    //   【窗口】gfxcapture（Windows.Graphics.Capture API）
-    //     - 支持按窗口标题正则、进程名、HWND 精确捕获单个窗口
-    //     - 同样是 GPU 硬件帧，CPU 开销 ≈0
-    //     - 兼容性：Windows 10 1803+（Win11 推荐）
-    //     - 不稳定帧率（由合成器决定），需加 fps filter 稳定到 30fps
-    //     - 音频：capture_audio=1 可直接捕获该窗口进程的音频输出（WGC 会话内同步）
-    //
-    // 注意：两者均为 filter（非 input device），必须通过 -f lavfi -i 或
-    //   -filter_complex 语法驱动，后接 hwdownload + format=bgra 转为 CPU 可见帧。
-    //
-    // 缩放策略：等比缩放，限制最大宽度，保持原始宽高比。
-    //   scale=w='min(iw,W)':h=-2
-    //   - iw > W 时等比缩小；iw <= W 时保持原始，不放大
-    //   - h=-2：高度自动等比计算，且向下取偶数（H.264 要求）
-    //   - format=yuv420p：编码器要求，hwdownload 输出 bgra 需显式转换
-    const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
-
-    if (sourceId.startsWith('screen:')) {
-      // ── 全屏录制：ddagrab（视频）─────────────────────────────────────────
-      // 音频由 audio_capture.exe（WASAPI Loopback）单独采集，通过 pipe:0 传入 FFmpeg。
-      const screenIdx = parseInt(sourceId.split(':')[1] ?? '0', 10);
-      inputArgs = [
-        '-f', 'lavfi',
-        '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
-      ];
-    } else {
-      // ── 窗口录制：gfxcapture（视频）──────────────────────────────────────
-      //
-      // gfxcapture 限制：
-      //   - 仅支持 DWM 合成窗口（Win10 1803+），经典 GDI 窗口可能无法捕获
-      //   - window_title 使用正则匹配，中文等非 ASCII 字符需确保编码正确
-      //   - 某些系统窗口（如记事本、部分工具窗口）可能不被 WGC 支持
-      const escapedTitle = displayTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      inputArgs = [
-        '-f', 'lavfi',
-        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,fps=30,hwdownload,format=bgra,${winScaleFilter}`,
-      ];
-    }
-  }
-
-  // ── 音频：启动 audio_capture 进程（仅 Windows）───────────────────────────
-  // audio_capture.exe 通过 WASAPI Loopback 采集系统声音，输出原始 PCM（s16le）到 stdout，
-  // 此处 pipe 到 FFmpeg stdin 作为音频输入流（input 0: pipe:0）。
-  // 视频输入（ddagrab/gfxcapture/avfoundation）成为 input 1。
-  //
-  // 音画同步策略：
-  //   两进程同时启动（同一 event loop tick），FFmpeg 内部 muxer 统一管理 PTS。
-  //   -af aresample=async=1 自动拉伸/压缩音频以匹配视频时间线（偏移 < 50ms）。
-  //
-  // 流映射（有音频时）：
-  //   -map 0:a → pipe:0 的音频流
-  //   -map 1:v → lavfi/avfoundation 的视频流（lavfi 无音频流，必须显式 map）
-  const audioCaptureBin = getAudioCapturePath();
-  let audioPipe: ChildProcess | null = null;
-  let audioInputArgs: string[] = [];
-  let audioStreamArgs: string[] = [];
-  let audioEncodeArgs: string[] = ['-an'];
-  let mapArgs: string[] = [];
-
-  if (audioCaptureBin) {
-    // 启动 audio_capture：chunk-duration 0.1s（100ms）低延迟模式
-    audioPipe = spawn(audioCaptureBin, [
-      '--sample-rate', '48000',
-      '--channels', '2',
-      '--bit-depth', '16',
-      '--chunk-duration', '0.1',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    audioCaptureProcess = audioPipe;
-
-    // 捕获 audio_capture 的 stderr（设备检测、初始化失败等错误信息）
-    audioPipe.stderr.on('data', (data) => {
-      console.log(`[audio_capture] ${data.toString().trim()}`);
-    });
-
-    // audio_capture 异常退出时打印日志（不触发 crash 重启，音频丢失比崩溃好）
-    audioPipe.on('close', (code) => {
-      if (!isUserStopped && code !== 0) {
-        console.warn(`[recorder] audio_capture 异常退出（code=${code}），后续录制静音`);
-      }
-    });
-
-    console.log('[recorder] 音频输入: audio_capture WASAPI Loopback → pipe:0');
-
-    // pipe:0 作为第一个输入（audio），视频输入顺移为 input 1
-    audioInputArgs = ['-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0'];
-    // aresample=async=1：自动校正音画偏移（< 50ms），first_pts=0 从 0 开始对齐
-    audioStreamArgs = ['-af', 'aresample=async=1:min_hard_comp=0.100:first_pts=0'];
-    audioEncodeArgs = ['-c:a', 'aac', '-b:a', '128k', '-strict', '-2'];
-    // 显式 map：0=音频(pipe)，1=视频(lavfi/avfoundation)
-    // lavfi 输入无音频流，不显式 map 会导致 FFmpeg 报错
-    mapArgs = ['-map', '0:a', '-map', '1:v'];
-  } else {
-    console.log('[recorder] 音频输入: 无（静音录制）');
-  }
-
-  // ── 编码参数 ─────────────────────────────────────────────────────────────
-  // 质量基准：游戏录屏（高动态）场景，720p 硬编 CRF 30 / 软编 CRF 30 为标准。
-  //   720p CRF 30 在游戏复盘场景（需看清操作但非画质赏析）视觉差异可接受。
-  //
-  // 软编（libx264）：
-  //   -crf 30：恒定质量模式
-  //   -preset veryfast：实时录制必须用快速 preset，medium 及以上会导致 CPU 过高积压掉帧
-  //
-  // 硬编：各引擎均使用"质量优先"模式，而非固定码率 VBR。
-  //   原因：固定码率会导致静止帧浪费码率、动态场景画质下降（块状失真）。
-  //   目标场景：游戏录屏（高动态），720p CRF 30 视觉质量为保底标准。
-  //   -maxrate 5000k -bufsize 10000k：为游戏高动态瞬间留足峰值空间，防止块状失真。
-  //
-  //   h264_nvenc：-rc vbr -cq 30
-  //     CQ（Constant Quality）是 nvenc 唯一的质量恒定模式，CQ 30 ≈ libx264 CRF 30
-  //     必须配合 -b:v 0 让编码器自由分配码率
-  //
-  //   h264_qsv：-global_quality 30 -look_ahead 1
-  //     QSV 的质量参数，功能等同于 CRF；look_ahead 开启前向参考，稍微提升编码效率
-  //
-  //   h264_amf：-quality quality -b:v 0
-  //     AMF 无 CQ 模式，-quality quality 指定质量优先策略，放开目标码率让其自行分配
-  let encodeArgs: string[];
-  if (isSoftwareEncoder) {
-    encodeArgs = ['-c:v', detectedEncoder, '-crf', '30', '-preset', 'veryfast'];
-  } else if (detectedEncoder === 'h264_nvenc') {
-    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '30', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
-  } else if (detectedEncoder === 'h264_qsv') {
-    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '30', '-look_ahead', '1', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
-  } else {
-    // h264_amf 及其他未知硬编，使用质量优先 VBR
-    encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality', '-b:v', '0', '-maxrate', '5000k', '-bufsize', '10000k'];
-  }
-
-  // macOS avfoundation 屏幕捕获的帧 PTS 全部相同（差値=0），
-  // 导致每帧 duration=0，编码器输出时间戳错误。
-  // 修复：用 fps filter 重新生成 PTS，同时内联等比缩放（限制最大宽）。
-  // -s 与 -vf 互斥，不能同时使用，缩放必须内联到 -vf filter chain 中。
-  //
-  // scale=w='min(iw,W)':h=-2：
-  //   - iw > W 时等比缩小；iw <= W 时保持原始，不放大
-  //   - h=-2：高度自动等比计算，且向下取偶数（H.264 要求）
-  // -bf 0：禁用 B 帧，使 DTS 严格等于 PTS，消除 HLS muxer 的 DTS 不单调警告
-  const darwinExtraArgs: string[] = process.platform === 'darwin'
-    ? ['-vf', `fps=30,scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0']
-    : [];
-
-  const args = [
-    ...audioInputArgs,  // pipe:0 音频（有 audio_capture 时）
-    ...inputArgs,       // 视频输入（ddagrab/gfxcapture/avfoundation）
-    ...darwinExtraArgs,
-    ...audioStreamArgs, // aresample=async（有音频时）
-    ...mapArgs,         // -map 0:a -map 1:v（有音频时）
-    ...encodeArgs,
-    ...audioEncodeArgs, // -c:a aac 或 -an
-    '-g', String(30 * HLS_SEGMENT_DURATION), // GOP = framerate × segment_duration
-    '-f', 'hls',
-    '-hls_time', String(HLS_SEGMENT_DURATION),
-    '-hls_list_size', '0',
-    // ffmpeg 6.x HLS muxer 选项名为 -start_number（不是 -hls_start_number）
-    '-start_number', String(startNumber),
-    '-hls_segment_filename', segPattern,
-    m3u8Path,
-  ];
-
-  console.log('[recorder] 启动 ffmpeg：', args.join(' '));
-
-  const proc = spawn(ffmpeg, args, {
-    // Windows 停止时需要向 stdin 写 'q'（SIGTERM 在 Windows 上等于 SIGKILL，会强杀进程导致末片截断）
-    // macOS/Linux 用 SIGTERM，stdin 不需要 pipe，但统一设置 'pipe' 无副作用
-    stdio: ['pipe', 'ignore', 'pipe'],
-  });
-
-  // 将 audio_capture 的 PCM 输出 pipe 到 FFmpeg stdin
-  if (audioPipe) {
-    audioPipe.stdout!.pipe(proc.stdin!);
-    // pipe() 返回 destination（即 proc.stdin），error 事件挂在 stdin 上
-    proc.stdin!.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EPIPE' || err.message.includes('ERR_STREAM_WRITE_AFTER_END')) {
-        // EPIPE：ffmpeg 先退出，audio_capture 继续写入时触发，正常情况忽略
-        // ERR_STREAM_WRITE_AFTER_END：ffmpeg stdin 已关闭，audio_capture 继续写入时触发，正常情况忽略
-      } else {
-        console.warn('[recorder] audio_capture pipe error:', err.message);
-      }
-    });
-  }
-
-  // 打印 stderr 用于调试
-  proc.stderr?.on('data', (chunk: Buffer) => {
-    process.stdout.write('[ffmpeg] ' + chunk.toString());
-  });
-
-  return proc;
-}
-
-// ─── crash 处理 ───────────────────────────────────────────────────────────────
-
-/**
- * ffmpeg 进程异常退出时的处理逻辑。
- * 等待当前上传完成后，以 -hls_start_number 重启 ffmpeg 续录。
- *
- * 窗口录制特殊处理：
- *   crash 发生时先检查目标窗口是否还存在。
- *   - 窗口已消失：crash 属于预期行为（WGC session 失效），直接 stop() 优雅收尾，不重启。
- *   - 窗口仍存在：真正的 ffmpeg crash，走正常重启逻辑。
- */
-async function handleFfmpegCrash(displayTitle: string): Promise<void> {
-  if (isUserStopped) return;
-
-  // 窗口录制模式：先检查目标窗口是否还存在
-  if (currentSourceId.startsWith('window:')) {
-    const alive = await isWindowAlive(currentSourceId);
-    if (!alive) {
-      console.log('[recorder] 窗口录制目标已消失，ffmpeg crash 属预期行为，触发优雅停止');
-      void stop();
-      return;
-    }
-  }
-
-  crashRestartCount++;
-  if (crashRestartCount > MAX_CRASH_RESTARTS) {
-    console.error(`[recorder] ffmpeg 已连续崩溃 ${crashRestartCount} 次，放弃重启`);
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('recorder:error', 'ffmpeg 持续崩溃，录制已终止');
-    }
-    return;
-  }
-
-  console.warn(`[recorder] ffmpeg 进程异常退出，第 ${crashRestartCount} 次重启续录...`);
-
-  // 等待当前正在进行的上传完成
-  await Promise.allSettled(Array.from(activeUploads));
-
-  if (isUserStopped) return;
-
-  // 重启 ffmpeg，从已上传数量处续录
-  if (watcher) {
-    await watcher.close();
-    watcher = null;
-  }
-
-  // 终止旧的 audio_capture 进程（spawnFfmpeg 内部会启动新的）
-  if (audioCaptureProcess) {
-    try {
-      if (process.platform === 'win32') {
-        audioCaptureProcess.kill('SIGINT');
-      } else {
-        audioCaptureProcess.kill('SIGTERM');
-      }
-    } catch (_) { /* 已退出 */ }
-    audioCaptureProcess = null;
-  }
-
-  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle, uploadedCount);
-  attachFfmpegHandlers(displayTitle);
-
-  // 注意：chokidar v5 不支持 glob 路径 watch，必须 watch 目录后在回调内过滤扩展名
-  watcher = chokidar.watch(tmpDir, {
-    persistent: true,
-    ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
-  });
-  watcher.on('add', (filePath) => {
-    if (filePath.endsWith('.ts')) void uploadSegment(filePath);
-  });
-}
-
-/**
- * 挂载 ffmpeg 进程的 close 事件，非正常退出时触发 crash 处理。
- */
-function attachFfmpegHandlers(displayTitle: string): void {
-  ffmpegProcess?.on('close', (code) => {
-    if (isUserStopped) {
-      console.log(`[recorder] ffmpeg 正常退出，code=${code}`);
-      return;
-    }
-    console.warn(`[recorder] ffmpeg 异常退出，code=${code}`);
-    void handleFfmpegCrash(displayTitle);
-  });
-}
-
 // ─── 开始 / 停止录制 ──────────────────────────────────────────────────────────
 
-/**
- * 开始录制。
- * @param windowId     desktopCapturer source id（格式 "screen:N:M" 或 "window:N:M"）
- *                     macOS：推导 avfoundation 屏幕设备索引
- *                     Windows screen:：推导 ddagrab output_idx
- *                     Windows window:：使用 gfxcapture，依赖 displayTitle 匹配
- * @param displayTitle 窗口标题（Windows 窗口录制时使用）
- * @param roomId       所属房间 ID
- * @param authToken    JWT AccessToken
- */
 async function start(
   windowId: string,
   displayTitle: string,
   roomId: string,
   authToken: string,
 ): Promise<void> {
-  if (ffmpegProcess) {
+  if (isRecording()) {
     throw new Error('[recorder] 录制已在进行中');
   }
 
@@ -1078,21 +226,14 @@ async function start(
   sessionId = uuidv4();
   currentRoomId = roomId;
   currentSourceId = windowId;
+  currentWindowTitle = displayTitle;
   currentAuthToken = authToken;
-  segmentKeys = [];
-  pendingQueue = [];
-  uploadedCount = 0;
   isUserStopped = false;
-  isRetryScheduled = false;
-  consecutiveFailRounds = 0;
   crashRestartCount = 0;
   cachedAvfIndex = -1;
   recordStartTime = Date.now();
-  activeUploads.clear();
-  queuedFileNames.clear();
 
   // 创建临时目录
-  // 主路径：系统 temp 目录；fallback：userData（企业机器可能封锁 %TEMP%，userData 权限有保证）
   const primaryTmpDir = path.join(app.getPath('temp'), 'cowatch-rec', sessionId);
   const fallbackTmpDir = path.join(app.getPath('userData'), 'recordings', sessionId);
   try {
@@ -1105,44 +246,78 @@ async function start(
   }
   console.log(`[recorder] 临时目录：${tmpDir}`);
 
-  // macOS：动态枚举 avfoundation 设备列表，确定正确的屏幕设备索引
-  // 注意：desktopCapturer 屏幕 id 格式为 "screen:DISPLAY_ID:0"，DISPLAY_ID 是系统内部标识，
-  // 与 avfoundation "Capture screen M" 中的 M（枚举序号）无关。
-  // 需要通过 getSources 枚举所有屏幕，用目标 sourceId 在列表中的位置（rank）来匹配。
-  if (process.platform === 'darwin') {
-    let screenRank = 0;
-    if (windowId.startsWith('screen:')) {
-      try {
-        const allSources = await desktopCapturer.getSources({
-          types: ['screen'],
-          thumbnailSize: { width: 0, height: 0 },
-        });
-        const idx = allSources.findIndex((s) => s.id === windowId);
-        screenRank = idx >= 0 ? idx : 0;
-        console.log(`[recorder] 屏幕 rank 解析：${windowId} → rank=${screenRank}（共 ${allSources.length} 块屏幕）`);
-      } catch {
-        console.warn('[recorder] getSources 枚举失败，屏幕 rank 降级为 0');
-      }
+  // macOS：解析 avfoundation 索引
+  if (process.platform === 'darwin' && windowId.startsWith('screen:')) {
+    try {
+      const allSources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: { width: 0, height: 0 },
+      });
+      const idx = allSources.findIndex((s) => s.id === windowId);
+      cachedAvfIndex = idx >= 0 ? idx : 0;
+    } catch {
+      cachedAvfIndex = 0;
     }
-    cachedAvfIndex = await resolveAvfIndex(screenRank);
   }
 
-  // 启动 ffmpeg
-  ffmpegProcess = spawnFfmpeg(currentSourceId, displayTitle);
-  attachFfmpegHandlers(displayTitle);
+  // ① 启动录制层
+  await startRecording(
+    {
+      sessionId,
+      sourceId: windowId,
+      displayTitle,
+      tmpDir,
+      detectedEncoder,
+      isSoftwareEncoder,
+      cachedAvfIndex,
+    },
+    {
+      onCrash: (title) => {
+        void handleFfmpegCrash(title);
+      },
+      onShouldStop: () => {
+        void stop();
+      },
+      onLog: (msg) => console.log(msg),
+    },
+  );
 
-  // 启动 chokidar 监听新增切片文件
-  // 注意：chokidar v5 不支持 glob 路径 watch，必须 watch 目录后在回调内过滤扩展名
-  watcher = chokidar.watch(tmpDir, {
-    persistent: true,
-    ignoreInitial: true,
-    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
-  });
-  watcher.on('add', (filePath) => {
-    if (filePath.endsWith('.ts')) void uploadSegment(filePath);
-  });
+  // ② 启动转码层（chokidar 监听）
+  startTranscodingWatcher(
+    {
+      tmpDir,
+      detectedEncoder,
+      isSoftwareEncoder,
+    },
+    {
+      onTranscodeComplete: (transcodedPath) => {
+        // 转码完成 → 通知上传层
+        enqueueUpload(transcodedPath);
+      },
+      onTranscodeFailed: (rawPath) => {
+        // 转码失败 → 上传原始切片（降级策略 C）
+        enqueueRawUpload(rawPath);
+      },
+      onLog: (msg) => console.log(msg),
+      onProgress: () => pushProgress(),
+    },
+  );
 
-  // 启动 tick 计时器
+  // ③ 启动上传层
+  initUploader(
+    {
+      roomId,
+      sessionId,
+      authToken,
+      apiOrigin,
+    },
+    {
+      onProgress: () => pushProgress(),
+      onLog: (msg) => console.log(msg),
+    },
+  );
+
+  // ④ 启动 tick 计时器
   tickTimer = setInterval(() => {
     const seconds = Math.floor((Date.now() - recordStartTime) / 1000);
     for (const win of BrowserWindow.getAllWindows()) {
@@ -1150,108 +325,76 @@ async function start(
     }
   }, 1000);
 
-  // 最长录制时间保护
+  // ⑤ 最长录制时间保护
   timeoutTimer = setTimeout(() => {
     console.log('[recorder] 达到最大录制时长 2 小时，自动停止');
     void stop();
   }, MAX_RECORD_MS);
 
-  // 窗口存活检测（仅窗口录制模式）
-  if (currentSourceId.startsWith('window:')) {
-    windowWatcher = startWindowWatcher(
-      currentSourceId,
-      () => { void stop(); },
-      () => isUserStopped,
-    );
-  }
-
-  // 补录定时器：每 30s 检查一次
-  // isRetryScheduled 互斥判断前置在此回调里，保证退避期间不被外部时钟打断
-  retryTimerRef = setInterval(() => {
-    if (isRetryScheduled) return; // ★ 上一轮还在跑（可能正在退避），跳过本次
-    void triggerRetryQueue();
-  }, 30_000);
-
   console.log(`[recorder] 录制开始，sessionId=${sessionId}，roomId=${roomId}`);
 }
 
-/**
- * 停止录制（用户主动停止）。
- * 流程：
- *   1. 提前设置 isUserStopped = true（阻止新入队）
- *   2. 通过 cleanup 清理定时器、停止 ffmpeg、关闭 chokidar
- *   3. 扫描临时目录，补入遗漏的尾片（fire-and-forget 加入 activeUploads）
- *   4. 等待所有正在进行的 activeUploads 完成
- *   5. 对剩余 pendingQueue 做最后一轮直接补传（绕过 triggerRetryQueue，确保 stop 时上传完整）
- *   6. 调用 finish 接口 → 清理临时目录 → 重置状态
- */
 async function stop(): Promise<void> {
-  if (!ffmpegProcess && !isUserStopped) return; // 进程未启动且也不在停止流程中，直接返回
-  if (isUserStopped) return;                    // 已在停止流程中（abortRecording 可能已触发），避免重复执行
+  if (!isRecording() && !isUserStopped) return;
+  if (isUserStopped) return;
 
-  // ① 提前计算录制时长（在 cleanup 之前，避免停止流程耗时影响时长统计）
   const durationSeconds = Math.floor((Date.now() - recordStartTime) / 1000);
-
-  // ② 提前设置 isUserStopped，阻止后续 uploadSegment 将新失败再次入队
   isUserStopped = true;
-
-  // 用本地变量固定当前 tmpDir，避免后续状态重置后路径变为空字符串
   const sessionTmpDir = tmpDir;
+  const displayName = `自动录制 ${new Date().toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  }).replace(/\//g, '-')}`;
 
-  // ③ 通过 cleanup 清理定时器、停止 ffmpeg、关闭 chokidar
-  //    cleanup 不重置 segmentKeys / tmpDir / currentRoomId（finish 接口还需要）
-  await cleanup();
+  // ① 停止录制层（FFmpeg）
+  await stopRecording();
 
-  // ④ ffmpeg 退出后扫描临时目录，补传所有还未入队的切片
-  // 这里处理两类遗漏：
-  //   1. 最后一个不满 HLS_SEGMENT_DURATION 的尾片（用户停止时正在写入，chokidar 已关闭）
-  //   2. awaitWriteFinish 稳定期内 chokidar 尚未触发的切片
-  try {
-    const allFiles = fs.readdirSync(sessionTmpDir);
-    console.log(`[recorder] 临时目录内容：${allFiles.join(', ') || '(空)'}`);
-    const tsFiles = allFiles.filter((f) => f.endsWith('.ts'));
-    for (const file of tsFiles) {
-      if (!queuedFileNames.has(file)) {
-        const stat = fs.statSync(path.join(sessionTmpDir, file));
-        console.log(`[recorder] 补传遗漏切片：${file}（${stat.size} bytes）`);
-        // fire-and-forget：加入 activeUploads，后续 await 统一等待
-        uploadSegment(path.join(sessionTmpDir, file));
-      } else {
-        console.log(`[recorder] 跳过已入队切片：${file}`);
-      }
+  // ② 停止转码层监听（chokidar 关闭，但转码队列继续处理已入队切片）
+  await stopTranscodingWatcher();
+
+  // ②.5 等待转码队列排空（确保所有原始切片都被转码为 _opt.ts）
+  await waitForTranscodeQueue();
+
+  // ③ 补传临时目录中遗漏的切片
+  enqueueMissingFiles(sessionTmpDir);
+
+  // ④ 等待上传队列完全排空（串行队列中的所有切片上传完毕）
+  await waitForUploadQueue();
+  // 确保在途上传也完成
+  await Promise.allSettled(Array.from(getActiveUploads()));
+
+  // ⑤ 检查 pendingQueue 积压量
+  const pendingCount = getPendingQueue().length;
+  let persisted = pendingCount > STOP_PENDING_THRESHOLD;
+
+  if (persisted) {
+    // 积压过多：持久化，不等待
+    persistRecording(
+      sessionId, currentRoomId, sessionTmpDir,
+      getPendingQueue(), getSegmentKeys(),
+      displayName, durationSeconds, apiOrigin, currentAuthToken,
+    );
+    console.log(`[recorder] pendingQueue=${pendingCount} > 阈值 ${STOP_PENDING_THRESHOLD}，已持久化，不调 finish`);
+  } else if (pendingCount > 0) {
+    // 少量积压（≤5）：等待排空
+    console.log(`[recorder] pendingQueue=${pendingCount} ≤ 阈值 ${STOP_PENDING_THRESHOLD}，等待上传排空`);
+    await flushPendingQueue(2);
+
+    // flush 后残余切片也持久化，防止 cleanupUploader 清空后丢失
+    const remaining = getPendingQueue().length;
+    if (remaining > 0) {
+      console.log(`[recorder] flush 后仍有 ${remaining} 片未上传，持久化残余切片`);
+      persistRecording(
+        sessionId, currentRoomId, sessionTmpDir,
+        getPendingQueue(), getSegmentKeys(),
+        displayName, durationSeconds, apiOrigin, currentAuthToken,
+      );
+      persisted = true;
     }
-  } catch (err) {
-    console.warn('[recorder] 扫描临时目录失败：', (err as Error).message);
   }
 
-  // ⑤ 等待所有 activeUploads 完成（含上方补传触发的新 upload）
-  await Promise.allSettled(Array.from(activeUploads));
-
-  // ⑥ 对剩余 pendingQueue 做最后一轮直接补传（最多 2 轮，绕过退避逻辑）
-  //    注意：doUpload 内部已含 pRetry，此处轮数仅控制整体补传轮次，不再叠加 pRetry 次数
-  const STOP_RETRY_ROUNDS = 2;
-  for (let round = 0; round < STOP_RETRY_ROUNDS; round++) {
-    if (pendingQueue.length === 0) break;
-    console.log(`[recorder] stop 补传第 ${round + 1} 轮，剩余 ${pendingQueue.length} 片`);
-    const batch = pendingQueue.splice(0, pendingQueue.length);
-    for (const filePath of batch) {
-      try {
-        await doUpload(filePath);
-        pushProgress();
-      } catch {
-        // 本轮仍失败：暂不重新入队，等下一轮循环处理
-        pendingQueue.push(filePath);
-      }
-    }
-  }
-
-  // ⑦ 调用 finish 接口
-  if (segmentKeys.length > 0) {
-    const displayName = `自动录制 ${new Date().toLocaleString('zh-CN', {
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit',
-    }).replace(/\//g, '-')}`;
-
+  // ⑥ 调用 finish 接口（仅全传完时）
+  if (!persisted && getSegmentKeys().length > 0) {
     try {
       const response = await net.fetch(
         `${apiOrigin}/api/rooms/${currentRoomId}/recording/finish`,
@@ -1261,7 +404,11 @@ async function stop(): Promise<void> {
             'Content-Type': 'application/json',
             ...(currentAuthToken ? { 'Authorization': `Bearer ${currentAuthToken}` } : {}),
           },
-          body: JSON.stringify({ segmentKeys, displayName, durationSeconds }),
+          body: JSON.stringify({
+            segmentKeys: getSegmentKeys(),
+            displayName,
+            durationSeconds,
+          }),
           duplex: 'half',
         } as RequestInit,
       );
@@ -1274,34 +421,74 @@ async function stop(): Promise<void> {
     } catch (err) {
       console.error('[recorder] finish 接口异常：', (err as Error).message);
     }
-  } else {
+  } else if (!persisted) {
     console.warn('[recorder] 无可用切片，跳过 finish 接口');
   }
 
-  // 清理临时目录（用 sessionTmpDir，状态重置后 tmpDir 已为空字符串）
+  // ⑦ 清理临时目录
   fs.rm(sessionTmpDir, { recursive: true, force: true }, (err) => {
     if (err) console.warn('[recorder] 临时目录清理失败：', err.message);
     else console.log('[recorder] 临时目录已清理：', sessionTmpDir);
   });
 
-  // 重置状态
+  // ⑧ 清理上传层状态
+  cleanupUploader();
+
+  // ⑩ 重置状态
   sessionId = '';
   tmpDir = '';
-  segmentKeys = [];
-  uploadedCount = 0;
   currentRoomId = '';
   currentAuthToken = '';
   crashRestartCount = 0;
 
+  // 清理定时器
+  if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
+  if (timeoutTimer !== null) { clearTimeout(timeoutTimer); timeoutTimer = null; }
+
   console.log(`[recorder] 录制结束，时长 ${formatDuration(durationSeconds)}`);
+}
+
+// ─── crash 处理 ───────────────────────────────────────────────────────────────
+
+async function handleFfmpegCrash(displayTitle: string): Promise<void> {
+  if (isUserStopped) return;
+
+  // 窗口录制：先检查目标窗口是否还存在
+  if (currentSourceId.startsWith('window:')) {
+    const alive = await checkWindowAlive(currentSourceId);
+    if (!alive) {
+      console.log('[recorder] 窗口录制目标已消失，ffmpeg crash 属预期行为，触发优雅停止');
+      void stop();
+      return;
+    }
+  }
+
+  crashRestartCount++;
+  if (crashRestartCount > 3) {
+    console.error(`[recorder] ffmpeg 已连续崩溃 ${crashRestartCount} 次，放弃重启`);
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('recorder:error', 'ffmpeg 持续崩溃，录制已终止');
+    }
+    return;
+  }
+
+  console.warn(`[recorder] ffmpeg 进程异常退出，第 ${crashRestartCount} 次重启续录...`);
+
+  // 等待当前上传完成
+  await Promise.allSettled(Array.from(getActiveUploads()));
+
+  if (isUserStopped) return;
+
+  // 重启录制层（-start_number 会自动从已有切片序号续接，不会覆盖）
+  await restartRecording(displayTitle);
+
+  // 转码层 watcher 无需重启——它一直在监听同一个 tmpDir。
+  // 只需补扫 crash 期间可能遗漏的原始切片（chokidar awaitWriteFinish 可能漏掉崩溃时的半成品）。
+  enqueueExistingRawFiles(tmpDir);
 }
 
 // ─── IPC 注册 ─────────────────────────────────────────────────────────────────
 
-/**
- * 在 ipcMain 上注册所有录制相关的 handle 处理器。
- * 由 main.ts 在 app.whenReady() 中调用。
- */
 export function registerRecorderHandlers(): void {
   ipcMain.handle('recorder:detectEncoder', async () => {
     try {
@@ -1345,7 +532,14 @@ export function registerRecorderHandlers(): void {
     }
   });
 
-  // 渲染进程 token 刷新后主动推送最新 token，确保主进程上传切片时不使用过期 token
+  ipcMain.handle('recorder:getPendingRecordings', async () => {
+    return listPendingRecordings();
+  });
+
+  ipcMain.handle('recorder:resumePending', async (_event, sid: string, authToken: string) => {
+    await resumeUpload(sid, authToken);
+  });
+
   ipcMain.handle('auth:setToken', (_event, token: string) => {
     setAuthTokenForRecorder(token);
   });

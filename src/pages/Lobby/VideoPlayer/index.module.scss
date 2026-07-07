@@ -2,13 +2,33 @@
   position: absolute;
   inset: 0;
   background: #000;
+
+  :global(.plyr) {
+    --plyr-color-main: #63b3ed;
+    width: 100%;
+    height: 100%;
+    min-width: 100%;
+    min-height: 100%;
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+  }
+
+  :global(.plyr__controls) {
+    display: flex;
+  }
+
+  :global(.plyr__poster) {
+    display: none !important;
+  }
 }
 
 .video {
   width: 100%;
   height: 100%;
-  // ddagrab/gfxcapture 录制的视频宽高比可能与容器不完全一致（hwdownload 转换后
-  // 可能有微小偏差），使用 contain 保持原始比例避免画面变形。
   object-fit: contain;
   display: block;
 }

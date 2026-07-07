@@ -275,7 +275,7 @@ const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(
         />
         {disabled && (
           <div className={styles.disabledOverlay}>
-            <span className={styles.disabledHint}>👁 观看模式</span>
+            <span className={styles.disabledHint}>观看模式</span>
           </div>
         )}
       </div>

@@ -65,6 +65,11 @@ contextBridge.exposeInMainWorld('electronBridge', {
     offError: () => {
       ipcRenderer.removeAllListeners('recorder:error');
     },
+    /** 获取本地持久化的待补传录制列表 */
+    getPendingRecordings: () => ipcRenderer.invoke('recorder:getPendingRecordings'),
+    /** 启动补传单条持久化录制 */
+    resumePending: (sessionId: string, authToken: string) =>
+      ipcRenderer.invoke('recorder:resumePending', sessionId, authToken),
   },
 
   /**

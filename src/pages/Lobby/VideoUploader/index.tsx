@@ -4,6 +4,7 @@ import { getUploadUrlApi } from '@/api/room';
 import request, { ApiError } from '@/utils/request';
 import { validateVideoFile } from '@/utils/validateVideo';
 import { useRoomMeta } from '@/context/RoomMetaContext';
+import PendingUploads from './PendingUploads';
 import styles from './index.module.scss';
 
 /** 上传状态机：idle → uploading → slicing → idle | error */
@@ -123,6 +124,8 @@ export default function VideoUploader({ lastVideoAddedId }: VideoUploaderProps) 
           <p className={styles.slicingText}>服务器处理中，请稍候...</p>
         </div>
       ) : null}
+
+      <PendingUploads />
     </div>
   );
 }

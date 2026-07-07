@@ -15,6 +15,18 @@ export interface RecordingProgress {
   pending: number;
 }
 
+/** 待补传的持久化录制摘要 */
+export interface PendingRecording {
+  sessionId: string;
+  roomId: string;
+  createdAt: string;
+  totalSegments: number;
+  uploadedCount: number;
+  totalSize: number;
+  displayName: string;
+  durationSeconds: number;
+}
+
 /**
  * 录制控件状态机：
  *   idle → detecting → ready → recording → finishing → idle
