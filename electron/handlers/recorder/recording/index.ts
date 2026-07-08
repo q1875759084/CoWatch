@@ -193,8 +193,9 @@ function getAudioCapturePath(): string | null {
     const bundledPath = path.join(process.resourcesPath, 'bin', binName);
     if (fs.existsSync(bundledPath)) return bundledPath;
   } else {
-    const localPath = path.join(__dirname, '..', '..', '..', 'bin', binName);
-    if (fs.existsSync(localPath)) return localPath;
+    // 开发/预览模式：使用项目源码目录 electron/bin/，与 getFfmpegPath 保持一致
+    const sourceBinPath = path.join(app.getAppPath(), 'electron', 'bin', binName);
+    if (fs.existsSync(sourceBinPath)) return sourceBinPath;
   }
   return null;
 }
@@ -256,7 +257,7 @@ function spawnFfmpeg(): ChildProcess {
     const avfIndex = cachedAvfIndex >= 0 ? cachedAvfIndex : screenSeq + 1;
     inputArgs = [
       '-f', 'avfoundation',
-      '-framerate', '60',
+      '-framerate', '30',
       '-capture_cursor', '1',
       '-i', `${avfIndex}:none`,
     ];
@@ -265,13 +266,13 @@ function spawnFfmpeg(): ChildProcess {
       const screenIdx = parseInt(currentSourceId.split(':')[1] || '0', 10);
       inputArgs = [
         '-f', 'lavfi',
-        '-i', `ddagrab=output_idx=${screenIdx}:framerate=60,hwdownload,format=bgra,${winScaleFilter}`,
+        '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
     } else {
       const escapedTitle = currentWindowTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       inputArgs = [
         '-f', 'lavfi',
-        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=60,hwdownload,format=bgra,${winScaleFilter}`,
+        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
       ];
     }
   }
@@ -307,14 +308,14 @@ function spawnFfmpeg(): ChildProcess {
 
   let encodeArgs: string[];
   if (isSoftwareEncoder) {
-    encodeArgs = ['-c:v', detectedEncoder, '-crf', '23', '-preset', 'veryfast'];
+    encodeArgs = ['-c:v', detectedEncoder, '-crf', '26', '-preset', 'veryfast'];
   } else if (detectedEncoder === 'h264_nvenc') {
-    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '23', '-b:v', '0',
+    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '26', '-b:v', '0',
                   '-preset', 'p4', '-tune', 'll', '-rc-lookahead', '0'];
-    // 录制层用低 CQ（高质量）捕获源，给转码层留压缩空间
+    // CQ 26 录制源质量，给转码层（CQ 30）留压缩空间
     // NVENC 硬件编码速度不受 CQ 影响，代价仅是中间文件更大（用完即删）
   } else if (detectedEncoder === 'h264_qsv') {
-    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '23', '-look_ahead', '1'];
+    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '26', '-look_ahead', '1'];
   } else {
     encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality'];
   }
@@ -334,8 +335,8 @@ function spawnFfmpeg(): ChildProcess {
     ...mapArgs,
     ...encodeArgs,
     ...audioEncodeArgs,
-    '-vsync', 'cfr', '-r', '60',
-    '-g', String(60 * HLS_SEGMENT_DURATION),
+    '-vsync', 'cfr', '-r', '30',
+    '-g', String(30 * HLS_SEGMENT_DURATION),
     '-f', 'hls',
     '-hls_time', String(HLS_SEGMENT_DURATION),
     '-hls_list_size', '0',

@@ -10,8 +10,8 @@
  *
  * 转码参数（与录制参数分离）：
  *   - preset p5（质量优先）
- *   - bf 2（启用 B 帧）
- *   - rc-lookahead 20（启用前瞻）
+ *   - bf 2（启用 B 帧，压缩率 ~30% 提升）
+ *   - rc-lookahead 20（启用前瞻，码率分配更合理）
  *   - CQ 30（纯 CQ 模式，码率随内容复杂度自由波动）
  *
  * 注意：CQ 模式下 NVENC 会清零 vbvBufferSize，maxrate/bufsize 为死参数，已移除。
@@ -25,7 +25,7 @@ import { spawn } from 'child_process';
 
 import chokidar from 'chokidar';
 
-import { getFfmpegPath } from '../shared';
+import { getFfmpegPath, HLS_SEGMENT_DURATION } from '../shared';
 import type { RecordingProgress } from '../../../../src/types/recorder';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────────
@@ -158,6 +158,12 @@ function transcodeFile(inputPath: string, outputPath: string): Promise<void> {
     const encoder = config.detectedEncoder;
     const isSoft = config.isSoftwareEncoder;
 
+    // 从文件名解析切片序号，计算绝对 PTS 偏移以恢复跨片连续时间轴
+    // 录制层 seg000 = 0-10s, seg001 = 10-20s, ...
+    const segMatch = path.basename(inputPath).match(/^seg(\d+)/);
+    const segIndex = segMatch ? parseInt(segMatch[1], 10) : 0;
+    const tsOffset = segIndex * HLS_SEGMENT_DURATION;
+
     let encodeArgs: string[];
     if (isSoft) {
       encodeArgs = ['-c:v', encoder, '-crf', '30', '-preset', 'medium'];
@@ -172,11 +178,15 @@ function transcodeFile(inputPath: string, outputPath: string): Promise<void> {
     }
 
     const args = [
+      '-fflags', '+genpts+discardcorrupt',
+      '-err_detect', 'ignore_err',
       '-i', inputPath,
       ...encodeArgs,
       '-c:a', 'copy',
-      '-r', '60',
-      '-g', '600',
+      '-output_ts_offset', String(tsOffset),
+      '-vsync', 'cfr',
+      '-r', '30',
+      '-g', '300',
       '-f', 'mpegts',
       outputPath,
     ];

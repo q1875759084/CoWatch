@@ -21,7 +21,7 @@
 import { desktopCapturer } from 'electron';
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_CONSECUTIVE_MISSES = 3;  // 连续 3 次（15 秒）都找不到才判定为消失
+const MAX_CONSECUTIVE_MISSES = 5;  // 连续 5 次（25 秒），容忍 desktopCapturer 对游戏窗口的间歇性误报
 
 export interface WindowWatcher {
   /** 停止轮询并清理定时器 */

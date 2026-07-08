@@ -21,9 +21,15 @@ export function getFfmpegPath(): string {
       const bundledPath = path.join(process.resourcesPath ?? '', 'bin', binName);
       if (fs.existsSync(bundledPath)) return bundledPath;
     } else {
-      // __dirname = electron/handlers/recorder/ → 上两级到 electron/
-      const localBinPath = path.join(__dirname, '..', '..', 'bin', binName);
-      if (fs.existsSync(localBinPath)) return localBinPath;
+      // 开发/预览模式：优先使用源码目录 electron/bin/ 下的 ffmpeg.exe
+      // 该目录与 electron-builder.yml 的 extraResources.from 保持一致，
+      // 避免 preview 模式因未走 electron-builder 而找不到正确版本。
+      const sourceBinPath = path.join(app.getAppPath(), 'electron', 'bin', binName);
+      if (fs.existsSync(sourceBinPath)) return sourceBinPath;
+
+      // 兼容旧路径：项目根目录 bin/ffmpeg.exe
+      const legacyBinPath = path.join(__dirname, '..', '..', 'bin', binName);
+      if (fs.existsSync(legacyBinPath)) return legacyBinPath;
     }
   }
 

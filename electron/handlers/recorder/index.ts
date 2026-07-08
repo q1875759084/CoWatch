@@ -467,7 +467,7 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
   if (crashRestartCount > 3) {
     console.error(`[recorder] ffmpeg 已连续崩溃 ${crashRestartCount} 次，放弃重启`);
     for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('recorder:error', 'ffmpeg 持续崩溃，录制已终止');
+      win.webContents.send('recorder:error', { reason: 'ffmpeg 持续崩溃，录制已终止' });
     }
     return;
   }
