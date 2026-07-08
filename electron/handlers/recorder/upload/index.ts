@@ -34,6 +34,8 @@ export interface UploadConfig {
   authToken: string;
   /** API origin */
   apiOrigin: string;
+  /** 禁用自适应限速，全速上传（外部视频转码等非游戏场景） */
+  disableThrottle?: boolean;
 }
 
 export interface UploadCallbacks {
@@ -289,7 +291,7 @@ export async function doUpload(filePath: string): Promise<void> {
   //   → 连续稳定时缓慢上调（+0.5 Mbps/轮），波动时瞬时下调
   //   → 硬顶 7Mbps（70% 上行），游戏永远有 30% 头room
   const backlog = uploadQueue.length + pendingQueue.length;
-  const bps = backlog > 1 ? getUploadBps() : 0;
+  const bps = cfg.disableThrottle ? 0 : (backlog > 1 ? getUploadBps() : 0);
   const fileSize = fs.statSync(filePath).size;
   const timeoutMs = calculateUploadTimeout(fileSize, bps);
   const startTime = Date.now();

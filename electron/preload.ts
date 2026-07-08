@@ -70,6 +70,30 @@ contextBridge.exposeInMainWorld('electronBridge', {
     /** 启动补传单条持久化录制 */
     resumePending: (sessionId: string, authToken: string) =>
       ipcRenderer.invoke('recorder:resumePending', sessionId, authToken),
+    /** 注册补传进度更新回调 */
+    onPendingUpdate: (cb: (list: unknown[]) => void) => {
+      ipcRenderer.on('recorder:pendingUpdate', (_event, list) => cb(list));
+    },
+    /** 移除补传进度更新回调 */
+    offPendingUpdate: () => {
+      ipcRenderer.removeAllListeners('recorder:pendingUpdate');
+    },
+
+    // ─── 外部视频转码 ─────────────────────────────────────────────────────
+    /** 打开多选文件对话框，返回选中的文件路径列表 */
+    selectVideoFiles: () =>
+      ipcRenderer.invoke('recorder:selectVideoFiles') as Promise<{ cancelled: boolean; filePaths: string[] }>,
+    /** 转码指定文件为 HLS 分段并上传 */
+    transcodeExternal: (roomId: string, authToken: string, filePath: string) =>
+      ipcRenderer.invoke('recorder:transcodeExternal', roomId, authToken, filePath),
+    /** 注册外部视频转码进度回调 */
+    onExternalTranscodeProgress: (cb: (info: unknown) => void) => {
+      ipcRenderer.on('recorder:transcodeExternal:progress', (_event, info) => cb(info));
+    },
+    /** 移除外部视频转码进度回调 */
+    offExternalTranscodeProgress: () => {
+      ipcRenderer.removeAllListeners('recorder:transcodeExternal:progress');
+    },
   },
 
   /**

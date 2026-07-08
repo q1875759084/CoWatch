@@ -582,3 +582,47 @@ async function stop(...) {
 }
 ```
 这是 Node.js 异步代码的通用陷阱：**模块级变量在异步操作期间可能已被外部修改**，凡是需要跨异步边界保持语义不变的状态，必须在进入异步前复制到局部变量。
+
+---
+
+### 外部视频转码：架构决策记录
+
+**背景：** 桌面端内置 ffmpeg，自带录屏软件的用户可以直接客户端转码上传，跳过 Web 端的"下载 .bat → 手动转码 → 上传整段 MP4"流程。
+
+**编码参数选择（与 .bat 对照）：**
+
+| 参数 | .bat（libx264 only） | Electron（硬件优先） | 决策理由 |
+|------|---------------------|---------------------|---------|
+| 编码器 | `libx264` | NVENC > QSV > AMF > libx264 | 桌面端有 GPU，5–10x 加速 |
+| 质量 | `-crf 30` | 硬编 `-cq 30` / 软编 `-crf 30` | 对齐转码层 |
+| GOP | `-g 300 -keyint_min 300 -sc_threshold 0` | 仅 `-g 300` | 后端不依赖等长 GOP，场景检测提升 5–10% 压缩 |
+| B 帧 | `b-adapt=0`（veryfast 默认） | 软编 `b-adapt=1` / 硬编 `-bf 2` | 自适应 B 帧节省 15–20% 码率 |
+| Preset | `veryfast` | `medium` / NVENC `p5` | 桌面端有 GPU，时间换空间 |
+| 音频 | `-c:a aac -b:a 128k`（重编码） | 同 .bat | 输入来源不可控，重编码保证兼容 |
+| 输出格式 | MP4 + `-movflags faststart` | HLS 分段（mpegts） | 支持边转边传，总分耗时 ≈ max(转码, 上传) |
+| 分辨率 | `min(iw,1600)` | 同 .bat（900p） | 对齐 |
+
+**实测转码速率：** NVENC p5 + bf 2 + lookahead 20，900p 输入，稳定 11–12x。5 分钟视频约 25 秒转完。瓶颈在上传（自适应限速 5–7 Mbps），不是转码。
+
+**上传限速豁免：** 外部转码场景用户没有在玩游戏，`UploadConfig.disableThrottle = true` 跳过自适应限速，全速上传。
+
+**批量上传队列：** 串行模式（NVENC 有并发 session 数限制），`useEffect` 监听队列变化自动启动下一个，VIDEO_ADDED 作为唯一完成信号。支持处理中添加新文件。
+
+**组件架构：** `Lobby` 层按 `isElectron` 分叉：`ElectronVideoUploader`（IPC 转码 + 队列 UI）vs `VideoUploader`（纯 Web `<input>` + HTTP 上传），两组件解耦互不污染。
+
+---
+
+### IPC/WS 跨通道竞态：`phase:completed` vs `VIDEO_ADDED`
+
+**现象：** 队列中第三个文件显示"等待服务器确认"，但终端日志显示转码正在进行。
+
+**根因：** 文件的"完成"被两个来源确认，走不同通道：
+
+- `phase: 'completed'` → Electron IPC（`webContents.send`），主进程 → 渲染进程
+- `VIDEO_ADDED` → WebSocket，后端广播 → 所有客户端
+
+两条通道延迟不同。File 2 的 `phase: 'completed'` 晚到时，File 3 已启动（`videoAddedRef`、`waitingServer` 被重置），晚到事件被误应用到当前文件。
+
+**解决：** 进度监听中，`transcoding` / `uploading` 阶段抵达时主动复位 `waitingServer = false`，而非仅依赖 `phase: 'completed'` 单次事件。即使旧文件的事件残留，下一批当前文件的进度事件立即覆盖。
+
+**根本解：** 在 IPC 事件中携带 `sessionId`，让渲染进程匹配"完成的到底是哪个文件"。当前未实现，因为主动复位已覆盖场景。

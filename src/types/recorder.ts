@@ -47,3 +47,13 @@ export interface EncoderDetectResult {
   /** true = 软件编码（libx264），会占用 CPU，自动降分辨率 */
   isSoftware: boolean;
 }
+
+/** 外部视频转码进度（Electron 客户端对用户自有视频文件做转码时的 IPC 推送） */
+export interface ExternalTranscodeProgress {
+  /** 当前阶段 */
+  phase: 'transcoding' | 'uploading' | 'completed' | 'failed';
+  /** 已上传分段数 */
+  uploaded: number;
+  /** 预估总分段数（-1 = 尚无法估算） */
+  estimated: number;
+}

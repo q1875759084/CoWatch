@@ -25,7 +25,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { app, desktopCapturer, ipcMain, BrowserWindow, net } from 'electron';
+import { app, desktopCapturer, dialog, ipcMain, BrowserWindow, net } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 
 import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../../src/types/recorder';
@@ -40,6 +40,8 @@ import {
   getTmpDir,
   isRecording,
 } from './recording';
+
+import { HLS_SEGMENT_DURATION } from './shared';
 
 import {
   startTranscodingWatcher,
@@ -68,6 +70,13 @@ import {
   listPendingRecordings,
   resumeUpload,
 } from './persistence';
+
+import {
+  startExternalTranscode,
+  stopExternalTranscode,
+  getExternalTranscodeState,
+} from './external-transcode';
+import type { ExternalTranscodeProgress } from '../../../src/types/recorder';
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -116,6 +125,8 @@ let apiOrigin = 'http://localhost:3002';
 let detectedEncoder = 'libx264';
 /** 是否为软件编码 */
 let isSoftwareEncoder = false;
+/** 外部视频转码进行中标志，与录制互斥 */
+let isExternalTranscoding = false;
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -487,6 +498,152 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
   enqueueExistingRawFiles(tmpDir);
 }
 
+// ─── 外部视频转码 ──────────────────────────────────────────────────────────────
+
+async function selectVideoFiles(): Promise<{ cancelled: boolean; filePaths: string[] }> {
+  const result = await dialog.showOpenDialog({
+    title: '选择要转码的视频文件',
+    filters: [{ name: '视频文件', extensions: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv'] }],
+    properties: ['openFile', 'multiSelections'],
+  });
+  return { cancelled: result.canceled, filePaths: result.filePaths };
+}
+
+async function startExternalVideoTranscode(
+  roomId: string,
+  authToken: string,
+  inputPath: string,
+): Promise<{ error?: string }> {
+  if (isRecording() || isExternalTranscoding) {
+    return { error: '录制或转码已在进行中' };
+  }
+  isExternalTranscoding = true;
+
+  // ② 创建临时目录
+  const extSessionId = uuidv4();
+  const extTmpDir = path.join(app.getPath('temp'), 'cowatch-ext', extSessionId);
+  fs.mkdirSync(extTmpDir, { recursive: true });
+
+  // ③ 初始化上传层
+  initUploader(
+    { roomId, sessionId: extSessionId, authToken, apiOrigin, disableThrottle: true },
+    {
+      onProgress: () => pushExternalProgress(),
+      onLog: (msg) => console.log(msg),
+    },
+  );
+
+  // ④ 启动转码
+  startExternalTranscode(
+    {
+      inputPath,
+      outputDir: extTmpDir,
+      detectedEncoder,
+      isSoftwareEncoder,
+    },
+    {
+      onSegmentReady: (filePath) => enqueueUpload(filePath),
+      onProgress: () => pushExternalProgress(),
+      onComplete: () => void handleExternalTranscodeComplete(extSessionId, extTmpDir, roomId, authToken),
+      onError: (msg) => {
+        console.error(`[recorder] 外部转码失败：${msg}`);
+        void handleExternalTranscodeError(extSessionId, extTmpDir, msg);
+      },
+      onLog: (msg) => console.log(msg),
+    },
+  );
+
+  return {};
+}
+
+function pushExternalProgress(): void {
+  const { active } = getExternalTranscodeState();
+  const info: ExternalTranscodeProgress = {
+    phase: active ? 'transcoding' : 'uploading',
+    uploaded: getUploadedCount(),
+    estimated: -1,
+  };
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('recorder:transcodeExternal:progress', info);
+  }
+}
+
+async function handleExternalTranscodeComplete(
+  extSessionId: string,
+  extTmpDir: string,
+  roomId: string,
+  authToken: string,
+): Promise<void> {
+  // 等待上传排空
+  await waitForUploadQueue();
+  await Promise.allSettled(Array.from(getActiveUploads()));
+
+  // 调用 finish 接口
+  const keys = getSegmentKeys();
+  if (keys.length > 0) {
+    try {
+      const response = await net.fetch(
+        `${apiOrigin}/api/rooms/${roomId}/recording/finish`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+          },
+          body: JSON.stringify({
+            segmentKeys: keys,
+            displayName: `外部视频 ${new Date().toLocaleString('zh-CN')}`,
+            durationSeconds: keys.length * HLS_SEGMENT_DURATION,
+          }),
+          duplex: 'half',
+        } as RequestInit,
+      );
+
+      if (!response.ok) {
+        console.error(`[recorder] 外部转码 finish 接口失败：HTTP ${response.status}`);
+      }
+    } catch (err) {
+      console.error('[recorder] 外部转码 finish 接口异常：', (err as Error).message);
+    }
+  }
+
+  // 推送完成事件
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('recorder:transcodeExternal:progress', {
+      phase: 'completed' as const,
+      uploaded: getUploadedCount(),
+      estimated: getUploadedCount(),
+    });
+  }
+
+  // 清理
+  cleanupUploader();
+  isExternalTranscoding = false;
+  fs.rm(extTmpDir, { recursive: true, force: true }, (err) => {
+    if (err) console.warn('[recorder] 外部转码临时目录清理失败：', err.message);
+  });
+}
+
+async function handleExternalTranscodeError(
+  _extSessionId: string,
+  extTmpDir: string,
+  _errorMsg: string,
+): Promise<void> {
+  cleanupUploader();
+  isExternalTranscoding = false;
+  fs.rm(extTmpDir, { recursive: true, force: true }, () => {
+    // best-effort cleanup
+  });
+
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('recorder:transcodeExternal:progress', {
+      phase: 'failed' as const,
+      uploaded: 0,
+      estimated: -1,
+    });
+  }
+}
+
 // ─── IPC 注册 ─────────────────────────────────────────────────────────────────
 
 export function registerRecorderHandlers(): void {
@@ -542,5 +699,33 @@ export function registerRecorderHandlers(): void {
 
   ipcMain.handle('auth:setToken', (_event, token: string) => {
     setAuthTokenForRecorder(token);
+  });
+
+  ipcMain.handle('recorder:selectVideoFiles', async () => {
+    return selectVideoFiles();
+  });
+
+  ipcMain.handle('recorder:transcodeExternal', async (
+    _event,
+    roomId: string,
+    authToken: string,
+    filePath: string,
+  ) => {
+    try {
+      return await startExternalVideoTranscode(roomId, authToken, filePath);
+    } catch (err) {
+      console.error('[recorder] transcodeExternal 异常：', (err as Error).message);
+      return { error: (err as Error).message || '转码启动失败' };
+    }
+  });
+
+  ipcMain.handle('recorder:transcodeExternal:cancel', async () => {
+    try {
+      await stopExternalTranscode();
+      cleanupUploader();
+      isExternalTranscoding = false;
+    } catch (err) {
+      console.error('[recorder] transcodeExternal:cancel 异常：', (err as Error).message);
+    }
   });
 }

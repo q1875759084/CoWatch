@@ -16,6 +16,7 @@ import CollapseSection from '@/components/CollapseSection';
 import VideoPlayer, { type VideoPlayerHandle } from './VideoPlayer';
 import RightPanel from './components/RightPanel';
 import VideoUploader from './VideoUploader';
+import ElectronVideoUploader from './ElectronVideoUploader';
 import VideoList from './VideoList';
 import VideoTagBar from './VideoTagBar';
 import PainterLayer, {
@@ -44,6 +45,7 @@ function RoomPageInner() {
     const { userInfo } = useUser();
     const { roomMeta, setRoomMeta } = useRoomMeta();
     const { recorderState } = useRecorderState();
+    const isElectron = !!window.electronBridge?.isElectron;
 
     // ── 录制中：阻止页面关闭/刷新，并在 beforeunload 时自动停止录制 ──────────
     useEffect(() => {
@@ -738,9 +740,11 @@ function RoomPageInner() {
                     </CollapseSection>
                     {/* 上传区（全员可见可操作） */}
                     <CollapseSection title="上传视频" collapsible defaultOpen={false}>
-                        <VideoUploader
-                            lastVideoAddedId={lastVideoAddedId}
-                        />
+                        {isElectron ? (
+                            <ElectronVideoUploader lastVideoAddedId={lastVideoAddedId} />
+                        ) : (
+                            <VideoUploader lastVideoAddedId={lastVideoAddedId} />
+                        )}
                     </CollapseSection>
                     {/*
            * .playerRatio 是 16:9 固定比例容器，是所有客户端视觉内容完全一致的区域。

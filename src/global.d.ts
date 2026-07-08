@@ -87,6 +87,14 @@ interface ElectronBridge {
     onPendingUpdate: (cb: (list: import('./types/recorder').PendingRecording[]) => void) => void;
     /** 移除补传进度更新回调 */
     offPendingUpdate: () => void;
+      /** 打开多选文件对话框，返回选中的文件路径列表。{ cancelled: true } 表示用户取消选择 */
+      selectVideoFiles: () => Promise<{ cancelled: boolean; filePaths: string[] }>;
+      /** 转码指定文件为 HLS 分段并上传。返回 { error: string } 表示启动失败 */
+      transcodeExternal: (roomId: string, authToken: string, filePath: string) => Promise<{ error?: string }>;
+      /** 注册外部视频转码进度回调 */
+      onExternalTranscodeProgress: (cb: (info: import('./types/recorder').ExternalTranscodeProgress) => void) => void;
+      /** 移除外部视频转码进度回调 */
+      offExternalTranscodeProgress: () => void;
   };
 
   /** 推送最新 JWT token 给主进程，token 无感刷新后调用，防止录制上传用过期 token */
