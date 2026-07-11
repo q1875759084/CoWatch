@@ -1,0 +1,76 @@
+classDiagram
+    class CropRect {
+        +x: number
+        +y: number
+        +w: number
+        +h: number
+    }
+    class PauseReason {
+        <<enum>>
+        MINIMIZED
+        FOREGROUND_LOST
+    }
+    class StopReason {
+        <<enum>>
+        MOVED
+        CLOSED
+    }
+    class RecordingConfig {
+        +sessionId: string
+        +sourceId: string
+        +displayTitle: string
+        +tmpDir: string
+        +detectedEncoder: string
+        +isSoftwareEncoder: boolean
+        +cachedAvfIndex: number
+        +crop: CropRect
+    }
+    class RecordingCallbacks {
+        +onCrash(title)
+        +onShouldStop()
+        +onLog(msg)
+        +onPauseStateChange(paused, reason: PauseReason)
+        +onAutoStopped(reason: StopReason)
+    }
+    class RecordingLayer {
+        +startRecording(cfg, cbs)
+        +stopRecording()
+        +pauseRecording()
+        +resumeRecording() Promise~void~
+        +isPaused() bool
+        -spawnFfmpeg() ChildProcess
+    }
+    class SentinelClient {
+        +startSentinel(title, cbs) SentinelHandle
+    }
+    note for SentinelClient "spawns electron/bin/window_sentinel.exe (Python/PyInstaller); stdout 行协议语言无关，TS 侧零改动"
+    class SentinelHandle {
+        +stop()
+    }
+    class SentinelCallbacks {
+        +onRect(rect: CropRect)
+        +onPaused(reason: PauseReason)
+        +onResumed()
+        +onStopped(reason: StopReason)
+        +onNotFound()
+    }
+    class Coordinator {
+        +start()
+        +stop(reason?)
+        -handleFfmpegCrash()
+    }
+    class WindowWatch {
+        +isWindowAlive(sourceId) bool
+        +startWindowWatcher(...)  // gated off in crop mode
+    }
+
+    RecordingConfig "1" *-- "1" CropRect : crop
+    RecordingCallbacks <.. RecordingLayer : uses
+    RecordingLayer ..> SentinelClient : (via coordinator)
+    SentinelClient "1" *-- "1" SentinelHandle : returns
+    SentinelClient ..> SentinelCallbacks : invokes
+    Coordinator ..> RecordingLayer : controls
+    Coordinator ..> SentinelClient : starts/reads RECT
+    Coordinator ..> WindowWatch : fallback (isWindowAlive)
+    Coordinator ..> StopReason : maps STOP->stop
+    Coordinator ..> PauseReason : maps PAUSE->pause

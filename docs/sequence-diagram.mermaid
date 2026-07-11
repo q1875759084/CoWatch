@@ -1,0 +1,53 @@
+sequenceDiagram
+    participant UI as Renderer (React)
+    participant Coord as Coordinator (recorder/index.ts)
+    participant SC as SentinelClient
+    participant Sentinel as window_sentinel.exe (Python/PyInstaller)
+    participant Rec as RecordingLayer
+    participant FF as ffmpeg
+
+    Note over UI,FF: ── 启动 ──
+    UI->>Coord: recorder:start(windowId, title)
+    Coord->>SC: startSentinel(title, cbs)
+    SC->>Sentinel: spawn electron/bin/window_sentinel.exe (Python)
+    Sentinel->>Sentinel: EnumWindows + DwmGetWindowAttribute + DPI(主屏)
+    Sentinel-->>SC: stdout "RECT <x> <y> <w> <h>"
+    SC-->>Coord: onRect(CropRect)
+    Coord->>Rec: startRecording(cfg{crop})
+    Rec->>FF: spawnFfmpeg(ddagrab+crop, output_idx=0)
+    Sentinel-->>Sentinel: GetMessageW 消息泵，监听 LOCATIONCHANGE/DESTROY/MINIMIZESTART/MINIMIZEEND/FOREGROUND
+
+    Note over UI,FF: ── 暂停：最小化 / alt+tab（留会话，续录）──
+    Sentinel->>Sentinel: MINIMIZESTART / FOREGROUND(other)
+    Sentinel-->>SC: stdout "PAUSE <reason>"
+    SC-->>Coord: onPaused(reason)
+    Coord->>Rec: pauseRecording()
+    Rec->>FF: kill audio(SIGINT) → ffmpeg stdin 'q'
+    Rec-->>Coord: onPauseStateChange(true, reason)
+    Coord->>UI: recorder:pauseState{reason}
+    Note over UI: 横幅 "已暂停(已最小化/已切换)"
+
+    Note over UI,FF: ── 恢复：最小化恢复 / 切回（续号新 ffmpeg）──
+    Sentinel->>Sentinel: MINIMIZEEND / FOREGROUND(target)
+    Sentinel-->>SC: stdout "RESUME"
+    SC-->>Coord: onResumed()
+    Coord->>Rec: resumeRecording()
+    Rec->>FF: spawnFfmpeg() → getNextSegmentNumber() 续号
+    Rec-->>Coord: onPauseStateChange(false)
+    Coord->>UI: recorder:pauseState{false}
+
+    Note over UI,FF: ── 移动结束：前台可见时移动（去抖）──
+    Sentinel->>Sentinel: LOCATIONCHANGE(shouldRecord, 去抖确认)
+    Sentinel-->>SC: stdout "STOP MOVED"
+    SC-->>Coord: onStopped(MOVED)
+    Coord->>Coord: stop('MOVED') → finish + cleanup
+    Coord->>UI: recorder:autoStopped('MOVED')
+
+    Note over UI,FF: ── 关闭结束 ──
+    Sentinel->>Sentinel: DESTROY
+    Sentinel-->>SC: stdout "STOP CLOSED"
+    SC-->>Coord: onStopped(CLOSED)
+    Coord->>Coord: stop('CLOSED') → finish
+    Coord->>UI: recorder:autoStopped('CLOSED')
+
+    Note over UI,FF: ── 遮挡 / 非抢占重叠：无事件 → 正常录制 ──
