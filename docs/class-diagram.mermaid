@@ -1,76 +1,104 @@
 classDiagram
-    class CropRect {
-        +x: number
-        +y: number
-        +w: number
-        +h: number
+    %% ===== 捕获 exe 内部模块（C++ · 方案2a） =====
+    class CaptureApp {
+        +main(argc, argv)
+        -parseArgs() Args
+        -captureProc : WinrtCapture
+        -audioProc : WasapiCapture
+        -videoEnc : NvencEncoder
+        -audioEnc : AudioEncoder
+        -out : PipeOutput
+        +runLoop()   %% 33ms 节拍：纹理直送NVENC, 不回读
     }
-    class PauseReason {
-        <<enum>>
-        MINIMIZED
-        FOREGROUND_LOST
+    class WinrtCapture {
+        +init(hwnd, captureCursor) bool
+        +start() bool
+        -device : ID3D11Device
+        -sharedTex : ID3D11Texture2D
+        -framePool : Direct3D11CaptureFramePool
+        -onFrameArrived()   %% 拷帧到 sharedTex, 置 textureWritten
+        -onClosed()         %% 置 active=false → 退出码0
     }
-    class StopReason {
-        <<enum>>
-        MOVED
-        CLOSED
+    class WasapiCapture {
+        +init(deviceId) bool
+        +start() bool
+        -renderClient : IAudioCaptureClient
+        -onAudioData(pcm, len)   %% 交 AudioEncoder
     }
-    class RecordingConfig {
-        +sessionId: string
-        +sourceId: string
-        +displayTitle: string
-        +tmpDir: string
-        +detectedEncoder: string
-        +isSoftwareEncoder: boolean
-        +cachedAvfIndex: number
-        +crop: CropRect
+    class NvencEncoder {
+        +init(device, tex, EncodeProfile) bool
+        +encodeFrame(tex) Packet   %% DX11 interop, NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX, 不回读
+        -encoder : NVENC
+        -gop : int   %% = hls_time*fps
     }
-    class RecordingCallbacks {
-        +onCrash(title)
-        +onShouldStop()
-        +onLog(msg)
-        +onPauseStateChange(paused, reason: PauseReason)
-        +onAutoStopped(reason: StopReason)
+    class AudioEncoder {
+        +init(EncodeProfile) bool
+        +encodePcm(pcm, len) Packet   %% libavcodec aac, 48k/128k
     }
-    class RecordingLayer {
+    class PipeOutput {
+        +writeVideoPacket(nal)   %% 压缩码流
+        +writeAudioPacket(adts)
+        +emitReady(w,h,fps,codec)
+        -fdVideo : 3
+        -fdAudio : 4
+        -fdStatus : 1
+    }
+    CaptureApp --> WinrtCapture
+    CaptureApp --> WasapiCapture
+    CaptureApp --> NvencEncoder
+    CaptureApp --> AudioEncoder
+    CaptureApp --> PipeOutput
+    WinrtCapture --> NvencEncoder : 共享纹理直送(不回读)
+    WasapiCapture --> AudioEncoder : PCM
+    NvencEncoder --> PipeOutput : 压缩包
+    AudioEncoder --> PipeOutput : 压缩包
+
+    %% ===== recorder 侧接口（TypeScript） =====
+    class Coordinator {
+        +start(windowId, title, roomId, token)
+        +stop()
+        -mode : window|screen
+        -sentinelActive : bool
+    }
+    class RecordingController {
         +startRecording(cfg, cbs)
+        +pauseRecording(reason)
+        +resumeRecording()
         +stopRecording()
-        +pauseRecording()
-        +resumeRecording() Promise~void~
         +isPaused() bool
-        -spawnFfmpeg() ChildProcess
+        +getRecordedDurationSeconds() number
+        -muxProc : ChildProcess    %% window: ffmpeg-mux(仅封装); screen: ffmpeg(编码+转码)
+        -captureProc : ChildProcess  %% 仅窗口模式
+        -startOffsetForNextSession
     }
     class SentinelClient {
-        +startSentinel(title, cbs) SentinelHandle
+        +startSentinel(title, cbs, opts)
+        +stopSentinel()
     }
-    note for SentinelClient "spawns electron/bin/window_sentinel.exe (Python/PyInstaller); stdout 行协议语言无关，TS 侧零改动"
-    class SentinelHandle {
-        +stop()
+    class MuxerSpawn {
+        +spawnMuxer()
     }
-    class SentinelCallbacks {
-        +onRect(rect: CropRect)
-        +onPaused(reason: PauseReason)
-        +onResumed()
-        +onStopped(reason: StopReason)
-        +onNotFound()
+    class CaptureExeSpawn {
+        +spawnCaptureExe(title) : ChildProcess  %% stdio[3/4]=视频/音频压缩写端
     }
-    class Coordinator {
-        +start()
-        +stop(reason?)
-        -handleFfmpegCrash()
+    class WindowWatcher {
+        +startWindowWatcher(srcId, title, onGone, isStopped, opts)
+        -enablePollingStop : bool   %% feat 基线缺失，需自 exp 移植
     }
-    class WindowWatch {
-        +isWindowAlive(sourceId) bool
-        +startWindowWatcher(...)  // gated off in crop mode
-    }
+    Coordinator --> RecordingController
+    Coordinator --> SentinelClient : 仅 window 模式
+    RecordingController --> MuxerSpawn
+    RecordingController --> CaptureExeSpawn : 仅 window 模式
+    RecordingController --> WindowWatcher : window 模式 enablePollingStop=false
+    SentinelClient ..> RecordingController : onPause/onResume/onStop
 
-    RecordingConfig "1" *-- "1" CropRect : crop
-    RecordingCallbacks <.. RecordingLayer : uses
-    RecordingLayer ..> SentinelClient : (via coordinator)
-    SentinelClient "1" *-- "1" SentinelHandle : returns
-    SentinelClient ..> SentinelCallbacks : invokes
-    Coordinator ..> RecordingLayer : controls
-    Coordinator ..> SentinelClient : starts/reads RECT
-    Coordinator ..> WindowWatch : fallback (isWindowAlive)
-    Coordinator ..> StopReason : maps STOP->stop
-    Coordinator ..> PauseReason : maps PAUSE->pause
+    %% ===== 跨进程接口边界（fd 契约 · 方案2a 压缩流） =====
+    class FdContract {
+        <<shared knowledge>>
+        +fd0 stdin 控制 q
+        +fd1 stdout JSON 状态
+        +fd3 视频压缩码流(H.264/HEVC NAL)
+        +fd4 音频 AAC ADTS 包
+    }
+    CaptureExeSpawn ..> FdContract : 产出 exe stdio[3/4]
+    MuxerSpawn ..> FdContract : ffmpeg-mux 消费 pipe:3/pipe:4

@@ -28,6 +28,17 @@ export interface WindowWatcher {
   stop: () => void;
 }
 
+/** startWindowWatcher 选项。 */
+export interface WindowWatcherOptions {
+  /**
+   * 是否启用「5s 轮询判消失 → stop」检测。默认 true。
+   * crop / sentinel 接管窗口检测的模式下置 false，
+   * 避免与 sentinel 的双重检测冲突（sentinel 已负责 move/close/最小化）。
+   * 无论是否启用轮询，isWindowAlive 崩溃兜底均保持可用（由 handleFfmpegCrash 独立调用）。
+   */
+  enablePollingStop?: boolean;
+}
+
 /**
  * 单次检测目标窗口是否仍然存在。
  *
@@ -90,7 +101,19 @@ export function startWindowWatcher(
   windowTitle: string | undefined,
   onGone: () => void,
   isStopped: () => boolean,
+  opts?: WindowWatcherOptions,
 ): WindowWatcher {
+  const enablePollingStop = opts?.enablePollingStop ?? true;
+
+  // 禁用轮询 stop：交由 sentinel 接管窗口检测，避免双重检测冲突。
+  // isWindowAlive 崩溃兜底不受影响（由 handleFfmpegCrash 独立调用，不依赖此处轮询）。
+  if (!enablePollingStop) {
+    console.log(`[window-watch] 轮询 stop 已禁用（${sourceId}），由 sentinel 接管窗口检测`);
+    return {
+      stop() { /* no-op：未启动定时器 */ },
+    };
+  }
+
   let consecutiveMisses = 0;
   let timer: ReturnType<typeof setInterval> | null = setInterval(async () => {
     if (isStopped()) {

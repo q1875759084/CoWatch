@@ -1,53 +1,44 @@
-# GPU 管线优化尝试与结论（修正版）
+## 如何解决
+既然根因是 gfxcapture 的捕获机制，解法只有换捕获源：
 
-## 目标
+### 推荐方案：ddagrab + crop 裁窗
+用 DDA 全屏捕获（已验证稳定30fps）+ crop 滤镜裁到窗口区域：
 
-将录制层 CPU filter 链改为 GPU 链路，减轻 10 秒 GOP 边界帧的 CPU 争抢。
+当前（卡顿）：
+  gfxcapture=window_title=xxx:max_framerate=30 → WGC推模式 → 5fps
 
-## 环境
+改为（稳定）：
+  ddagrab=output_idx=0:framerate=30 → DDA拉模式 → 30fps
+  + crop=W:H:X:Y → 裁到窗口矩形
 
-- Windows 11，NVIDIA RTX 4060 Laptop + Intel UHD 双显卡
-- FFmpeg 8.1 gyan.dev Windows 构建版
-- 录制编码器 h264_nvenc，转码层 + 上传层全开
+  需要解决的问题 ：
 
-## 三轮测试（全部失败）
+1. 窗口坐标获取 ：用 Win32 API（ GetWindowRect ）实时获取窗口位置
+2. crop 坐标动态更新 ：窗口移动时 crop 参数要更新（FFmpeg 的 crop 滤镜不支持运行时改参数，需要其他方案）
+3. 窗口最小化/关闭处理 ：窗口不可见时 DDA 捕获到的是桌面，需检测并暂停
+crop 动态更新的技术方案 ：
 
-| 轮次 | Filter 链 | 位置 | scale_cuda? | 结果 |
-|------|----------|------|-------------|------|
-| 1 | `hwdownload,format=bgra,format=nv12,hwupload_cuda,scale_cuda=...` | -vf | ✅ | dup=4175 |
-| 2 | `hwdownload,format=bgra,scale(CPU),format=nv12,hwupload_cuda` | -vf | ❌ | dup=3212 |
-| 3 | `hwdownload,format=bgra,scale(CPU),format=nv12,hwupload_cuda` | lavfi 输入 | ❌ | 依旧卡顿 |
+FFmpeg 的 crop 滤镜参数是静态的，不能运行时改。两个替代方案：
 
-## 核实的 3 条铁证
+- 方案1：sendcmd + zmq 滤镜 ：FFmpeg 支持 zmq 滤镜接收运行时命令动态调整参数，但需要编译时启用 --enable-libzmq （需验证当前 build）
+- 方案2：录制全屏 + 后期裁剪 ：录制时不裁，转码层加 crop（转码时窗口位置已确定，可静态裁剪）。但用户可能移动窗口，且全屏内容会入镜
+- 方案3：固定区域捕获 ：提示用户将游戏窗口固定在屏幕某区域（如全屏窗口化），crop 到固定坐标。最简单但不灵活
+方案2 的优势 ：录制层完全不动（ddagrab 全屏），只在转码层加 crop。但问题是窗口可能移动，且全屏录制会包含桌面内容（隐私问题）。
 
-### 铁证 1：scale_cuda 在 gfxcapture 下从未生效
+方案1（zmq）如果可行是最优解 ：录制时 ddagrab 全屏 + crop 初始坐标，Node 层定时 GetWindowRect 检测窗口位置变化，通过 zmq 发送命令更新 crop 参数。
 
-- `testsrc` 合成源能跑 scale_cuda（无 D3D11 依赖），但 gfxcapture/ddagrab 不能
-- CUDA device context（`-init_hw_device cuda`）与 ddagrab/gfxcapture 的 D3D11 context 冲突 → `Selected output not supported`
-- `hwmap=derive_device=cuda` 在此 FFmpeg 构建版不支持 → `-40: Function not implemented`
-- `hwupload_cuda` 可绕过自动初始化 CUDA，但：
-  - `scale_cuda` 不支持 bgra→nv12 转换，需 CPU 先做 format=nv12
-  - 要 scale_cuda 必须 filter 在 -vf，拆到 -vf 会破坏 gfxcapture 帧节拍
-  - **二者互斥，gfxcapture 下 scale_cuda 不可行**
+& "c:\Users\绝绝子\Desktop\Co\CoWatch\electron\bin\ffmpeg.exe" -filters 2>&1 | Select-String "zmq" 
+zmq 和 azmq 滤镜都可用。 当前 FFmpeg build 已编译 --enable-libzmq 。
+现在验证 sendcmd 滤镜是否也可用（配合 zmq 做运行时命令注入）：
+& "c:\Users\绝绝子\Desktop\Co\CoWatch\electron\bin\ffmpeg.exe" -filters 2>&1 | Select-String "sendcmd|crop" 
+全部可用。总结：
 
-### 铁证 2：卡顿是真实且严重的——不是网络延迟
+滤镜 用途 状态 zmq 接收 ZMQ 运行时命令，动态调整下游滤镜参数 ✅ 可用 sendcmd 向下游滤镜发送命令（静态时序） ✅ 可用 crop 裁剪视频区域 ✅ 可用
 
-- dup=3212 / 2:09 时长，按 30fps ≈ 3870 帧期望 → **~83% 帧为复制帧**
-- drop=0 始终（CFR 只复制不丢弃）
-- 每 10s chokidar 触发新 ffmpeg 转码进程（NVDEC+NVENC），dup 突发增长：
-  - seg000 转码期间 dup 73→271（+198）
-  - seg002 转码期间 dup 534→777（+243）
-- `[window-watch] 窗口未找到` 多次出现，与 dup 突发时间重叠
-- 转码层无条件开启（`start()` 里 `startTranscodingWatcher` 无开关），每 10s spawn 全新 ffmpeg
+ddagrab + zmq + crop 方案在当前 FFmpeg build 上完全可行 ：
+ddagrab=output_idx=0:framerate=30,hwdownload,format=bgra,
+  crop=W:H:X:Y,zmq,scale=w='min(iw,1280)':h=-2,format=yuv420p
 
-### 铁证 3：CFR 写死，一旦丢帧永不恢复
-
-- `recording/index.ts` 硬编码 `-vsync cfr -r 30`
-- CFR 在捕获跟不上实时时不做降帧，只做帧复制 → dup 单调递增
-- 一旦某次 10s 转码脉冲触发丢帧，后续每 10s 再来一次脉冲 → 永远爬不起来
-
-## 正确结论
-
-1. **scale_cuda 在 gfxcapture 场景下不可行**（约束 1 + 约束 4）
-2. **卡顿根因不是 CPU scale**（旧 pipeline CPU scale 在 70% 录制中全程正常）
-3. **根因是转码层 per-segment spawn + CFR 写死 + gfxcapture 窗口丢失**在国家预算边界形成不可恢复的恶性循环
+  Node 层通过 ZeroMQ 向 ffmpeg 进程发送命令动态更新 crop 参数：
+  // 窗口移动时发送
+zmq.send(`crop w=${newW} h=${newH} x=${newX} y=${newY}`)

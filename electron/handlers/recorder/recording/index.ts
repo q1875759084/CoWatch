@@ -1,5 +1,14 @@
 /**
- * 录制层：负责启动/停止 FFmpeg，管理临时目录。
+ * 录制层：负责启动/停止捕获与编码进程，管理临时目录。
+ *
+ * 模式分支（方案2a 终态）：
+ *   - window 源：spawn `window_capture.exe`（WGC + NVENC DX11 直送 + 内嵌 AAC）→ 等 READY
+ *     → spawn `ffmpeg-mux`（仅封装压缩流）→ 成品 `segNNN_opt.ts` 直接进 upload 层
+ *     （**去除逐片 transcode 接线**，编码在 GPU 内，无回读）。
+ *   - screen 源：保持 feat 基线原样（ddagrab + audio_capture.exe 双进程 + 转码层），不改动。
+ *
+ * pause/resume/stop + crash 重启 + 时间轴锚点沿用实验版语义；窗口模式 pause 即整体终止
+ * exe + mux（Windows 不支持 SIGSTOP），resume 以 -start_number 续号重建。
  */
 
 import fs from 'fs';
@@ -8,9 +17,32 @@ import { spawn, ChildProcess } from 'child_process';
 import { app, desktopCapturer } from 'electron';
 
 import { startWindowWatcher, isWindowAlive } from '../window-watch';
-import { getFfmpegPath, HLS_SEGMENT_DURATION } from '../shared';
+import {
+  getFfmpegPath,
+  HLS_SEGMENT_DURATION,
+  registerSessionAnchor,
+  getOutputTsOffset,
+} from '../shared';
+import type { PauseReason } from './types';
+import {
+  buildExeArgs,
+  buildMuxArgs,
+  type CaptureProfile,
+  type EncodeProfile,
+  type MuxProfile,
+} from './profiles';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────────
+
+export interface WindowCaptureConfig {
+  capture: CaptureProfile;
+  encode: EncodeProfile;
+  mux: MuxProfile;
+  audio: boolean;
+  audioDevice?: string;
+  muxTarget: 'pipe' | 'file' | 'null';
+  stats: boolean;
+}
 
 export interface RecordingConfig {
   sessionId: string;
@@ -20,6 +52,8 @@ export interface RecordingConfig {
   detectedEncoder: string;
   isSoftwareEncoder: boolean;
   cachedAvfIndex: number;
+  /** window 模式注入的捕获/编码/封装 Profile 集合（方案2a 主进程注入）。 */
+  windowCapture?: WindowCaptureConfig;
 }
 
 export interface RecordingCallbacks {
@@ -32,8 +66,7 @@ export interface RecordingCallbacks {
 
 const MAX_CRASH_RESTARTS = 3;
 
-// ─── 模块级状态 ─────────────────────────────────────────────────────────────
-
+// ─── 模块级状态（screen 路径，保留不改）────────────────────────────────────
 let ffmpegProcess: ChildProcess | null = null;
 let audioCaptureProcess: ChildProcess | null = null;
 let tmpDir = '';
@@ -47,6 +80,17 @@ let currentSourceId = '';
 let currentWindowTitle = '';
 let callbacks: RecordingCallbacks = {};
 
+// ─── 模块级状态（window 路径，方案2a 新增）──────────────────────────────────
+let captureProc: ChildProcess | null = null; // window_capture.exe
+let muxProc: ChildProcess | null = null;      // ffmpeg-mux（window 模式的 liveFfmpeg）
+let currentMuxProfile: MuxProfile | null = null;
+let lastCfg: RecordingConfig | null = null;
+let m_paused = false;
+let muxReady = false;
+let crashNotified = false; // window 模式：单次启动尝试内去重 crash 上报（防 close/error 双触发）
+let recordedSecondsAtPause = 0;
+let startOffsetForNextSession = 0;
+
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
 export function setEncoderInfo(encoder: string, soft: boolean): void {
@@ -59,7 +103,8 @@ export function getTmpDir(): string {
 }
 
 export function isRecording(): boolean {
-  return ffmpegProcess !== null && !isUserStopped;
+  if (isUserStopped) return false;
+  return ffmpegProcess !== null || captureProc !== null || muxProc !== null;
 }
 
 export async function startRecording(
@@ -80,24 +125,193 @@ export async function startRecording(
     await resolveAvfIndex(cfg.sourceId);
   }
 
-  ffmpegProcess = spawnFfmpeg();
-  attachFfmpegHandlers();
+  if (currentSourceId.startsWith('window:')) {
+    // 窗口模式（方案2a）：spawn exe + 等 READY + spawn ffmpeg-mux
+    await startWindowRecording(cfg, cbs);
+  } else {
+    // screen 模式（feat 基线，原样保留）
+    ffmpegProcess = spawnFfmpeg();
+    attachFfmpegHandlers();
+  }
 
   if (currentSourceId.startsWith('window:')) {
+    // 窗口模式由 sentinel 接管窗口检测，禁用 5s 轮询-stop 避免双重检测冲突。
     windowWatcher = startWindowWatcher(
       currentSourceId,
       currentWindowTitle,
       () => { cbs.onShouldStop?.(); },
       () => isUserStopped,
+      { enablePollingStop: false },
     );
   }
 
-  cbs.onLog?.(`[recording] FFmpeg 启动成功，tmpDir=${tmpDir}`);
+  cbs.onLog?.(`[recording] 录制启动成功，tmpDir=${tmpDir}`);
 }
+
+// ─── window 模式实现（方案2a）────────────────────────────────────────────────
+
+function getCaptureExePath(): string | null {
+  const binName = 'window_capture.exe';
+  if (app.isPackaged) {
+    const bundled = path.join(process.resourcesPath ?? '', 'bin', binName);
+    if (fs.existsSync(bundled)) return bundled;
+  } else {
+    const dev = path.join(app.getAppPath(), 'electron', 'bin', binName);
+    if (fs.existsSync(dev)) return dev;
+  }
+  return null;
+}
+
+async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallbacks): Promise<void> {
+  crashNotified = false; // 新一次启动尝试：允许本次崩溃上报一次（防 close/error 双触发）
+  if (!cfg.windowCapture) {
+    cbs.onLog?.('[recording] 缺少 windowCapture 配置');
+    if (!crashNotified) { crashNotified = true; cbs.onCrash?.(cfg.displayTitle); }
+    return;
+  }
+  lastCfg = cfg;
+  const { capture, encode, mux, audio, audioDevice, muxTarget, stats } = cfg.windowCapture;
+  currentMuxProfile = { ...mux };
+  m_paused = false;
+  muxReady = false;
+
+  const exePath = getCaptureExePath();
+  if (!exePath) {
+    cbs.onLog?.('[recording] 未找到 window_capture.exe');
+    if (!crashNotified) { crashNotified = true; cbs.onCrash?.(cfg.displayTitle); }
+    return;
+  }
+
+  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice });
+  captureProc = spawn(exePath, exeArgs, { stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'] });
+
+  let buf = '';
+  captureProc.stdout?.on('data', (chunk: Buffer) => {
+    buf += chunk.toString();
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) handleCaptureLine(line, cfg, cbs);
+    }
+  });
+  captureProc.stderr?.on('data', (chunk: Buffer) => {
+    cbs.onLog?.(`[capture:stderr] ${chunk.toString().trim()}`);
+  });
+  captureProc.on('close', (code: number | null) => {
+    captureProc = null;
+    if (isUserStopped) return;
+    if (code === 0) {
+      cbs.onLog?.(`[recording] window_capture 干净退出 code=${code}`);
+      // 窗口关闭类干净退出 → 触发收尾（sentinel 亦会 STOP，stop() 有重入保护）
+      cbs.onShouldStop?.();
+    } else {
+      cbs.onLog?.(`[recording] window_capture 异常退出 code=${code}`);
+      if (!crashNotified) { crashNotified = true; cbs.onCrash?.(cfg.displayTitle); }
+    }
+  });
+  captureProc.on('error', (err: Error) => {
+    cbs.onLog?.(`[recording] window_capture spawn 失败：${err.message}`);
+    if (!crashNotified) { crashNotified = true; cbs.onCrash?.(cfg.displayTitle); }
+  });
+
+  cbs.onLog?.(`[recording] window_capture 启动：${exeArgs.join(' ')}`);
+}
+
+function handleCaptureLine(line: string, cfg: RecordingConfig, cbs: RecordingCallbacks): void {
+  let msg: { type?: string; [k: string]: unknown };
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    cbs.onLog?.(`[capture] ${line}`);
+    return;
+  }
+  if (msg.type === 'READY') {
+    cbs.onLog?.(`[recording] capture READY w=${msg.w} h=${msg.h} fps=${msg.fps} codec=${msg.codec} hasAudio=${String(msg.hasAudio)}`);
+    // A5 修复：以 exe 实际音频能力为准更新 mux profile，避免 exe 音频初始化失败时不写 fd4
+    // 但 mux 仍等 pipe:4 而挂起。
+    if (currentMuxProfile) currentMuxProfile.hasAudio = !!msg.hasAudio;
+    spawnMuxer(cfg, cbs);
+  } else if (msg.type === 'CLOSED') {
+    cbs.onLog?.(`[recording] capture CLOSED reason=${msg.reason}`);
+    if (msg.reason === 'window_closed') cbs.onShouldStop?.();
+  } else if (msg.type === 'ERROR') {
+    cbs.onLog?.(`[recording] capture ERROR code=${msg.code} msg=${msg.msg}`);
+    // KI-1：不再单独 onCrash——exe 在 emitError 后必以非 0 退出，captureProc.on('close')
+    // 会统一上报 crash（restartRecording）。此处若也 onCrash 会级联 2 次 restartRecording，
+    // 更快耗尽 MAX_CRASH_RESTARTS=3。仅日志，避免双重触发。
+  } else {
+    cbs.onLog?.(`[capture] ${line}`);
+  }
+}
+
+function spawnMuxer(cfg: RecordingConfig, cbs: RecordingCallbacks): void {
+  if (!captureProc || !captureProc.stdio[3] || !currentMuxProfile) {
+    cbs.onLog?.('[recording] mux 缺少 exe 压缩流 fd，跳过');
+    return;
+  }
+  // 捕获当前 muxer 所对应的 exe 实例，避免后续 restart 覆盖模块变量后误杀新 exe（BUG-2②）
+  const ownerCapture = captureProc;
+  const ffmpeg = getFfmpegPath();
+  const muxArgs = buildMuxArgs(currentMuxProfile);
+  const stdio: Array<'pipe' | 'ignore' | { fd: number }> = [
+    'pipe', 'pipe', 'pipe',
+    { fd: (ownerCapture.stdio[3] as unknown as { fd: number }).fd },
+  ];
+  if (currentMuxProfile.hasAudio) {
+    stdio.push({ fd: (ownerCapture.stdio[4] as unknown as { fd: number }).fd });
+  } else {
+    stdio.push('ignore');
+  }
+
+  muxProc = spawn(ffmpeg, muxArgs, { stdio });
+  muxReady = true;
+  // BUG-2①：释放 Node 对 exe 压缩流读端(fd3/fd4)自身的副本引用。否则 muxer 崩溃时
+  // 内核管道读端引用计数不归零，exe 的 _write 收不到 EPIPE → 64KB 缓冲写满后永久阻塞。
+  ownerCapture.stdio[3]?.destroy();
+  ownerCapture.stdio[4]?.destroy();
+  muxProc.stderr?.on('data', (chunk: Buffer) => {
+    cbs.onLog?.(`[mux:stderr] ${chunk.toString().trim()}`);
+  });
+  muxProc.on('close', (code: number | null) => {
+    muxProc = null;
+    if (isUserStopped) return;
+    cbs.onLog?.(`[recording] ffmpeg-mux 异常退出 code=${code}`);
+    // BUG-2②：强杀已可能阻塞/僵死的旧 exe；其 captureProc.on('close') 会统一上报 crash 并触发
+    // 重启，此处不再重复 onCrash，避免与 captureProc close handler 的双重触发。
+    try { ownerCapture?.kill('SIGKILL'); } catch { /* ignore */ }
+  });
+  cbs.onLog?.('[recording] ffmpeg-mux 启动（仅封装 HLS）');
+}
+
+function gracefulQuitWindow(): Promise<void> {
+  return new Promise((resolve) => {
+    let pending = 0;
+    const done = () => { if (--pending <= 0) resolve(); };
+    const killProc = (p: ChildProcess | null) => {
+      if (!p) return;
+      pending++;
+      try { p.stdin?.write('q'); } catch { /* ignore */ }
+      p.on('close', () => done());
+      setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* ignore */ } done(); }, 5000);
+    };
+    killProc(muxProc); muxProc = null;
+    killProc(captureProc); captureProc = null;
+    if (pending === 0) resolve();
+  });
+}
+
+// ─── 停止 / 重启 / 暂停 / 恢复 ──────────────────────────────────────────────────
 
 export async function stopRecording(): Promise<void> {
   if (isUserStopped) return;
   isUserStopped = true;
+
+  if (currentSourceId.startsWith('window:')) {
+    await gracefulQuitWindow();
+    if (windowWatcher) { windowWatcher.stop(); windowWatcher = null; }
+    return;
+  }
 
   return new Promise((resolve) => {
     if (ffmpegProcess) {
@@ -143,10 +357,24 @@ export async function restartRecording(displayTitle: string): Promise<void> {
   if (isUserStopped) return;
   crashRestartCount++;
   if (crashRestartCount > MAX_CRASH_RESTARTS) {
-    callbacks.onLog?.(`[recording] ffmpeg 已连续崩溃 ${crashRestartCount} 次，放弃重启`);
+    callbacks.onLog?.(`[recording] 捕获源已连续崩溃 ${crashRestartCount} 次，放弃重启`);
     return;
   }
 
+  if (currentSourceId.startsWith('window:') && lastCfg) {
+    const nextSeg = getNextSegmentNumber();
+    if (currentMuxProfile) currentMuxProfile.startNumber = nextSeg;
+    registerSessionAnchor('window', {
+      startSegmentNumber: nextSeg,
+      startOffsetSeconds: getOutputTsOffset('window'),
+      registeredAt: Date.now(),
+    });
+    callbacks.onLog?.(`[recording] window 捕获源重启，第 ${crashRestartCount} 次（续号 ${nextSeg}）`);
+    void startWindowRecording(lastCfg, callbacks);
+    return;
+  }
+
+  // screen 路径（原样）
   callbacks.onLog?.(`[recording] ffmpeg 崩溃，第 ${crashRestartCount} 次重启...`);
   if (audioCaptureProcess) {
     try {
@@ -163,18 +391,61 @@ export async function checkWindowAlive(sourceId: string): Promise<boolean> {
   return isWindowAlive(sourceId);
 }
 
-// ─── FFmpeg 参数构造 ──────────────────────────────────────────────────────────
+/**
+ * 暂停录制。
+ *  - window 模式：整体终止 exe + ffmpeg-mux（Windows 不支持 SIGSTOP），记录续录偏移，保留会话。
+ *  - screen 模式：SIGSTOP 挂起 ffmpeg（原样）。
+ */
+export function pauseRecording(reason: PauseReason): void {
+  callbacks.onLog?.(`[recording] 暂停录制（${reason}）`);
+  if (currentSourceId.startsWith('window:') && (captureProc || muxProc)) {
+    recordedSecondsAtPause = getNextSegmentNumber() * (currentMuxProfile?.seg ?? HLS_SEGMENT_DURATION);
+    void gracefulQuitWindow();
+    m_paused = true;
+    return;
+  }
+  if (ffmpegProcess) {
+    try { ffmpegProcess.kill('SIGSTOP'); } catch (_) { /* ignore */ }
+  }
+}
+
+/**
+ * 恢复录制。
+ *  - window 模式：以 -start_number 续号重建 exe + ffmpeg-mux（音频随 exe 一起重启）。
+ *  - screen 模式：SIGCONT（原样）。
+ */
+export function resumeRecording(): void {
+  if (!currentSourceId.startsWith('window:')) {
+    if (ffmpegProcess) {
+      try { ffmpegProcess.kill('SIGCONT'); } catch (_) { /* ignore */ }
+    }
+    return;
+  }
+  if (!m_paused || !lastCfg) return;
+  callbacks.onLog?.('[recording] 恢复录制（重启 exe + mux）');
+  const nextSeg = getNextSegmentNumber();
+  if (currentMuxProfile) currentMuxProfile.startNumber = nextSeg;
+  startOffsetForNextSession = recordedSecondsAtPause;
+  registerSessionAnchor('window', {
+    startSegmentNumber: nextSeg,
+    startOffsetSeconds: recordedSecondsAtPause,
+    registeredAt: Date.now(),
+  });
+  m_paused = false;
+  void startWindowRecording(lastCfg, callbacks);
+}
+
+// ─── screen 路径实现（feat 基线，原样保留）────────────────────────────────────
 
 /**
  * 扫描 tmpDir 中已有的 segNNN.ts 文件，返回下一个可用的切片序号。
- * crash 重启时调用，避免覆盖已有切片。
  */
 function getNextSegmentNumber(): number {
   try {
     const files = fs.readdirSync(tmpDir);
     let maxNum = -1;
     for (const f of files) {
-      const match = f.match(/^seg(\d+)\.ts$/);
+      const match = f.match(/^seg(\d+)_opt\.ts$/);
       if (match) {
         const num = parseInt(match[1], 10);
         if (num > maxNum) maxNum = num;

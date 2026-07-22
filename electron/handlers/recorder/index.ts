@@ -25,6 +25,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import chokidar from 'chokidar';
 import { app, desktopCapturer, dialog, ipcMain, BrowserWindow, net } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -39,7 +40,14 @@ import {
   setEncoderInfo,
   getTmpDir,
   isRecording,
+  pauseRecording,
+  resumeRecording,
+  type RecordingCallbacks,
 } from './recording';
+
+import { startSentinel, stopSentinel } from './sentinel-client';
+
+import { makeDefaultProfiles } from './recording/profiles';
 
 import { HLS_SEGMENT_DURATION } from './shared';
 
@@ -127,6 +135,15 @@ let detectedEncoder = 'libx264';
 let isSoftwareEncoder = false;
 /** 外部视频转码进行中标志，与录制互斥 */
 let isExternalTranscoding = false;
+
+// ─── sentinel（窗口哨兵）接线状态 ───────────────────────────────────────────────
+/** 本录制会话中 sentinel 是否处于活动状态（仅 window: 源为 true）。 */
+let sentinelActive = false;
+/** recording 管道是否已拉起（防止 onRect 重复触发 / 区分 in-flight 暂停状态）。 */
+let recordingLaunched = false;
+
+/** window 模式成品切片上传监听（替代 transcode 层，直接进 upload）。 */
+let windowUploadWatcher: chokidar.FSWatcher | null = null;
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -243,6 +260,8 @@ async function start(
   crashRestartCount = 0;
   cachedAvfIndex = -1;
   recordStartTime = Date.now();
+  recordingLaunched = false;
+  sentinelActive = false;
 
   // 创建临时目录
   const primaryTmpDir = path.join(app.getPath('temp'), 'cowatch-rec', sessionId);
@@ -271,6 +290,90 @@ async function start(
     }
   }
 
+  // recording 层回调（crash / stop 透传）
+  const recordingCallbacks: RecordingCallbacks = {
+    onCrash: (title) => { void handleFfmpegCrash(title); },
+    onShouldStop: () => { void stop(); },
+    onLog: (msg) => console.log(msg),
+  };
+
+  // ─── mode 分支 ────────────────────────────────────────────────────────────
+  if (currentSourceId.startsWith('window:')) {
+    // window 模式（方案2a 终态）：
+    //   sentinel 负责窗口事件探测（与捕获源解耦），recording 层 spawn window_capture.exe
+    //   + 等 READY + spawn ffmpeg-mux（仅封装），成品 segNNN_opt.ts 直接进 upload（无 transcode）。
+    sentinelActive = true;
+    startSentinel(currentWindowTitle, {
+      // 窗口模式忽略 RECT/crop（不再需要裁剪）
+      onRect: (_rect) => { /* window 模式不使用 crop */ },
+      onNotFound: () => { /* 由 exe 兜底或 sentinel 触发停止，无需此处动作 */ },
+      onPause: (reason) => { pauseRecording(reason); },
+      onResume: () => { void resumeRecording(); },
+      onStop: (reason) => {
+        console.log(`[recorder] sentinel 请求停止（${reason}），执行干净收尾`);
+        BrowserWindow.getAllWindows().forEach((w) => {
+          w.webContents.send('recorder:stopped');
+        });
+        void stop();
+      },
+      onExit: (code) => {
+        console.log(`[recorder] sentinel 退出，code=${code}`);
+      },
+      onLog: (msg) => console.log(msg),
+    }, { ignorePids: [process.pid] });
+
+    // recording 层：spawn exe + 等 READY + spawn ffmpeg-mux
+    const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, currentWindowTitle, 30);
+    await startRecording(
+      {
+        sessionId,
+        sourceId: windowId,
+        displayTitle,
+        tmpDir,
+        detectedEncoder,
+        isSoftwareEncoder,
+        cachedAvfIndex,
+        windowCapture: {
+          capture: profiles.capture,
+          encode: profiles.encode,
+          mux: profiles.mux,
+          audio: true,
+          muxTarget: 'pipe', // 生产态：写 fd3/4 给外部 ffmpeg-mux
+          stats: false,
+        },
+      },
+      recordingCallbacks,
+    );
+    recordingLaunched = true;
+
+    // window 模式：直接监听 tmpDir 成品切片进 upload（无 transcode 层）
+    startWindowUploadWatcher(tmpDir, recordingCallbacks);
+
+    // ③ 启动上传层
+    initUploader(
+      { roomId, sessionId, authToken, apiOrigin },
+      { onProgress: () => pushProgress(), onLog: (msg) => console.log(msg) },
+    );
+
+    // ④ 启动 tick 计时器
+    tickTimer = setInterval(() => {
+      const seconds = Math.floor((Date.now() - recordStartTime) / 1000);
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('recorder:tick', seconds);
+      }
+    }, 1000);
+
+    // ⑤ 最长录制时间保护
+    timeoutTimer = setTimeout(() => {
+      console.log('[recorder] 达到最大录制时长 2 小时，自动停止');
+      void stop();
+    }, MAX_RECORD_MS);
+
+    console.log(`[recorder] window 模式录制开始，sessionId=${sessionId}`);
+    return;
+  }
+
+  // screen 模式：保持 feat 基线原样（ddagrab 全屏，不调 sentinel、不调 Python）。
   // ① 启动录制层
   await startRecording(
     {
@@ -282,16 +385,9 @@ async function start(
       isSoftwareEncoder,
       cachedAvfIndex,
     },
-    {
-      onCrash: (title) => {
-        void handleFfmpegCrash(title);
-      },
-      onShouldStop: () => {
-        void stop();
-      },
-      onLog: (msg) => console.log(msg),
-    },
+    recordingCallbacks,
   );
+  recordingLaunched = true;
 
   // ② 启动转码层（chokidar 监听）
   startTranscodingWatcher(
@@ -346,25 +442,37 @@ async function start(
 }
 
 async function stop(): Promise<void> {
-  if (!isRecording() && !isUserStopped) return;
-  if (isUserStopped) return;
+  if (isUserStopped) return;                         // 重入保护：已停止则直接返回
+  if (!recordingLaunched && !sentinelActive) return; // 无活跃会话则无需停止（不依赖 isRecording，避免 in-flight pause 误判）
 
   const durationSeconds = Math.floor((Date.now() - recordStartTime) / 1000);
   isUserStopped = true;
+
+  // 停止哨兵进程（window: 源录制时由 sentinel 监听窗口移动 / 关闭）
+  if (sentinelActive) {
+    stopSentinel();
+    sentinelActive = false;
+  }
+
   const sessionTmpDir = tmpDir;
   const displayName = `自动录制 ${new Date().toLocaleString('zh-CN', {
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   }).replace(/\//g, '-')}`;
 
-  // ① 停止录制层（FFmpeg）
+  // ① 停止录制层（window: exe + ffmpeg-mux；screen: ffmpeg + audio_capture）
   await stopRecording();
 
-  // ② 停止转码层监听（chokidar 关闭，但转码队列继续处理已入队切片）
-  await stopTranscodingWatcher();
+  // window 模式：停止成品切片上传监听（无 transcode 层）
+  await stopWindowUploadWatcher();
 
-  // ②.5 等待转码队列排空（确保所有原始切片都被转码为 _opt.ts）
-  await waitForTranscodeQueue();
+  // ② 停止转码层监听（仅 screen 模式有转码层；window 模式跳过）
+  if (!currentSourceId.startsWith('window:')) {
+    await stopTranscodingWatcher();
+
+    // ②.5 等待转码队列排空（确保所有原始切片都被转码为 _opt.ts）
+    await waitForTranscodeQueue();
+  }
 
   // ③ 补传临时目录中遗漏的切片
   enqueueMissingFiles(sessionTmpDir);
@@ -451,6 +559,8 @@ async function stop(): Promise<void> {
   currentRoomId = '';
   currentAuthToken = '';
   crashRestartCount = 0;
+  recordingLaunched = false;
+  sentinelActive = false;
 
   // 清理定时器
   if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
@@ -496,6 +606,54 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
   // 转码层 watcher 无需重启——它一直在监听同一个 tmpDir。
   // 只需补扫 crash 期间可能遗漏的原始切片（chokidar awaitWriteFinish 可能漏掉崩溃时的半成品）。
   enqueueExistingRawFiles(tmpDir);
+}
+
+// ─── window 模式成品切片上传监听（替代 transcode 层，直接进 upload）─────────────────
+
+/**
+ * 启动 chokidar 监听 tmpDir，ffmpeg-mux 产出的 segNNN_opt.ts 成品切片直接 enqueueUpload，
+ * 完全绕过逐片 transcode 层（方案2a 终态编码已在 GPU 内完成、输出即压缩码流）。
+ *
+ * 仅匹配 `_opt.ts` 切片；index.m3u8 与半成品由 stop 时的 enqueueMissingFiles 兜底。
+ * ignoreInitial=true 确保不重复拾取已存在文件；awaitWriteFinish 避免拾取半写切片。
+ *
+ * @param dir  监听目录（录制临时目录）
+ * @param _cbs 透传录制回调（保留签名一致性，本函数不直接使用）
+ */
+function startWindowUploadWatcher(dir: string, _cbs?: RecordingCallbacks): void {
+  if (windowUploadWatcher) {
+    void windowUploadWatcher.close();
+    windowUploadWatcher = null;
+  }
+  windowUploadWatcher = chokidar.watch(dir, {
+    persistent: true,
+    ignoreInitial: true,
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+  });
+  windowUploadWatcher.on('add', (filePath: string) => {
+    if (filePath.endsWith('_opt.ts')) {
+      enqueueUpload(filePath);
+    }
+  });
+  windowUploadWatcher.on('error', (err: Error) => {
+    console.warn(`[recorder] window upload watcher 异常：${err.message}`);
+  });
+  console.log(`[recorder] window 成品切片监听已启动：${dir}`);
+}
+
+/**
+ * 停止并释放 window 模式成品切片监听。
+ */
+async function stopWindowUploadWatcher(): Promise<void> {
+  if (windowUploadWatcher) {
+    const w = windowUploadWatcher;
+    windowUploadWatcher = null;
+    try {
+      await w.close();
+    } catch (err) {
+      console.warn(`[recorder] window upload watcher 关闭异常：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 // ─── 外部视频转码 ──────────────────────────────────────────────────────────────

@@ -1,56 +1,41 @@
-# CoWatch 项目记忆
+# CoWatch 项目记忆（精简版）
 
 ## 项目概述
-- Electron + React + TypeScript 桌面应用，支持屏幕/窗口录屏并上传至云端
-- 录屏核心：Windows 用 ddagrab(整屏) / gfxcapture(窗口)，macOS 用 avfoundation
-- 音频：Windows 用 audio_capture.exe (WASAPI Loopback)，通过 pipe 传入 ffmpeg
-- 输出格式：HLS (hls_time=10s, h264_nvenc/amf/qsv 硬编码)
+- Electron + React + TypeScript 桌面录播/上传；方案2a 自编译 `window_capture.exe`（WGC 抓屏 + NVENC 直编 + ffmpeg mux HLS）。源码 `electron/bin/capture-src/`。
+- 录制架构/哨兵/上传队列等历史结论见旧记忆；本轮聚焦 capture-src 真机排错。
 
-## 录制架构关键点
-- `electron/handlers/recorder.ts` 是核心录制逻辑（1300+ 行）
-- 双队列容错上传：pRetry → pendingQueue → triggerRetryQueue 指数退避补传
-- ffmpeg crash 自动重启（MAX_CRASH_RESTARTS=3），通过 -hls_start_number 续录
-- stop() 流程：cleanup → 扫描尾片补传 → await activeUploads → pendingQueue 2轮补传 → finish 接口 → 清理临时目录
+## capture-src NVENC/D3D11 硬约束（SDK 13.0）
+- 预设：仅新 P1–P7 `NV_ENC_PRESET_Pn_GUID`；须 5 参 `nvEncGetEncodePresetConfigEx(enc,codec,presetGUID,TUNING_INFO_LOW_LATENCY,&cfg)`，4 参 `GetEncodePresetConfig` 返回 INVALID_PARAM(8)。
+- apiVersion 硬编码 `NVENCAPI_VERSION`（=13.0），**不做驱动协商**（驱动 571+ 由 Electron 门禁保证）。
+- NV12 作 RTV 须 `ID3D11Device3::CreateRenderTargetView1` + `D3D11_RENDER_TARGET_VIEW_DESC1`（成员 `Texture2D`+`PlaneSlice`）；`m_dev` 用 `com_ptr<ID3D11Device3>`。
+- D3D11 杂项：`PSSetSamplers` 第3参须 `ID3D11SamplerState* const*`；`Draw(VertexCount,StartVertexLocation)`；线性采样器 `D3D11_FILTER_MIN_MAG_MIP_LINEAR`；无 `shellscaling.h`。
+- `InitializeEncoder` 报 INVALID_PARAM 查 `tuningInfo` 须等于 `GetEncodePresetConfigEx` 所用；`encodeWidth/Height` 须偶数（main.cpp `encW&=~1u`）。
+- 错误码：`NV_ENC_SUCCESS=0` … `INVALID_PARAM=8` … `OUT_OF_MEMORY=10` … `LOCK_BUSY=12`。
 
-## 已知问题与解决方案
-- 窗口录屏模式下被录制窗口关闭时，ffmpeg 误判为 crash 并无意义重启 3 次后报错
-- 无主动窗口状态检测机制
-- CoWatch 主窗口关闭时无 before-quit 钩子，ffmpeg 被强杀，尾片丢失
-- **解决方案**：window_sentinel.exe（Rust + SetWinEventHook）+ 轮询兜底
-  - sentinel 通过 SetWinEventHook(EVENT_OBJECT_DESTROY) 监听目标 hwnd 关闭
-  - 窗口关闭 → 输出 "CLOSED" 到 stdout → Node.js readline → stop() 优雅停止
-  - sentinel 异常退出 → fallback 到 desktopCapturer 每 2s 轮询
-  - 进程假死 → 两种方案都无法检测，ffmpeg crash 重启兜底（原问题不变）
-  - 源码位置：electron/sentinel-src/（Rust + windows-rs crate）
-  - 集成代码：docs/sentinel-recorder集成代码.md
-  - 风险分析：docs/窗口哨兵集成风险分析.md
+## LockBitstream:10 真因（2026-07-18 真机复盘）
+- 现象：READY 后立刻 `[nvenc] LockBitstream failed: 10`、encode_fps 2.0→0.0、cpu 100%、ctrl+c 杀不掉。
+- 根因：`tryLockPacket` 用 `doNotWait=1`（非阻塞）锁尚未产出数据的 bitstream（B 帧重排期 EncodePicture 返回 NEED_MORE_INPUT 的 slot）。NVENC 非阻塞锁“无数据”返回 **OUT_OF_MEMORY(10)**（非 LOCK_BUSY(12)）。我方仅把 12 当 kBusy，把 10 当致命 kError → 丢 slot → 管线死。
+- 对照 OBS `obs-nvenc/nvenc.c:1089-1092` 只锁 `buffers_queued>0`（且非 finalize 需 `>=output_delay`）的缓冲，且 `doNotWait=false`（阻塞锁）规避该歧义。
+- 修复：**非阻塞时把 `NV_ENC_ERR_OUT_OF_MEMORY`(10) 与 `LOCK_BUSY`(12) 同视为 kBusy**（稍后重试、保持 input mapped）。`bs.size=0`（对齐 OBS 自动 sizing）保持不变。
+- 教训：工程师曾写“DEGRADE PATH”注释却未落地修复；**size=0 自动 sizing 假设正确，真因在 lock 状态分类**。
 
-## 项目二进制依赖（electron/bin/）
-- ffmpeg.exe — gyan.dev full build（含 ddagrab filter）
-- audio_capture.exe — WASAPI Loopback 音频采集（huxinhai/audio-capture）
-- window_sentinel.exe — 窗口关闭哨兵（自编译，Rust + windows-rs）
+## OBS Studio 本地源码（重要：禁联网）
+- 路径 `C:\Users\绝绝子\Desktop\Co\obs-studio`（旧版，架构跨版本稳定，无需更新）。研究须读本地，禁 WebFetch/GitHub。
+- 重点：`plugins/obs-nvenc/nvenc.c`（bitstream ring / `get_encoded_packet` 锁逻辑 / `queue_frame` gating）、`nvenc-d3d11.c`（MapInputResource）、`plugins/win-capture/`（WGC 在渲染线程 render 非回调编码）、`libobs/obs-video.c`（`gs_stage_texture` + 线程解耦）。
 
-## 7.9.1 录屏卡顿问题（已定位根因）
-- **主因**：转码层无条件开启，每 10s 对每个 .ts 切片 spawn 全新 ffmpeg（NVDEC+NVENC p5/cq30），与录制层抢同一 NVENC/显存/磁盘 → 每 10s 操作迟滞脉冲。
-- **次因**：录制层 `recording/index.ts:331` 写死 `-vsync cfr -r 30`，掉队时 dup 单调累加、永不回落 → "一旦卡顿全程不自愈"。
-- **催化剂**：gfxcapture 窗口丢失（`[window-watch] 窗口未找到`）致 capture stall，dup 突发。
-- **铁证**：temp/终端.txt 实测 dup=3212（2:09，~83% 复制帧），实际跑 CPU `scale=`（非 scale_cuda），日志误标"CPU scale_cuda"。
-- **ai.md 不可信点**："scale_cuda 管线 29fps 稳定" 与 111.md（gfxcapture 场景 scale_cuda 不可行，约束4）及终端实测双重矛盾，系合成源 testsrc 过度外推；hwdownload 不可去、VFR 是对症解药这两点可采信。
-- **已证伪**：scale_cuda 在 gfxcapture 实时捕获下不可行（CUDA↔D3D11 context 冲突 + 拆 -vf 破坏帧节拍）。不要再在此方向投入。
-- **D1（录制即成品/删转码层）已被用户否决**：三层架构是刻意的——录制必须用无 B 帧/无 lookahead 轻量参数避免抢游戏 GPU，但这使 720p30 码率≈1080p60，浪费 CDN 且上传无法兼顾游戏带宽，故转码层不可替代。
-- **R0（录制期零转码 + stop 后单进程批量转码）已被证伪不可行**：用户三个问题戳穿——① 轻量件码率 10Mbps > 上传限速 7Mbps → 录制期持续积压（1h=1.35GB/2h=2.7GB，停后 3.6~7.2min 排空），"即复盘"不成立；② 2h 素材 10x 转码需 ~12min + 上传 ~7min = ~19min 停等且用户须保持开 CoWatch；③ 若提前复盘 CDN 仍 serv 原片(10M) → 3.3x 成本窗口。**R0 在"实时复盘"与"CDN 成本"两目标均未达标。**
-- **关键前提挑战（高见远，2026-07-09）**："录制须无 B 帧/无 lookahead 才能不拖游戏"大概率**错误**。NVENC 是 GPU 上与 3D/图形引擎**物理分离**的独立硬件块，B 帧/lookahead 只吃编码引擎时片与少量帧缓冲显存，不抢游戏渲染。若录制致卡，真凶更可能是：① CPU `libswscale` scale 抢 CPU；② 磁盘 I/O；③ 并发第二转码进程抢 NVENC/PCIe。**D1 当年被否是因为"无 B/lookahead→高码率"；若允许 B 帧/lookahead 则 D1 的失效根消失。**
-- **独显场景主推荐 E0（直播单遍模型，取代 R0）**：录制即按**最终质量**用 NVENC 单次编码（允许 B 帧/lookahead、中等 preset、CBR≈可承受上行 X%），**实时令牌桶限速上传，无独立转码阶段**。四目标全满足：① NVENC 不抢 3D 引擎、CPU scale 改为"捕获即降分辨率"去 CPU 争用；② 令牌桶限上行 60–70%；③ 无积压无二次转码→停止即复盘；④ 单份 3Mbps 成品无翻倍。E0 ≠ D1（E0 允许 B 帧且输出即最终质量）。改动中低：录制编码参数 + 删 transcoding 停止后批处理 + 上传限速固化。
-- **退守 E1（仅当"无 B/lookahead"前提被用户坚持不可推翻时）**：录制期不上传，stop 后单进程转码(12min/2h)+限速上传(3~7min)→接受 ~12-19min 停等；CDN 始终单份 3M 生产件无翻倍窗口。**E1 以与 R0 相同停等换取 CDN 单份低成本，严格优于 R0。**
-- **直播对照（OBS）**：单遍实时 NVENC 编码(CBR 直传，含 B 帧/lookahead)无第二阶段 → 无转码脉冲/积压/二次上传；输出码率=上行可承受值→无积压；单份最终码率文件→无翻倍。这是 E0 的参照模型。
-- **NVENC 多 session 误区**：session 是驱动/授权概念（并发数上限），非硬件并行车道；消费级 N 卡通常 1 个物理编码引擎（少数旗舰 2 个但共享总吞吐），多 session 是时分复用 → 录制+转码同刻编码互相抢同一引擎使每帧延迟翻倍偶超 33ms。
-- **单帧 33ms 时序瓶颈**：录制链路①抓屏(GPU)→②hwdownload(复制引擎/PCIe)→③CPU scale(最重CPU段)→④hwupload(复制引擎/PCIe)→⑤NVENC(争抢时爆)→⑥写盘。常态 5–10ms；转码脉冲使⑤+②/④+⑥ 共享资源排队超预算 → CFR dup。
+## 方法论铁律（用户 2026-07-17 强调）
+- capture-src 任何改动**先读 OBS 本地模块、按已验证骨架落地，禁止凭空生成后打补丁**；**铁律升级（2026-07-18）**：用 OBS 源码就该**逐字忠实搬 OBS 代码**——每个自我实现都是隐形 bug；缺依赖/DLL 就补齐依赖（vendor libobs / 链 libavformat）而非手搓；除非是重型且不必要的、易测试且性能影响小的实现才允许偏离。**最大陷阱=线程根偏差**：`DQTYPE_THREAD_DEDICATED`(main 当协调者) 而非 OBS 的 `DQTYPE_THREAD_CURRENT`(main=图形线程=dispatcher) 会催生整条自搓链（无主循环→回调注入→独立编码线程→SPSC+非阻塞 lock+kBusy），须从根对齐而非在混合体上打补丁。
+- QA 静态复核须含「构建配置一致性」：比对 `.cpp` 与 `CMakeLists.txt` 源列表（曾漏编 `staging_texture.cpp` 致 LNK2019）。
+- 沙箱无 C++ 工具链 → 所有修复静态自审 + 真机验证；改动须最小、不重构无关代码。
 
-## 录制卡顿再排查(2026-07-09/10) 硬事实（取代上面 7.9.1 的部分结论）
-- **编码侧非瓶颈（terminal5 铁证）**：全程 speed≈1x、dup=0、drop=0、编码fps=收到fps。排除 CPU scale / hwdownload / NVENC / B 帧为卡顿主因。上面"单帧 33ms 时序瓶颈→CFR dup"在实测 dup=0 下不成立（dup 放大器假设被推翻）。
-- **真瓶颈 = 捕获源被 DWM/负载门控**：inferredCaptureFps 从低起点(12)单调滑到 5~8、负载松即回弹(29fps 爆发)。WGC(gfxcapture)/DDA 经 DWM，呈现率随游戏 GPU 负载降 → 捕获帧率塌。
-- **fps=30 强制使 inferredCaptureFps 指标盲**：源被钉 30fps PTS，WGC 交付稀时重复同帧(dup=0 但内容卡)。测真实捕获率须去掉 fps=30。旧版(6c0772e) gfxcapture 也带 fps=30 → "旧版更顺"可能是 mask 假象，对照须去 fps=30 才有意义。
-- **CUDA 零拷贝直编在本机物理不可行**：`hwmap=derive_device=cuda` → -40(ENOSYS)；scale_npp 构建不带；scale_cuda 依赖同派生也失败。不要投入此方向。
-- **录制层禁 B 帧/lookahead（用户实测）**：加 B 帧即从一开始就塌（单帧编码延迟>33ms 实时预算）。B 帧/lookahead 只留离线转码层。
-- **10s 转码脉冲确为独立抖动**：skip 转码(SKIP_TRANSCODE_IN_MODE_A)后游戏顺滑 → 三层架构转码脉冲须消除（E0 或停止后单遍收口）。
-- **为什么 OBS 直播不卡、CoWatch 卡**：OBS Game Capture 挂钩游戏 swap-chain 读后缓冲**绕过 DWM**；CoWatch 走 WGC 被 DWM 门控。根解=捕获机制重写(WGC→DDA 干净对照，或 swap-chain 挂钩注入，属架构级重构)。
+## 当前主线状态（2026-07-18）
+- 已完成：WGC+NVENC 线程解耦重写（方案B）、B 帧允许(bf=2+LOW_LATENCY)、NEED_MORE_INPUT 当在途、N1 kBusy 保持 mapped、窗口缩放暂缓。
+- 待真机验证：本轮回修 LockBitstream:10 状态分类。
+- **设备丢失 OBS 子系统（v1 上线门禁）已落地并静态双重验真**：忠实搬 `gs_device_loss`/`RebuildDevice`；`init/start/rebuild` 内联 WGC 工作（取消 `TryEnqueue+f.get`）；**#41 进一步彻底删除偏离 OBS 的自我实现 `devicePollThread` 独立轮询线程**，device-loss 检测收敛到主循环（图形线程）顶部主动 `GetDeviceRemovedReason()`、重建仅主循环安全点同步执行（`g_deviceLost` 已删，无独立线程、无跨线程 device/immediateCtx 写，完全对齐 OBS 单图形线程模型）；`CMakeLists` 补 `device_loss.cpp`（消 LNK2019）；并修 device-loss 快路径 slot 泄漏（render_encode_one/drainEncoded 两处对称补 `freeSlots.push_back`+`inFlight.pop_front`）。工程师(#39/#41)+QA(#40/#41) 均 IS_PASS: YES / 路由 NoOne。**仅待真机复编复验**（dGPU 禁用/启用确定性 device-removed、Alt+Tab 1–2min、push/file/null 三态各≥3 循环零崩溃零 exit≠0 无缝续录 + REBUILD 事件 + 无 slot 耗尽）。
+
+## capture_fps=0 + ctrl+c 死锁（2026-07-13 真机排错·三缺陷已落盘待验证）
+- **A) capture_fps=0+cpu=100**：`convertLatestInto` 持 `m_texMutex` 跑完整 GPU 转换饿死 WGC 回调 → 改**延迟上下文**(`m_deferred`)锁外录制 BGRA→NV12 绘制 + 锁内 `ExecuteCommandList`+Flush+copyInto。
+- **C) staging slot 泄漏**：`submitRendered` 忽略 `tryPush` 返回 → 改返回 `bool`+失败时 `releaseSlot`。
+- **EOS) ctrl+c 死锁**：缺 `NV_ENC_PIC_FLAG_EOS` → 收尾 `drain(true)` 阻塞 `LockBitstream` 永久 → 加 `submitEos()` + **有界排空**(5s 预算 + 残留 slot 兜底释放)。EOS `outputBitstream` 留空是 OBS/SDK 规范写法（非缺陷）。
+- **铁律**：`m_context`/`BgraToNv12::m_ctx`/`immediateCtx` 是**同一立即上下文（非线程安全）**，所有立即上下文访问须经 `m_texMutex` 串行；延迟上下文录制可在锁外。
+- 验证：工程师+QA 静态 IS_PASS=YES、路由 NoOne；沙箱无 MSVC 未编译，待真机复验（详见 2026-07-13.md 续15）。
