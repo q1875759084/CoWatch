@@ -475,24 +475,33 @@ def main() -> None:
     except Exception:
         pass
 
-    if len(sys.argv) < 2:
-        emit("NOT_FOUND")
-        return
-    title = sys.argv[1].lower()
-
-    # 解析 --ignore-pid N（可多次传入），收集到 ignore_pids（覆盖 CoWatch 主进程等）
+    # ── 参数解析：HWND 主契约 + --ignore-pid 兼容 ──
+    #   - --hwnd <N>       ：十进制或 0x 十六进制 HWND（推荐，CoWatch 主契约）
+    #   - 位置参数数字     ：同上（向后兼容旧 [hwnd, --ignore-pid ...] 调用）
+    #   - 位置参数非数字   ：视作标题子串，回退 find_target_window（deprecated）
+    parsed_hwnd = 0
     parsed_ignore = set()
-    i = 2
+    positional = []
+    i = 1
     while i < len(sys.argv):
-        if sys.argv[i] == '--ignore-pid' and i + 1 < len(sys.argv):
+        a = sys.argv[i]
+        if a == '--hwnd' and i + 1 < len(sys.argv):
+            try:
+                parsed_hwnd = int(sys.argv[i + 1], 0)
+            except ValueError:
+                pass
+            i += 2
+        elif a == '--ignore-pid' and i + 1 < len(sys.argv):
             try:
                 parsed_ignore.add(int(sys.argv[i + 1]))
             except ValueError:
                 pass
             i += 2
         else:
+            positional.append(a)
             i += 1
-    # 哨兵自身进程 pid 双保险（WINEVENT_SKIPOWNPROCESS 已覆盖自身进程事件）
+
+    # --ignore-pid 收集（覆盖 CoWatch 主进程等）
     parsed_ignore.add(os.getpid())
     global ignore_pids
     ignore_pids = parsed_ignore
@@ -510,7 +519,19 @@ def main() -> None:
     global target_hwnd, is_foreground, is_minimized, should_record, baseline_rect
     global mon_phys_left, mon_phys_top, monitor_w, monitor_h
 
-    target_hwnd = find_target_window(title)
+    # HWND 主契约：--hwnd 或位置参数数字 → 直接取；否则回退标题子串匹配（deprecated 兼容）
+    if parsed_hwnd:
+        target_hwnd = parsed_hwnd
+    elif positional:
+        first = positional[0]
+        try:
+            target_hwnd = int(first, 0)  # 十进制或 0x 十六进制 HWND
+        except ValueError:
+            target_hwnd = find_target_window(first.lower())  # 非数字 → 标题子串回退
+    else:
+        emit("NOT_FOUND")
+        return
+
     if not target_hwnd:
         emit("NOT_FOUND")
         return

@@ -74,14 +74,14 @@ let callbacks: SentinelCallbacks = {};
 
 /**
  * 启动哨兵并监听其 stdout 行协议。
- * @param windowTitle 窗口标题子串（传给哨兵用于匹配窗口）。
+ * @param hwnd 目标窗口 HWND（十进制，字符串或数字均可；下传时 String()）。CoWatch 从 sourceId 中段直取。
  * @param cbs 事件回调。
  * @param opts 可选参数：
  *   - ignorePids：需忽略前台事件的进程 pid 列表（传给哨兵 --ignore-pid），
  *     用于避免 CoWatch 自身窗口 / 渲染进程短暂抢焦点被误判为切走。
  */
 export function startSentinel(
-  windowTitle: string,
+  hwnd: number | string,
   cbs: SentinelCallbacks,
   opts?: { ignorePids?: number[] },
 ): void {
@@ -104,7 +104,7 @@ export function startSentinel(
 
   let proc: ChildProcess;
   try {
-    proc = spawn(exePath, [windowTitle, ...ignoreArgs], { stdio: ['ignore', 'pipe', 'pipe'] });
+    proc = spawn(exePath, [String(hwnd), ...ignoreArgs], { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (err) {
     // 同步 spawn 失败（极少见）→ 兜底
     sentinelProc = null;

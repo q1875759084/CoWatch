@@ -36,6 +36,8 @@ export interface UploadConfig {
   apiOrigin: string;
   /** 禁用自适应限速，全速上传（外部视频转码等非游戏场景） */
   disableThrottle?: boolean;
+  /** 仅录制模式：跳过实际上传（防御性兜底，真实行为由录制层不初始化上传层保证） */
+  recordOnly?: boolean;
 }
 
 export interface UploadCallbacks {
@@ -43,6 +45,11 @@ export interface UploadCallbacks {
   onProgress?: (info: RecordingProgress) => void;
   /** 日志输出 */
   onLog?: (msg: string) => void;
+}
+
+/** 读取上传层当前使用的 authToken（上传层 401 自刷新后会更新 config.authToken）。 */
+export function getAuthToken(): string {
+  return config?.authToken ?? '';
 }
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
@@ -105,6 +112,8 @@ export function initUploader(
 }
 
 export function enqueueUpload(filePath: string): void {
+  // 防御性兜底：仅录制模式下绝不触发实际上传
+  if (config?.recordOnly) return;
   const fileName = path.basename(filePath);
   if (queuedFileNames.has(fileName)) return;
   queuedFileNames.add(fileName);

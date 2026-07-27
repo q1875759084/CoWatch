@@ -71,6 +71,7 @@ import {
   getPendingQueue,
   getSegmentKeys,
   getUploadedCount,
+  getAuthToken,
 } from './upload';
 
 import {
@@ -135,6 +136,8 @@ let detectedEncoder = 'libx264';
 let isSoftwareEncoder = false;
 /** 外部视频转码进行中标志，与录制互斥 */
 let isExternalTranscoding = false;
+/** 仅录制模式标志：true 时跳过上传、切片持久化到本地 recordings 目录（停止不删） */
+let isRecordOnly = false;
 
 // ─── sentinel（窗口哨兵）接线状态 ───────────────────────────────────────────────
 /** 本录制会话中 sentinel 是否处于活动状态（仅 window: 源为 true）。 */
@@ -245,6 +248,8 @@ async function start(
   displayTitle: string,
   roomId: string,
   authToken: string,
+  recordOnly: boolean = false,
+  rcMode: 'cqp' | 'cbr' | 'vbr_ceil' = 'cqp',
 ): Promise<void> {
   if (isRecording()) {
     throw new Error('[recorder] 录制已在进行中');
@@ -262,19 +267,27 @@ async function start(
   recordStartTime = Date.now();
   recordingLaunched = false;
   sentinelActive = false;
+  isRecordOnly = recordOnly;
 
-  // 创建临时目录
-  const primaryTmpDir = path.join(app.getPath('temp'), 'cowatch-rec', sessionId);
-  const fallbackTmpDir = path.join(app.getPath('userData'), 'recordings', sessionId);
-  try {
-    fs.mkdirSync(primaryTmpDir, { recursive: true });
-    tmpDir = primaryTmpDir;
-  } catch {
-    fs.mkdirSync(fallbackTmpDir, { recursive: true });
-    tmpDir = fallbackTmpDir;
-    console.warn('[recorder] temp 目录创建失败，降级到 userData：', fallbackTmpDir);
+  // 创建目录：仅录制 → userData/recordings（停止保留）；否则 temp/cowatch-rec（停止删除）
+  if (recordOnly) {
+    const recDir = path.join(app.getPath('userData'), 'recordings', sessionId);
+    fs.mkdirSync(recDir, { recursive: true });
+    tmpDir = recDir;
+    console.log(`[recorder] 仅录制模式，持久化目录：${tmpDir}`);
+  } else {
+    const primaryTmpDir = path.join(app.getPath('temp'), 'cowatch-rec', sessionId);
+    const fallbackTmpDir = path.join(app.getPath('userData'), 'recordings', sessionId);
+    try {
+      fs.mkdirSync(primaryTmpDir, { recursive: true });
+      tmpDir = primaryTmpDir;
+    } catch {
+      fs.mkdirSync(fallbackTmpDir, { recursive: true });
+      tmpDir = fallbackTmpDir;
+      console.warn('[recorder] temp 目录创建失败，降级到 userData：', fallbackTmpDir);
+    }
+    console.log(`[recorder] 临时目录：${tmpDir}`);
   }
-  console.log(`[recorder] 临时目录：${tmpDir}`);
 
   // macOS：解析 avfoundation 索引
   if (process.platform === 'darwin' && windowId.startsWith('screen:')) {
@@ -301,9 +314,11 @@ async function start(
   if (currentSourceId.startsWith('window:')) {
     // window 模式（方案2a 终态）：
     //   sentinel 负责窗口事件探测（与捕获源解耦），recording 层 spawn window_capture.exe
-    //   + 等 READY + spawn ffmpeg-mux（仅封装），成品 segNNN_opt.ts 直接进 upload（无 transcode）。
+    //   （内嵌 HLS 封装，直接写本地 .ts 切片），成品 sessionN.ts 直接进 upload（无 transcode）。
+    //   sourceId 形如 window:<HWND十进制>[:suffix]，中段即目标窗口 HWND（主契约）。
     sentinelActive = true;
-    startSentinel(currentWindowTitle, {
+    const hwnd = windowId.split(':')[1];
+    startSentinel(hwnd, {
       // 窗口模式忽略 RECT/crop（不再需要裁剪）
       onRect: (_rect) => { /* window 模式不使用 crop */ },
       onNotFound: () => { /* 由 exe 兜底或 sentinel 触发停止，无需此处动作 */ },
@@ -322,8 +337,8 @@ async function start(
       onLog: (msg) => console.log(msg),
     }, { ignorePids: [process.pid] });
 
-    // recording 层：spawn exe + 等 READY + spawn ffmpeg-mux
-    const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, currentWindowTitle, 30);
+    // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
+    const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, hwnd, 30);
     await startRecording(
       {
         sessionId,
@@ -338,8 +353,9 @@ async function start(
           encode: profiles.encode,
           mux: profiles.mux,
           audio: true,
-          muxTarget: 'pipe', // 生产态：写 fd3/4 给外部 ffmpeg-mux
+          muxTarget: 'file', // 生产态：exe 内 ffmpeg_muxer 直接写本地 HLS .ts
           stats: false,
+          rcMode,
         },
       },
       recordingCallbacks,
@@ -347,13 +363,16 @@ async function start(
     recordingLaunched = true;
 
     // window 模式：直接监听 tmpDir 成品切片进 upload（无 transcode 层）
-    startWindowUploadWatcher(tmpDir, recordingCallbacks);
+    // 仅录制模式跳过上传监听与上传层初始化，仅保留本地切片
+    if (!recordOnly) {
+      startWindowUploadWatcher(tmpDir, recordingCallbacks);
 
-    // ③ 启动上传层
-    initUploader(
-      { roomId, sessionId, authToken, apiOrigin },
-      { onProgress: () => pushProgress(), onLog: (msg) => console.log(msg) },
-    );
+      // ③ 启动上传层
+      initUploader(
+        { roomId, sessionId, authToken, apiOrigin },
+        { onProgress: () => pushProgress(), onLog: (msg) => console.log(msg) },
+      );
+    }
 
     // ④ 启动 tick 计时器
     tickTimer = setInterval(() => {
@@ -390,39 +409,42 @@ async function start(
   recordingLaunched = true;
 
   // ② 启动转码层（chokidar 监听）
-  startTranscodingWatcher(
-    {
-      tmpDir,
-      detectedEncoder,
-      isSoftwareEncoder,
-    },
-    {
-      onTranscodeComplete: (transcodedPath) => {
-        // 转码完成 → 通知上传层
-        enqueueUpload(transcodedPath);
+  // 仅录制模式跳过转码层与上传层，仅保留本地切片（与 window 分支语义对齐）
+  if (!recordOnly) {
+    startTranscodingWatcher(
+      {
+        tmpDir,
+        detectedEncoder,
+        isSoftwareEncoder,
       },
-      onTranscodeFailed: (rawPath) => {
-        // 转码失败 → 上传原始切片（降级策略 C）
-        enqueueRawUpload(rawPath);
+      {
+        onTranscodeComplete: (transcodedPath) => {
+          // 转码完成 → 通知上传层
+          enqueueUpload(transcodedPath);
+        },
+        onTranscodeFailed: (rawPath) => {
+          // 转码失败 → 上传原始切片（降级策略 C）
+          enqueueRawUpload(rawPath);
+        },
+        onLog: (msg) => console.log(msg),
+        onProgress: () => pushProgress(),
       },
-      onLog: (msg) => console.log(msg),
-      onProgress: () => pushProgress(),
-    },
-  );
+    );
 
-  // ③ 启动上传层
-  initUploader(
-    {
-      roomId,
-      sessionId,
-      authToken,
-      apiOrigin,
-    },
-    {
-      onProgress: () => pushProgress(),
-      onLog: (msg) => console.log(msg),
-    },
-  );
+    // ③ 启动上传层
+    initUploader(
+      {
+        roomId,
+        sessionId,
+        authToken,
+        apiOrigin,
+      },
+      {
+        onProgress: () => pushProgress(),
+        onLog: (msg) => console.log(msg),
+      },
+    );
+  }
 
   // ④ 启动 tick 计时器
   tickTimer = setInterval(() => {
@@ -474,16 +496,26 @@ async function stop(): Promise<void> {
     await waitForTranscodeQueue();
   }
 
-  // ③ 补传临时目录中遗漏的切片
-  enqueueMissingFiles(sessionTmpDir);
+  if (!isRecordOnly) {
+    // ③ 补传临时目录中遗漏的切片
+    enqueueMissingFiles(sessionTmpDir);
 
-  // ④ 等待上传队列完全排空（串行队列中的所有切片上传完毕）
-  await waitForUploadQueue();
-  // 确保在途上传也完成
-  await Promise.allSettled(Array.from(getActiveUploads()));
+    // ④ 等待上传队列完全排空（串行队列中的所有切片上传完毕）
+    await waitForUploadQueue();
+    // 确保在途上传也完成
+    await Promise.allSettled(Array.from(getActiveUploads()));
+
+    // 同步上传层自刷新的 token：上传层遇 401 会调用 refreshTokenFromMainProcess() 更新
+    // config.authToken，但模块级 currentAuthToken 不会自动跟随；若不在此同步，token 中途过期时
+    // persistRecording / finish 仍用过期 token → HTTP 401 → 播放列表丢失。
+    const freshToken = getAuthToken();
+    if (freshToken) currentAuthToken = freshToken;
+  } else {
+    console.log('[recorder] 仅录制模式：跳过上传队列等待 / 补传切片');
+  }
 
   // ⑤ 检查 pendingQueue 积压量
-  const pendingCount = getPendingQueue().length;
+  const pendingCount = isRecordOnly ? 0 : getPendingQueue().length;
   let persisted = pendingCount > STOP_PENDING_THRESHOLD;
 
   if (persisted) {
@@ -512,8 +544,8 @@ async function stop(): Promise<void> {
     }
   }
 
-  // ⑥ 调用 finish 接口（仅全传完时）
-  if (!persisted && getSegmentKeys().length > 0) {
+  // ⑥ 调用 finish 接口（仅全传完时；仅录制模式跳过）
+  if (!isRecordOnly && !persisted && getSegmentKeys().length > 0) {
     try {
       const response = await net.fetch(
         `${apiOrigin}/api/rooms/${currentRoomId}/recording/finish`,
@@ -540,15 +572,21 @@ async function stop(): Promise<void> {
     } catch (err) {
       console.error('[recorder] finish 接口异常：', (err as Error).message);
     }
-  } else if (!persisted) {
+  } else if (!isRecordOnly && !persisted) {
     console.warn('[recorder] 无可用切片，跳过 finish 接口');
+  } else if (isRecordOnly) {
+    console.log('[recorder] 仅录制模式：跳过 finish 接口');
   }
 
-  // ⑦ 清理临时目录
-  fs.rm(sessionTmpDir, { recursive: true, force: true }, (err) => {
-    if (err) console.warn('[recorder] 临时目录清理失败：', err.message);
-    else console.log('[recorder] 临时目录已清理：', sessionTmpDir);
-  });
+  // ⑦ 清理临时目录（仅录制模式保留本地目录，不删除）
+  if (isRecordOnly) {
+    console.log(`[recorder] 仅录制模式，保留本地录制目录不删除：${sessionTmpDir}`);
+  } else {
+    fs.rm(sessionTmpDir, { recursive: true, force: true }, (err) => {
+      if (err) console.warn('[recorder] 临时目录清理失败：', err.message);
+      else console.log('[recorder] 临时目录已清理：', sessionTmpDir);
+    });
+  }
 
   // ⑧ 清理上传层状态
   cleanupUploader();
@@ -561,6 +599,7 @@ async function stop(): Promise<void> {
   crashRestartCount = 0;
   recordingLaunched = false;
   sentinelActive = false;
+  isRecordOnly = false;
 
   // 清理定时器
   if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null; }
@@ -611,13 +650,15 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
 // ─── window 模式成品切片上传监听（替代 transcode 层，直接进 upload）─────────────────
 
 /**
- * 启动 chokidar 监听 tmpDir，ffmpeg-mux 产出的 segNNN_opt.ts 成品切片直接 enqueueUpload，
- * 完全绕过逐片 transcode 层（方案2a 终态编码已在 GPU 内完成、输出即压缩码流）。
+ * 启动 chokidar 监听 tmpDir，window_capture.exe 内嵌 ffmpeg_muxer 直接写出的 sessionN.ts
+ * 成品切片（HLS 切片）直接 enqueueUpload，完全绕过逐片 transcode 层
+ * （方案2a 终态编码已在 exe 内一体完成、输出即压缩 HLS 切片）。
  *
- * 仅匹配 `_opt.ts` 切片；index.m3u8 与半成品由 stop 时的 enqueueMissingFiles 兜底。
- * ignoreInitial=true 确保不重复拾取已存在文件；awaitWriteFinish 避免拾取半写切片。
+ * 仅匹配 `.ts` 切片（排除 .m3u8 播放列表）；index.m3u8 与半成品由 stop 时的
+ * enqueueMissingFiles 兜底。ignoreInitial=true 确保不重复拾取已存在文件；
+ * awaitWriteFinish 避免拾取半写切片。
  *
- * @param dir  监听目录（录制临时目录）
+ * @param dir  监听目录（录制临时目录，= exe 的 --out 所在目录）
  * @param _cbs 透传录制回调（保留签名一致性，本函数不直接使用）
  */
 function startWindowUploadWatcher(dir: string, _cbs?: RecordingCallbacks): void {
@@ -631,7 +672,7 @@ function startWindowUploadWatcher(dir: string, _cbs?: RecordingCallbacks): void 
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
   });
   windowUploadWatcher.on('add', (filePath: string) => {
-    if (filePath.endsWith('_opt.ts')) {
+    if (/\.ts$/.test(filePath) && !filePath.endsWith('.m3u8')) {
       enqueueUpload(filePath);
     }
   });
@@ -829,9 +870,11 @@ export function registerRecorderHandlers(): void {
     displayTitle: string,
     roomId: string,
     authToken: string,
+    recordOnly?: boolean,
+    rcMode?: 'cqp' | 'cbr' | 'vbr_ceil',
   ) => {
     try {
-      await start(windowId, displayTitle, roomId, authToken);
+      await start(windowId, displayTitle, roomId, authToken, recordOnly ?? false, rcMode ?? 'cqp');
     } catch (err) {
       console.error('[recorder] start 异常：', (err as Error).message);
       throw err;

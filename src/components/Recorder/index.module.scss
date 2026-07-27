@@ -256,3 +256,79 @@
 .audioMicCheck {
   margin-left: 16px; // 视觉上表示「麦克风」是「系统声音」的子选项
 }
+
+// ── 录制模式切换（CQP/CBR）───────────────────────────────────────────────────
+
+.modeToggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.modeLabel {
+  font-weight: 600;
+  font-size: 14px;
+  color: $text-primary;
+  white-space: nowrap;
+}
+
+// 覆盖 Ant Design Radio.Group button-style 为极简风格：
+//   未选中 = 白底黑字，无 hover 变色/无点击阴影
+//   选中   = 蓝底白字（#1677ff），无 hover 变色/无点击阴影
+:global(.ant-radio-group-solid) {
+  // ── 所有按钮基础：白底黑字、去阴影、去过渡 ──
+  :global(.ant-radio-button-wrapper) {
+    border: 1px solid #d9d9d9 !important;
+    background: #fff !important;
+    color: #333 !important;
+    border-radius: 4px !important;
+    box-shadow: none !important;
+    transition: none !important;
+
+    &:hover {
+      border-color: #d9d9d9 !important;
+      background: #fff !important;
+      color: #333 !important;
+      box-shadow: none !important;
+    }
+
+    &::before {
+      display: none !important;          // 干掉 Ant Design 按钮间连接线伪元素
+    }
+  }
+
+  // ── 选中状态：蓝底白字（必须写在基础样式之后，确保覆盖）──
+  :global(.ant-radio-button-wrapper-checked) {
+    background: #1677ff !important;
+    border-color: #1677ff !important;
+    color: #fff !important;
+    box-shadow: none !important;
+
+    &:hover {
+      background: #1677ff !important;
+      border-color: #1677ff !important;
+      color: #fff !important;
+      box-shadow: none !important;
+    }
+
+    &::before {
+      display: none !important;
+    }
+  }
+
+  // 相邻按钮间距（去掉连接线后需要一点 gap）
+  :global(.ant-radio-button-wrapper + .ant-radio-button-wrapper) {
+    margin-left: 0;
+  }
+
+  // 圆角：每个按钮独立圆角（非 Ant Design 默认的连体圆角）
+  :global(.ant-radio-button-wrapper:first-child) {
+    border-top-right-radius: 4px !important;
+    border-bottom-right-radius: 4px !important;
+  }
+  :global(.ant-radio-button-wrapper:last-child) {
+    border-top-left-radius: 4px !important;
+    border-bottom-left-radius: 4px !important;
+  }
+}

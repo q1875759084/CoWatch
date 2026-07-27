@@ -2,13 +2,13 @@
  * 录制层：负责启动/停止捕获与编码进程，管理临时目录。
  *
  * 模式分支（方案2a 终态）：
- *   - window 源：spawn `window_capture.exe`（WGC + NVENC DX11 直送 + 内嵌 AAC）→ 等 READY
- *     → spawn `ffmpeg-mux`（仅封装压缩流）→ 成品 `segNNN_opt.ts` 直接进 upload 层
- *     （**去除逐片 transcode 接线**，编码在 GPU 内，无回读）。
+ *   - window 源：spawn `window_capture.exe`（WGC + NVENC DX11 直送 + 内嵌 AAC + 内嵌 HLS 封装）
+ *     → 等 READY → exe 直接写本地 HLS `.ts` 切片，由上传层 chokidar 监听目录进 upload 层
+ *     （**去除 ffmpeg-mux 外部封装**，编码+封装都在 exe 内一体完成，无回读）。
  *   - screen 源：保持 feat 基线原样（ddagrab + audio_capture.exe 双进程 + 转码层），不改动。
  *
  * pause/resume/stop + crash 重启 + 时间轴锚点沿用实验版语义；窗口模式 pause 即整体终止
- * exe + mux（Windows 不支持 SIGSTOP），resume 以 -start_number 续号重建。
+ * exe（Windows 不支持 SIGSTOP），resume 以 -start_number 续号重建。
  */
 
 import fs from 'fs';
@@ -26,7 +26,6 @@ import {
 import type { PauseReason } from './types';
 import {
   buildExeArgs,
-  buildMuxArgs,
   type CaptureProfile,
   type EncodeProfile,
   type MuxProfile,
@@ -42,6 +41,8 @@ export interface WindowCaptureConfig {
   audioDevice?: string;
   muxTarget: 'pipe' | 'file' | 'null';
   stats: boolean;
+  /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 1080p、默认 6000kbps 封顶）。其余参数走 exe 默认值。 */
+  rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
 }
 
 export interface RecordingConfig {
@@ -54,6 +55,8 @@ export interface RecordingConfig {
   cachedAvfIndex: number;
   /** window 模式注入的捕获/编码/封装 Profile 集合（方案2a 主进程注入）。 */
   windowCapture?: WindowCaptureConfig;
+  /** 仅录制模式：跳过上传、切片持久化到本地（可选透传，当前由录制协调层控制，录制层无需使用）。 */
+  recordOnly?: boolean;
 }
 
 export interface RecordingCallbacks {
@@ -152,11 +155,12 @@ export async function startRecording(
 
 function getCaptureExePath(): string | null {
   const binName = 'window_capture.exe';
+  // 新 exe 部署在独立子目录 electron/bin/window_capture/（DLL 隔离，避免与 screen 模式 ffmpeg 冲突）。
   if (app.isPackaged) {
-    const bundled = path.join(process.resourcesPath ?? '', 'bin', binName);
+    const bundled = path.join(process.resourcesPath ?? '', 'bin', 'window_capture', 'bin', '64bit', binName);
     if (fs.existsSync(bundled)) return bundled;
   } else {
-    const dev = path.join(app.getAppPath(), 'electron', 'bin', binName);
+    const dev = path.join(app.getAppPath(), 'electron', 'bin', 'window_capture', 'bin', '64bit', binName);
     if (fs.existsSync(dev)) return dev;
   }
   return null;
@@ -170,7 +174,7 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
   lastCfg = cfg;
-  const { capture, encode, mux, audio, audioDevice, muxTarget, stats } = cfg.windowCapture;
+  const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode } = cfg.windowCapture;
   currentMuxProfile = { ...mux };
   m_paused = false;
   muxReady = false;
@@ -182,8 +186,8 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
 
-  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice });
-  captureProc = spawn(exePath, exeArgs, { stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'] });
+  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice, rcMode });
+  captureProc = spawn(exePath, exeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
 
   let buf = '';
   captureProc.stdout?.on('data', (chunk: Buffer) => {
@@ -228,10 +232,8 @@ function handleCaptureLine(line: string, cfg: RecordingConfig, cbs: RecordingCal
   }
   if (msg.type === 'READY') {
     cbs.onLog?.(`[recording] capture READY w=${msg.w} h=${msg.h} fps=${msg.fps} codec=${msg.codec} hasAudio=${String(msg.hasAudio)}`);
-    // A5 修复：以 exe 实际音频能力为准更新 mux profile，避免 exe 音频初始化失败时不写 fd4
-    // 但 mux 仍等 pipe:4 而挂起。
+    // 以 exe 实际音频能力为准更新 mux profile（仅用于 crash 续录锚点续号，不影响 exe 内封装）。
     if (currentMuxProfile) currentMuxProfile.hasAudio = !!msg.hasAudio;
-    spawnMuxer(cfg, cbs);
   } else if (msg.type === 'CLOSED') {
     cbs.onLog?.(`[recording] capture CLOSED reason=${msg.reason}`);
     if (msg.reason === 'window_closed') cbs.onShouldStop?.();
@@ -245,59 +247,17 @@ function handleCaptureLine(line: string, cfg: RecordingConfig, cbs: RecordingCal
   }
 }
 
-function spawnMuxer(cfg: RecordingConfig, cbs: RecordingCallbacks): void {
-  if (!captureProc || !captureProc.stdio[3] || !currentMuxProfile) {
-    cbs.onLog?.('[recording] mux 缺少 exe 压缩流 fd，跳过');
-    return;
-  }
-  // 捕获当前 muxer 所对应的 exe 实例，避免后续 restart 覆盖模块变量后误杀新 exe（BUG-2②）
-  const ownerCapture = captureProc;
-  const ffmpeg = getFfmpegPath();
-  const muxArgs = buildMuxArgs(currentMuxProfile);
-  const stdio: Array<'pipe' | 'ignore' | { fd: number }> = [
-    'pipe', 'pipe', 'pipe',
-    { fd: (ownerCapture.stdio[3] as unknown as { fd: number }).fd },
-  ];
-  if (currentMuxProfile.hasAudio) {
-    stdio.push({ fd: (ownerCapture.stdio[4] as unknown as { fd: number }).fd });
-  } else {
-    stdio.push('ignore');
-  }
-
-  muxProc = spawn(ffmpeg, muxArgs, { stdio });
-  muxReady = true;
-  // BUG-2①：释放 Node 对 exe 压缩流读端(fd3/fd4)自身的副本引用。否则 muxer 崩溃时
-  // 内核管道读端引用计数不归零，exe 的 _write 收不到 EPIPE → 64KB 缓冲写满后永久阻塞。
-  ownerCapture.stdio[3]?.destroy();
-  ownerCapture.stdio[4]?.destroy();
-  muxProc.stderr?.on('data', (chunk: Buffer) => {
-    cbs.onLog?.(`[mux:stderr] ${chunk.toString().trim()}`);
-  });
-  muxProc.on('close', (code: number | null) => {
-    muxProc = null;
-    if (isUserStopped) return;
-    cbs.onLog?.(`[recording] ffmpeg-mux 异常退出 code=${code}`);
-    // BUG-2②：强杀已可能阻塞/僵死的旧 exe；其 captureProc.on('close') 会统一上报 crash 并触发
-    // 重启，此处不再重复 onCrash，避免与 captureProc close handler 的双重触发。
-    try { ownerCapture?.kill('SIGKILL'); } catch { /* ignore */ }
-  });
-  cbs.onLog?.('[recording] ffmpeg-mux 启动（仅封装 HLS）');
-}
-
 function gracefulQuitWindow(): Promise<void> {
+  // 向 window_capture.exe 发 CTRL_C_EVENT（Node SIGINT 在 Windows 映射为
+  // GenerateConsoleCtrlEvent(CTRL_C_EVENT)），exe 捕获后 flush 尾段并写 #EXT-X-ENDLIST 干净退出。
   return new Promise((resolve) => {
-    let pending = 0;
-    const done = () => { if (--pending <= 0) resolve(); };
-    const killProc = (p: ChildProcess | null) => {
-      if (!p) return;
-      pending++;
-      try { p.stdin?.write('q'); } catch { /* ignore */ }
-      p.on('close', () => done());
-      setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* ignore */ } done(); }, 5000);
-    };
-    killProc(muxProc); muxProc = null;
-    killProc(captureProc); captureProc = null;
-    if (pending === 0) resolve();
+    if (!captureProc) return resolve();
+    const t = setTimeout(() => {
+      try { captureProc?.kill('SIGKILL'); } catch { /* ignore */ }
+      resolve();
+    }, 8000);
+    captureProc.on('close', () => { clearTimeout(t); resolve(); });
+    try { captureProc.kill('SIGINT'); } catch { /* 已退出 */ }
   });
 }
 

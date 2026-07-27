@@ -57,3 +57,6 @@ export interface ExternalTranscodeProgress {
   /** 预估总分段数（-1 = 尚无法估算） */
   estimated: number;
 }
+
+/** window_capture 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 1080p、默认 6000kbps 封顶） */
+export type RecordingRcMode = 'cqp' | 'cbr' | 'vbr_ceil';

@@ -243,18 +243,29 @@ export function makeDefaultProfiles(detectedEncoder, tmpDir, hwnd: number, fps=3
 
 ```ts
 // 改前：handleCaptureLine 的 READY 分支 → spawnMuxer(cfg, cbs)
-// 改后：READY 分支 → 通知协调层启动 chokidar 监听 dirname(msg.out)
 function handleCaptureLine(line, cfg, cbs) {
   const msg = safeParse(line);
   if (msg.type === 'READY') {
     if (currentMuxProfile) currentMuxProfile.hasAudio = !!msg.hasAudio;
     // 旧：spawnMuxer(cfg, cbs);
-    // 新：把本地 HLS 目录交给上传层监听（不再有外部 ffmpeg-mux）
-    cbs.onCaptureReady?.(String(msg.out));   // 协调层用 dirname(out) 启动/复用 startWindowUploadWatcher
+    // ✅ 最小改动（推荐）：不引入任何跨层回调。协调层已在 recorder/index.ts:350
+    //    对 tmpDir 起了 watcher（早于 READY），而 --out 本就落在 tmpDir；
+    //    只需 recorder/index.ts:634 把匹配规则 _opt.ts→.ts 即功能完整。
+    //    → READY 分支可保持原样（仅记录 msg.out 供 stop 兜底，不做额外动作）。
   } else if (msg.type === 'CLOSED') { ... }   // 不变
 }
 
+// ⚠️【可选增强，非必须 · ERRATA #3】若希望协调层在 READY 后才（重新）启动 watcher，
+//    可加 cbs.onCaptureReady?.(String(msg.out))，让 recorder/index.ts 用 dirname(out)
+//    启动/复用 startWindowUploadWatcher。但此回调会引入 recording↔recorder 跨层耦合，
+//    "最小改动"铁律下不建议引入——除非有"未 READY 前不监听"的明确需求。
+//    （本文件旧版 §3.8 曾将其列为必改，已据 ERRATA #3 降级为可选。）
+
 // 删：spawnMuxer() 整个函数（pipe fd3/fd4 + 外部 ffmpeg-mux）
+
+// 【顺手清理 · ERRATA #4】spawn 的 stdio 原为 5 个 pipe（fd3/fd4 原给 mux 喂数据）；
+// 删 mux 后 fd3/fd4 无消费者，可简化为 ['pipe','pipe','pipe']（无害但更干净）。
+//   spawn(exePath, args, { stdio: ['pipe','pipe','pipe'] });
 
 // gracefulQuitWindow 改前（写 'q' + SIGKILL muxer/exe）
 // 改后：仅对 exe 发 CTRL_C_EVENT，等干净退出

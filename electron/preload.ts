@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { RecordingRcMode } from '../src/types/recorder';
 
 /**
  * contextBridge 将受控 API 暴露给 renderer（React 页面）
@@ -17,6 +18,9 @@ contextBridge.exposeInMainWorld('electronBridge', {
    */
   apiOrigin: (__API_ORIGIN__ as string) || process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002',
 
+  /** 是否 preview 模式（ELECTRON_PREVIEW=true），用于决定是否暴露录制调试选项 */
+  isPreview: process.env.ELECTRON_PREVIEW === 'true',
+
   // ─── 录制相关 ─────────────────────────────────────────────────────────────
   recorder: {
     /** 检测当前机器可用的最佳硬件/软件编码器 */
@@ -25,8 +29,8 @@ contextBridge.exposeInMainWorld('electronBridge', {
     getSources: () => ipcRenderer.invoke('recorder:getSources'),
     /**
      * 开始录制
-     * @param windowId     desktopCapturer source id
-     * @param displayTitle 窗口标题（Windows gfxcapture 使用）
+     * @param windowId     desktopCapturer source id，形如 window:<HWND十进制>[:suffix]，中段即目标窗口 HWND（CoWatch 主契约）
+     * @param displayTitle 窗口标题（保留用于 crash 日志 / 解析，不进捕获 CLI）
      * @param roomId       房间 ID
      * @param authToken    JWT AccessToken，主进程上传切片时带入 Authorization header
      */
@@ -35,7 +39,9 @@ contextBridge.exposeInMainWorld('electronBridge', {
       displayTitle: string,
       roomId: string,
       authToken: string,
-    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken),
+      recordOnly?: boolean,
+      rcMode?: RecordingRcMode,
+    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, recordOnly, rcMode),
     /** 停止录制（等待剩余切片上传完成后通知后端） */
     stop: () => ipcRenderer.invoke('recorder:stop'),
     /** 注册每秒录制计时回调，seconds 为已录秒数 */

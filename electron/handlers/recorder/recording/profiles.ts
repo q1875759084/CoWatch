@@ -2,28 +2,26 @@
  * profiles.ts — 捕获 / 编码 / 封装 配置集中注入（方案2a §1.5）
  *
  * 主进程（coordinator）集中维护 CaptureProfile / EncodeProfile / MuxProfile，
- * 按硬件/模式下发给 window_capture.exe 与 ffmpeg-mux（仅封装），
+ * 按硬件/模式下发给 window_capture.exe（exe 内一体编码 + HLS 封装），
  * 不写死、不开放终端用户。本文件提供：
  *   - 三套 Profile 类型
  *   - buildExeArgs()：展开为 window_capture.exe CLI
- *   - buildMuxArgs()：展开为 ffmpeg-mux（-c copy 封装）CLI
  *   - makeDefaultProfiles()：按检测结果产出默认配置
  *
  * 与 OBS「UI 改参、CoWatch 由主进程注入」一致。所有质量/码率均来自此处，exe 不硬编码。
  */
 
-import path from 'path';
-
 import { HLS_SEGMENT_DURATION } from '../shared';
 
 export type CaptureCodec = 'h264_nvenc' | 'hevc_nvenc';
 
-/** 窗口定位（优先级：pid > hwnd > title，exe 内部执行）。 */
+/** 窗口定位（优先级：hwnd > window > pid，exe 内部裁决；title 仅用于 crash 日志，不进 CLI）。 */
 export interface CaptureProfile {
-  pid?: number;
-  hwnd?: number;
-  title?: string;
-  windowIndex?: number;
+  pid?: number; // 兜底（documented-lossy）
+  hwnd?: number | string; // 主选择器（十进制 HWND；string 或 number 均可，下传时 String()）
+  window?: string; // "title:class:exe" 直传 OBS
+  windowPriority?: 'class' | 'title' | 'exe';
+  title?: string; // 仅 crash 日志使用，不进 CLI
   fps: number;
   w?: number;
   h?: number;
@@ -54,11 +52,13 @@ export interface WindowSpawnOptions {
   stats: boolean;
   audio: boolean;
   audioDevice?: string;
+  /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（CoWatch 侧显式注入 1920×1080 对齐直播姬，均值 6000kbps，复杂场景弹性超发至峰值默认 9000kbps）。其余参数走 exe 默认值。 */
+  rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
 }
 
 /**
  * 展开为 window_capture.exe 参数。
- * 窗口定位优先级 pid > hwnd > title（与 exe 内部一致；此处仅展开，由 exe 最终裁决）。
+ * 窗口定位优先级 hwnd > window > pid（与 exe 内部裁决一致；此处仅展开，由 exe 最终裁决）。
  */
 export function buildExeArgs(
   cap: CaptureProfile,
@@ -66,63 +66,37 @@ export function buildExeArgs(
   mux: MuxProfile,
   opts: WindowSpawnOptions,
 ): string[] {
+  // enc 字段预留给后续按 GPU 占用单独调参的入口；当前录制质量一律走 exe 默认值，不下传。
   const args: string[] = [];
 
-  if (cap.pid != null) {
-    args.push('--pid', String(cap.pid), '--window-index', String(cap.windowIndex ?? 0));
-  } else if (cap.hwnd != null) {
+  // 窗口定位（三选一必填，无默认值；hwnd > window > pid）
+  if (cap.hwnd != null) {
     args.push('--hwnd', String(cap.hwnd));
-  } else if (cap.title) {
-    args.push('--title', cap.title);
+  } else if (cap.window) {
+    args.push('--window', cap.window); // exe 默认 class 裁决，不再下传 --window-priority
+  } else if (cap.pid != null) {
+    args.push('--pid', String(cap.pid)); // 兜底 lossy
   }
 
-  args.push('--fps', String(cap.fps));
-  if (cap.w != null) args.push('--w', String(cap.w));
-  if (cap.h != null) args.push('--h', String(cap.h));
-  if (cap.cursor) args.push('--cursor');
-
-  args.push(
-    '--codec', enc.codec,
-    '--bitrate', String(enc.bitrate),
-    '--bf', String(enc.bf),
-    '--rc-lookahead', String(enc.rcLookahead),
-    '--preset', enc.preset,
-    '--gop', String(enc.gop),
-  );
-
-  if (opts.audio) args.push('--audio');
-  if (opts.audio && opts.audioDevice) args.push('--audio-device', opts.audioDevice);
-
-  args.push('--out', mux.outDir, '--seg', String(mux.seg));
+  // 封装 / 输出（必填）：watcher 按 --out 目录 watch *.ts 切片
   args.push('--mux-target', opts.muxTarget);
-  if (opts.stats) args.push('--stats');
+  args.push('--out', mux.outDir);
 
-  return args;
-}
+  // 码率控制模式：cqp=质量优先（exe 默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR；CoWatch 侧显式下传 1920×1080 覆盖 exe 默认，其余参数走 exe 默认。
+  args.push('--rc-mode', opts.rcMode ?? 'cqp');
 
-/**
- * 展开为 ffmpeg-mux 参数（仅封装，零重编码）。
- * 视频走 pipe:3（压缩 NAL），音频走 pipe:4（AAC ADTS，hasAudio 时）。
- * 切片直接命名为 seg%03d_opt.ts，与 screen 转码产物同构，可直接进 upload 层。
- */
-export function buildMuxArgs(mux: MuxProfile): string[] {
-  const vfmt = mux.codec.startsWith('hevc') ? 'hevc' : 'h264';
-  const args: string[] = [
-    '-y', '-fflags', '+genpts',
-    '-f', vfmt, '-i', 'pipe:3',
-  ];
-  if (mux.hasAudio) {
-    args.push('-f', 'aac', '-i', 'pipe:4');
+  // VBR_CEIL 模式：对齐直播姬推流实际分辨率，显式覆盖 exe 默认 1440×810 为 1920×1080
+  if (opts.rcMode === 'vbr_ceil') {
+    args.push('--width', '1920');
+    args.push('--height', '1080');
   }
-  args.push(
-    '-c', 'copy',
-    '-f', 'hls',
-    '-hls_time', String(mux.seg),
-    '-hls_list_size', '0',
-    '-start_number', String(mux.startNumber),
-    '-hls_segment_filename', path.join(mux.outDir, 'seg%03d_opt.ts').replace(/\\/g, '/'),
-    path.join(mux.outDir, 'index.m3u8').replace(/\\/g, '/'),
-  );
+
+  // 诊断（可选）：capture/encode/gpu 占用，供后续按 GPU 调参
+  if (opts.stats === true) args.push('--stats');
+
+  // 音频：exe 默认录系统 loopback；关闭才传 --no-audio
+  if (opts.audio === false) args.push('--no-audio');
+
   return args;
 }
 
@@ -130,13 +104,13 @@ export function buildMuxArgs(mux: MuxProfile): string[] {
  * 按检测结果产出 window 模式默认 Profile 集合。
  * @param detectedEncoder 主进程检测的编码器（h264_nvenc/hevc_nvenc/...）
  * @param tmpDir           HLS 输出目录
- * @param title           窗口标题（默认定位方式）
+ * @param hwnd            目标窗口 HWND（十进制，主契约；string 或 number 皆可）
  * @param fps             目标帧率
  */
 export function makeDefaultProfiles(
   detectedEncoder: string,
   tmpDir: string,
-  title: string,
+  hwnd: number | string,
   fps = 30,
 ): { capture: CaptureProfile; encode: EncodeProfile; mux: MuxProfile } {
   const codec: CaptureCodec = detectedEncoder.includes('hevc')
@@ -145,7 +119,7 @@ export function makeDefaultProfiles(
 
   return {
     capture: {
-      title,
+      hwnd,
       fps,
       cursor: true,
     },

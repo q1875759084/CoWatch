@@ -1,16 +1,17 @@
 import { useState } from "react";
 
-import { Modal } from "antd";
+import { Modal, Button, Radio } from "antd";
 
-import type { RecorderSource } from "@/types/recorder";
+import type { RecorderSource, RecordingRcMode } from "@/types/recorder";
 
 import styles from "./index.module.scss";
 
 interface WindowPickerProps {
   sources: RecorderSource[];
-  onConfirm: (source: RecorderSource, sourceType: "screen" | "window") => void;
+  onConfirm: (source: RecorderSource, sourceType: "screen" | "window", recordOnly: boolean, rcMode: RecordingRcMode) => void;
   onCancel: () => void;
   onRefresh?: () => void | Promise<void>;
+  isPreview?: boolean;
 }
 
 /**
@@ -24,14 +25,16 @@ export function WindowPicker({
   onConfirm,
   onCancel,
   onRefresh,
+  isPreview = false,
 }: WindowPickerProps) {
   const [selectedId, setSelectedId] = useState<string>("");
+  const [rcMode, setRcMode] = useState<RecordingRcMode>('cqp');
 
   const selectedSource = sources.find((s) => s.id === selectedId) ?? null;
 
-  const handleConfirm = () => {
+  const handleConfirmWithRecord = (recordOnly: boolean) => {
     if (!selectedSource) return;
-    onConfirm(selectedSource, selectedSource.sourceType);
+    onConfirm(selectedSource, selectedSource.sourceType, recordOnly, rcMode);
   };
 
   /** 判断缩略图是否为纯黑（整屏录制独占游戏时的预期情况） */
@@ -52,15 +55,44 @@ export function WindowPicker({
     <Modal
       open
       title="选择录制内容"
-      onOk={handleConfirm}
       onCancel={onCancel}
-      okText="开始录制"
-      cancelText="取消"
-      okButtonProps={{ disabled: !selectedId }}
+      footer={[
+        <Button key="cancel" onClick={onCancel}>
+          取消
+        </Button>,
+        <Button
+          key="recordUpload"
+          type="primary"
+          onClick={() => handleConfirmWithRecord(false)}
+          disabled={!selectedId}
+        >
+          录制上传
+        </Button>,
+        <Button
+          key="recordOnly"
+          onClick={() => handleConfirmWithRecord(true)}
+          disabled={!selectedId}
+        >
+          仅录制
+        </Button>,
+      ]}
       width={680}
       centered
       className={styles.pickerModal}
     >
+        <div className={styles.modeToggle}>
+          <span className={styles.modeLabel}>录制模式</span>
+          <Radio.Group
+            value={rcMode}
+            onChange={(e) => setRcMode(e.target.value as RecordingRcMode)}
+            optionType="button"
+            buttonStyle="solid"
+          >
+            <Radio value="cqp">CQP（质量优先）</Radio>
+            <Radio value="cbr">CBR（恒定码率）</Radio>
+            <Radio value="vbr_ceil">VBR（弹性码率）</Radio>
+          </Radio.Group>
+        </div>
       {sources.length === 0 ? (
         <div className={styles.emptyWrap}>
           <p className={styles.empty}>未检测到可录制的窗口</p>

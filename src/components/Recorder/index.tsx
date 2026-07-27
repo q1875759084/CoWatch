@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { message, Modal, Tooltip } from 'antd';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError } from '@/types/recorder';
+import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError, RecordingRcMode } from '@/types/recorder';
 import { useRecorderState } from '@/context/RecorderContext';
 import { getAccessToken } from '@/utils/token';
 
@@ -30,6 +30,9 @@ function formatDuration(seconds: number): string {
 export function Recorder({ roomId }: RecorderProps) {
   const isElectron = !!(window as Window & { electronBridge?: { isElectron: true } }).electronBridge?.isElectron;
   const bridge = isElectron ? window.electronBridge : null;
+
+  // preview 模式（ELECTRON_PREVIEW=true）才暴露录制调试选项（如 cqp/cbr 选择器）。
+  const isPreview = !!bridge?.isPreview;
 
   const { setRecorderState } = useRecorderState();
 
@@ -138,6 +141,8 @@ export function Recorder({ roomId }: RecorderProps) {
   const handleConfirmSource = async (
     source: RecorderSource,
     _sourceType: 'screen' | 'window',
+    recordOnly: boolean = false,
+    rcMode: RecordingRcMode = 'cqp',
   ) => {
     if (!bridge) return;
     setShowPicker(false);
@@ -146,7 +151,7 @@ export function Recorder({ roomId }: RecorderProps) {
       tickSecRef.current = 0;
       setProgress({ uploaded: 0, pending: 0 });
       const authToken = getAccessToken() ?? '';
-      await bridge.recorder.start(source.id, source.name, roomId, authToken);
+      await bridge.recorder.start(source.id, source.name, roomId, authToken, recordOnly, rcMode);
       updateState('recording');
     } catch (err) {
       void message.error((err as Error).message || '录制启动失败');
@@ -236,6 +241,7 @@ export function Recorder({ roomId }: RecorderProps) {
         <WindowPicker
           sources={sources}
           onConfirm={handleConfirmSource}
+          isPreview={isPreview}
           onCancel={() => setShowPicker(false)}
           onRefresh={async () => {
             if (!bridge) return;
