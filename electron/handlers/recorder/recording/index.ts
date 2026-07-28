@@ -41,10 +41,10 @@ export interface WindowCaptureConfig {
   audioDevice?: string;
   muxTarget: 'pipe' | 'file' | 'null';
   stats: boolean;
-  /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 1080p、默认 6000kbps 封顶）。其余参数走 exe 默认值。 */
+  /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 900p、默认 6000kbps 封顶）。其余参数走 exe 默认值。 */
   rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
-  /** 分辨率：720p（1280×720，默认）或 1080p（1920×1080），传给 window_capture.exe 的 --width/--height */
-  resolution?: '720p' | '1080p';
+  /** 分辨率：720p（1280×720，默认）或 900p（1600×900），传给 window_capture.exe 的 --width/--height */
+  resolution?: '720p' | '900p';
 }
 
 export interface RecordingConfig {

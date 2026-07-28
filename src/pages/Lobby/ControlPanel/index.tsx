@@ -301,7 +301,7 @@ export default function ControlPanel({
           </div>
           <div className={styles.encodeRow}>
             <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>分辨率</label>
-            <span className={styles.encodeValueDisabled} title="二期开放">1080p</span>
+            <span className={styles.encodeValueDisabled} title="二期开放">900p</span>
           </div>
           <div className={styles.encodeRow}>
             <label className={`${styles.encodeLabel} ${styles.encodeLabelDisabled}`}>帧率</label>

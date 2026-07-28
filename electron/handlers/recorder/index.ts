@@ -253,7 +253,7 @@ async function start(
   authToken: string,
   recordOnly: boolean = false,
   rcMode: 'cqp' | 'cbr' | 'vbr_ceil' = 'vbr_ceil',
-  resolution: '720p' | '1080p' = '720p',
+  resolution: '720p' | '900p' = '720p',
 ): Promise<void> {
   if (isRecording()) {
     throw new Error('[recorder] 录制已在进行中');
@@ -882,7 +882,7 @@ export function registerRecorderHandlers(): void {
     authToken: string,
     recordOnly?: boolean,
     rcMode?: 'cqp' | 'cbr' | 'vbr_ceil',
-    resolution?: '720p' | '1080p',
+    resolution?: '720p' | '900p',
   ) => {
     try {
       await start(windowId, displayTitle, roomId, authToken, recordOnly ?? false, rcMode ?? 'vbr_ceil', resolution ?? '720p');

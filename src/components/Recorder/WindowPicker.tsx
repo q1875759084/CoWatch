@@ -103,7 +103,7 @@ export function WindowPicker({
             buttonStyle="solid"
           >
             <Radio value="720p">1280 × 720</Radio>
-            <Radio value="1080p">1920 × 1080</Radio>
+            <Radio value="900p">1600 × 900</Radio>
           </Radio.Group>
         </div>
       {sources.length === 0 ? (
