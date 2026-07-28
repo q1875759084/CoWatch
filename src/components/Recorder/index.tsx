@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { message, Modal, Tooltip } from 'antd';
 
-import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError, RecordingRcMode } from '@/types/recorder';
+import type { RecorderSource, EncoderDetectResult, RecordingProgress, RecorderState, RecorderError, RecordingRcMode, RecordingResolution } from '@/types/recorder';
 import { useRecorderState } from '@/context/RecorderContext';
 import { getAccessToken } from '@/utils/token';
 
@@ -142,7 +142,8 @@ export function Recorder({ roomId }: RecorderProps) {
     source: RecorderSource,
     _sourceType: 'screen' | 'window',
     recordOnly: boolean = false,
-    rcMode: RecordingRcMode = 'cqp',
+    rcMode: RecordingRcMode = 'vbr_ceil',
+    resolution: RecordingResolution = '720p',
   ) => {
     if (!bridge) return;
     setShowPicker(false);
@@ -151,7 +152,7 @@ export function Recorder({ roomId }: RecorderProps) {
       tickSecRef.current = 0;
       setProgress({ uploaded: 0, pending: 0 });
       const authToken = getAccessToken() ?? '';
-      await bridge.recorder.start(source.id, source.name, roomId, authToken, recordOnly, rcMode);
+      await bridge.recorder.start(source.id, source.name, roomId, authToken, recordOnly, rcMode, resolution);
       updateState('recording');
     } catch (err) {
       void message.error((err as Error).message || '录制启动失败');

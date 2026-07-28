@@ -249,7 +249,8 @@ async function start(
   roomId: string,
   authToken: string,
   recordOnly: boolean = false,
-  rcMode: 'cqp' | 'cbr' | 'vbr_ceil' = 'cqp',
+  rcMode: 'cqp' | 'cbr' | 'vbr_ceil' = 'vbr_ceil',
+  resolution: '720p' | '1080p' = '720p',
 ): Promise<void> {
   if (isRecording()) {
     throw new Error('[recorder] 录制已在进行中');
@@ -356,6 +357,7 @@ async function start(
           muxTarget: 'file', // 生产态：exe 内 ffmpeg_muxer 直接写本地 HLS .ts
           stats: false,
           rcMode,
+          resolution,
         },
       },
       recordingCallbacks,
@@ -872,9 +874,10 @@ export function registerRecorderHandlers(): void {
     authToken: string,
     recordOnly?: boolean,
     rcMode?: 'cqp' | 'cbr' | 'vbr_ceil',
+    resolution?: '720p' | '1080p',
   ) => {
     try {
-      await start(windowId, displayTitle, roomId, authToken, recordOnly ?? false, rcMode ?? 'cqp');
+      await start(windowId, displayTitle, roomId, authToken, recordOnly ?? false, rcMode ?? 'vbr_ceil', resolution ?? '720p');
     } catch (err) {
       console.error('[recorder] start 异常：', (err as Error).message);
       throw err;

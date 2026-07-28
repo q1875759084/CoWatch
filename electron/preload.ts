@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { RecordingRcMode } from '../src/types/recorder';
+import type { RecordingRcMode, RecordingResolution } from '../src/types/recorder';
 
 /**
  * contextBridge 将受控 API 暴露给 renderer（React 页面）
@@ -41,7 +41,8 @@ contextBridge.exposeInMainWorld('electronBridge', {
       authToken: string,
       recordOnly?: boolean,
       rcMode?: RecordingRcMode,
-    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, recordOnly, rcMode),
+      resolution?: RecordingResolution,
+    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, recordOnly, rcMode, resolution),
     /** 停止录制（等待剩余切片上传完成后通知后端） */
     stop: () => ipcRenderer.invoke('recorder:stop'),
     /** 注册每秒录制计时回调，seconds 为已录秒数 */

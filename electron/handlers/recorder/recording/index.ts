@@ -43,6 +43,8 @@ export interface WindowCaptureConfig {
   stats: boolean;
   /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 1080p、默认 6000kbps 封顶）。其余参数走 exe 默认值。 */
   rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
+  /** 分辨率：720p（1280×720，默认）或 1080p（1920×1080），传给 window_capture.exe 的 --width/--height */
+  resolution?: '720p' | '1080p';
 }
 
 export interface RecordingConfig {
@@ -174,7 +176,7 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
   lastCfg = cfg;
-  const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode } = cfg.windowCapture;
+  const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution } = cfg.windowCapture;
   currentMuxProfile = { ...mux };
   m_paused = false;
   muxReady = false;
@@ -186,7 +188,7 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
 
-  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice, rcMode });
+  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice, rcMode, resolution });
   captureProc = spawn(exePath, exeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
 
   let buf = '';

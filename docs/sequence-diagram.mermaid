@@ -1,88 +1,52 @@
-%% ===== 图1：启动录制（窗口模式 · 方案2a）spawn exe + 等READY + ffmpeg-mux 收压缩流 → HLS（无 transcode） =====
 sequenceDiagram
-    participant U as 用户
-    participant C as Coordinator(recorder/index.ts)
-    participant S as SentinelClient
-    participant R as RecordingController
-    participant EXE as window_capture.exe
-    participant MUX as ffmpeg-mux
-    participant HLS as HLS切片+上传
+    autonumber
+    participant UI as WatchModeSettings (UI)
+    participant Pre as preload (bridge)
+    participant Co as Coordinator (recorder/index.ts)
+    participant WS as WatchSource (watch-source)
+    participant Ch as chokidar (源目录, 单目录)
+    participant ET as ExternalTranscode (单例, 复用)
+    participant UP as Upload (单例, 复用)
+    participant Srv as 后端 /recording/*
 
-    U->>C: recorder:start(windowId,title,...)
-    C->>R: startRecording(cfg)
-    R->>EXE: spawn(--title, 编码+封装参数, stdio[3/4]=pipe)
-    R->>S: startSentinel(title)  %% 仅窗口模式：PAUSE/RESUME/STOP
-    EXE-->>R: stdout JSON {"type":"READY","w":W,"h":H,"fps":F,"codec":"h264_nvenc"}
-    R->>MUX: spawn(-i pipe:3 视频压缩流, -i pipe:4 音频AAC, -c copy, HLS)  %% 晚于 READY, 仅封装
-    Note over EXE,MUX: EXE.fd3→MUX.fd3 (H.264/HEVC NAL), EXE.fd4→MUX.fd4 (AAC ADTS)
-    loop 每 ~33ms
-        EXE->>MUX: 写视频压缩包(NVENC直送,无回读) + 音频 AAC 包
-        MUX->>HLS: 封装→segNNN_opt.ts + index.m3u8  %% window 无 transcode, 直接成品
-    end
-    HLS-->>HLS: 上传层双队列容错(无转码层)
+    Note over UI,Srv: ── 正常新增文件（add 路径）──
+    UI->>Pre: startWatch(roomId, token, folderPath)
+    Pre->>Co: ipc recorder:startWatch
+    Co->>WS: start(folderPath, options)
+    WS->>Ch: watch(folderPath, ignoreInitial, awaitWriteFinish{2000,3000~5000})
+    Ch-->>WS: (启动前旧文件被 ignoreInitial 过滤)
+    Note over UI,Srv: 用户开始录制(未暂停) → 回放文件落盘
+    Ch-->>WS: add(视频, 稳定后)
+    WS->>WS: onAddFile: 扩展名✓ + Set✓ + manifest✗ → 入队 pending
+    WS->>WS: pump(): running=true, inProgress.add
+    WS->>Co: startExternalVideoTranscode(roomId, token, path, onJobDone)
+    Co->>ET: startExternalTranscode(新建 extTmpDir uuid)
+    ET->>UP: initUploader + onSegmentReady→enqueueUpload
+    ET->>Srv: 边转边传 segments
+    Co-->>Pre: recorder:transcodeExternal:progress
+    Pre-->>UI: onExternalTranscodeProgress (pct)
+    ET-->>Co: onComplete → handleExternalTranscodeComplete
+    Co->>UP: waitForUploadQueue + finish
+    Co->>Srv: POST /recording/finish (新 recording #1)
+    Co->>WS: onJobDone(ok=true)
+    WS->>WS: manifest.add(path); inProgress.delete; pump()下一个
 
-%% ===== 图2：pause / resume / stop（窗口模式，捕获源解耦） =====
-sequenceDiagram
-    participant S as window_sentinel.exe
-    participant SC as SentinelClient
-    participant C as Coordinator
-    participant R as RecordingController
-    participant EXE as window_capture.exe
-    participant MUX as ffmpeg-mux
+    Note over UI,Srv: ── 暂停恢复（change 事件 → 重新转码，产生新 recording）──
+    Note over Ch: 用户暂停→文件静态(无 change)；用户恢复→文件变大
+    Ch-->>WS: change(视频, 变大, 稳定后)
+    WS->>WS: onChangeFile: stabilized✓ & !inProgress & size>lastEnqueueSize
+    WS->>WS: 重新入队(pending) + 更新 lastEnqueueSize
+    WS->>WS: pump(): 同 path 再次 startExternalVideoTranscode
+    Co->>ET: startExternalTranscode(**新 extTmpDir uuid**)
+    ET->>Srv: 重新边转边传(分段落在新临时子目录, 不回写源)
+    Co->>Srv: POST /recording/finish (**新 recording #2 / 新 sessionId**)
+    Co->>WS: onJobDone(ok=true)
+    Note over UI: 房间出现 2 个 recording；用户手动删除早期不完整片段(#1)
 
-    Note over S: 最小化 / alt+tab
-    S-->>SC: PAUSE MINIMIZED / FOREGROUND_LOST
-    SC->>C: onPause(reason)
-    C->>R: pauseRecording(reason)
-    R->>MUX: 写 'q' 优雅退出（liveFfmpeg 兜底）
-    R->>EXE: 写 'q' 退出 exe（音频随 exe 一起停）
-    Note right of R: 保留会话；记录 recordedSecondsAtPause
-
-    Note over S: 恢复前台 / 最小化结束
-    S-->>SC: RESUME
-    SC->>C: onResume()
-    C->>R: resumeRecording()
-    R->>EXE: 重新 spawn(exe)  %% 音频内嵌，=重启音频
-    R->>MUX: 重新 spawn(-start_number 续号, 锚点=recordedSecondsAtPause)  %% 收压缩流封装
-
-    Note over S: 移动(去抖)/关闭
-    S-->>SC: STOP MOVED / CLOSED
-    SC->>C: onStop(reason)
-    C->>R: stopRecording()  %% END：干净收尾，结束 m3u8
-    R->>MUX: 'q' 退出
-    R->>EXE: 'q' 退出
-    R->>C: 触发 finish + 清理
-
-%% ===== 图3：独立诊断模式（standalone · 仅 exe，隔离测 CPU/GPU，无外部 mux 依赖） =====
-sequenceDiagram
-    participant U as 用户(命令行)
-    participant EXE as window_capture.exe
-    participant MUX as ffmpeg-mux(仅 --file 由 exe 私有 spawn)
-    participant DEV as NVENC/GPU/D3D11
-
-    Note over U,EXE: --null 模式：捕获+编码后丢弃压缩包，仅测 exe 自身 CPU/GPU（无 pipe / 无 mux）
-    U->>EXE: window_capture.exe --title "记事本" --fps 30 --null --stats
-    EXE->>DEV: WGC 捕获 → ID3D11Texture2D → NVENC(DX11直送,不回读)
-    EXE-->>U: stdout JSON {"type":"READY","w":W,"h":H,"fps":F,"codec":"h264_nvenc"}
-    loop 每 ~33ms
-        EXE->>DEV: encodeFrame(tex) → 压缩包
-        Note over EXE: 压缩包丢弃(或计数字节), 不写 fd3/4, 不 spawn mux
-    end
-    loop 每 1~2s
-        EXE-->>U: stderr JSON 遥测(capture_fps/encode_fps/gpu_pct/cpu_pct/drop_cnt/out_bps)
-    end
-    U->>EXE: q (或 Ctrl+C)
-    EXE-->>U: stdout {"type":"CLOSED","reason":"user_quit"}
-
-    Note over U,MUX: --file 模式：exe 私有 spawn ffmpeg-mux 写 HLS（复用同一 pipe 契约，与 Electron 侧同构）
-    U->>EXE: window_capture.exe --pid 1234 --out D:\tmp\cap --seg 10 --file
-    EXE->>EXE: 枚举 PID 顶层窗口 → 选可见窗口(可 --window-index)
-    EXE->>MUX: spawn(私有 ffmpeg-mux, 继承本地压缩流 pipe, -c copy HLS → --out)
-    EXE-->>U: stdout {"type":"READY",...}
-    loop 每 ~33ms
-        EXE->>MUX: 写视频压缩包 + 音频 AAC 包
-        MUX->>MUX: 封装 → segNNN.ts + index.m3u8 (写 --out)
-    end
-    U->>EXE: q
-    EXE->>MUX: 写 'q' 退出 mux
-    EXE-->>U: {"type":"CLOSED",...}
+    Note over UI,Srv: ── 停止监听（决策#6：停止捡新 + 已排队跑完）──
+    UI->>Pre: stopWatch()
+    Pre->>Co: ipc recorder:stopWatch
+    Co->>WS: stop() → watcher.close() (不再收 add/change)
+    Note over WS: pump() 不中止：pending/inProgress 继续跑完
+    WS->>Co: 剩余任务继续 startExternalVideoTranscode → finish
+    Note over UI,Srv: 源文件留盘，下次启动可重捡(manifest 去重)

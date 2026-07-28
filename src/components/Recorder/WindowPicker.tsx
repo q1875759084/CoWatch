@@ -2,13 +2,13 @@ import { useState } from "react";
 
 import { Modal, Button, Radio } from "antd";
 
-import type { RecorderSource, RecordingRcMode } from "@/types/recorder";
+import type { RecorderSource, RecordingRcMode, RecordingResolution } from "@/types/recorder";
 
 import styles from "./index.module.scss";
 
 interface WindowPickerProps {
   sources: RecorderSource[];
-  onConfirm: (source: RecorderSource, sourceType: "screen" | "window", recordOnly: boolean, rcMode: RecordingRcMode) => void;
+  onConfirm: (source: RecorderSource, sourceType: "screen" | "window", recordOnly: boolean, rcMode: RecordingRcMode, resolution: RecordingResolution) => void;
   onCancel: () => void;
   onRefresh?: () => void | Promise<void>;
   isPreview?: boolean;
@@ -28,13 +28,14 @@ export function WindowPicker({
   isPreview = false,
 }: WindowPickerProps) {
   const [selectedId, setSelectedId] = useState<string>("");
-  const [rcMode, setRcMode] = useState<RecordingRcMode>('cqp');
+  const [rcMode, setRcMode] = useState<RecordingRcMode>('vbr_ceil');
+  const [resolution, setResolution] = useState<RecordingResolution>('720p');
 
   const selectedSource = sources.find((s) => s.id === selectedId) ?? null;
 
   const handleConfirmWithRecord = (recordOnly: boolean) => {
     if (!selectedSource) return;
-    onConfirm(selectedSource, selectedSource.sourceType, recordOnly, rcMode);
+    onConfirm(selectedSource, selectedSource.sourceType, recordOnly, rcMode, resolution);
   };
 
   /** 判断缩略图是否为纯黑（整屏录制独占游戏时的预期情况） */
@@ -88,9 +89,21 @@ export function WindowPicker({
             optionType="button"
             buttonStyle="solid"
           >
-            <Radio value="cqp">CQP（质量优先）</Radio>
-            <Radio value="cbr">CBR（恒定码率）</Radio>
             <Radio value="vbr_ceil">VBR（弹性码率）</Radio>
+            <Radio value="cqp" disabled>CQP（质量优先）</Radio>
+            <Radio value="cbr" disabled>CBR（恒定码率）</Radio>
+          </Radio.Group>
+        </div>
+        <div className={styles.modeToggle}>
+          <span className={styles.modeLabel}>分辨率</span>
+          <Radio.Group
+            value={resolution}
+            onChange={(e) => setResolution(e.target.value as RecordingResolution)}
+            optionType="button"
+            buttonStyle="solid"
+          >
+            <Radio value="720p">1280 × 720</Radio>
+            <Radio value="1080p">1920 × 1080</Radio>
           </Radio.Group>
         </div>
       {sources.length === 0 ? (
@@ -137,7 +150,7 @@ export function WindowPicker({
 
           {windows.length > 0 ? (
             <div className={styles.sourceGroup}>
-              <h4 className={styles.groupTitle}>应用窗口（高速画面可能卡顿，游戏建议选整屏）</h4>
+              <h4 className={styles.groupTitle}>应用窗口</h4>
               <div className={styles.grid}>
                 {windows.map((s) => (
                   <SourceItem

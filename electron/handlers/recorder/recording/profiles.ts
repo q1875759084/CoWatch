@@ -52,8 +52,10 @@ export interface WindowSpawnOptions {
   stats: boolean;
   audio: boolean;
   audioDevice?: string;
-  /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（CoWatch 侧显式注入 1920×1080 对齐直播姬，均值 6000kbps，复杂场景弹性超发至峰值默认 9000kbps）。其余参数走 exe 默认值。 */
+  /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR。VBR 的均值/峰值按分辨率注入（见 buildExeArgs 内 vbrByRes），其余 VBR 参数（lookahead 深度、VBV 秒数）走 exe 默认。 */
   rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
+  /** 分辨率：720p（1280×720，默认）或 1080p（1920×1080），传给 window_capture.exe 的 --width/--height，并决定 VBR 均值/峰值 */
+  resolution?: '720p' | '1080p';
 }
 
 /**
@@ -82,13 +84,31 @@ export function buildExeArgs(
   args.push('--mux-target', opts.muxTarget);
   args.push('--out', mux.outDir);
 
-  // 码率控制模式：cqp=质量优先（exe 默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR；CoWatch 侧显式下传 1920×1080 覆盖 exe 默认，其余参数走 exe 默认。
-  args.push('--rc-mode', opts.rcMode ?? 'cqp');
+  // 码率控制模式：cqp=质量优先（exe 默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR；分辨率由用户选择传入，覆盖 exe 默认 1440×810。
+  const rcMode = opts.rcMode ?? 'vbr_ceil';
+  args.push('--rc-mode', rcMode);
 
-  // VBR_CEIL 模式：对齐直播姬推流实际分辨率，显式覆盖 exe 默认 1440×810 为 1920×1080
-  if (opts.rcMode === 'vbr_ceil') {
+  // 分辨率：用户选择的分辨率（720p 或 1080p），传给 exe 的 --width/--height；覆盖 exe 默认 1440×810
+  const res = opts.resolution ?? '720p';
+  if (res === '720p') {
+    args.push('--width', '1280');
+    args.push('--height', '720');
+  } else {
     args.push('--width', '1920');
     args.push('--height', '1080');
+  }
+
+  // VBR_CEIL 弹性封顶：均值/峰值随分辨率（像素量）收缩。
+  // lookahead 深度与 VBV 秒数为分辨率无关的时域/弹性旋钮，走 exe 默认（16/6）；
+  // 绝对缓冲池 = max × vbv-seconds 随峰值自动收缩，无需单独调 vbv-seconds。
+  if (rcMode === 'vbr_ceil') {
+    const vbrByRes: Record<'720p' | '1080p', { bitrate: number; maxBitrate: number }> = {
+      '720p': { bitrate: 3000, maxBitrate: 4500 }, // 均值 3Mbps（≈1080p 的 0.5×，留质量余量），峰值 1.5× 均值
+      '1080p': { bitrate: 6000, maxBitrate: 9000 }, // 对齐直播姬推流
+    };
+    const vbr = vbrByRes[res];
+    args.push('--vbr-bitrate', String(vbr.bitrate));
+    args.push('--vbr-max-bitrate', String(vbr.maxBitrate));
   }
 
   // 诊断（可选）：capture/encode/gpu 占用，供后续按 GPU 调参
