@@ -43,13 +43,18 @@ export default function ElectronVideoUploader({ lastVideoAddedId }: ElectronVide
   const currentRef = useRef<QueueItem | null>(null);
   /** 防重入：processNext 执行中标记 */
   const processingRef = useRef(false);
+  /** 监听模式（文件夹自动转码上传）UI 状态 */
+  const [watchActive, setWatchActive] = useState(false);
+  const [watchFolder, setWatchFolder] = useState('');
 
   // ── 单一自驱效应：队列中有待处理项且无处理中项时，自动启动下一个 ──────────
   useEffect(() => {
     if (processingRef.current) return;
+    // 任一任务正在处理时等待其完成，避免并发撞 NVENC（监听与手动共用同一串行约束）
     const hasProcessing = queue.some((item) => item.status === 'processing');
     if (hasProcessing) return;
 
+    // 监听模式检测到的文件也按"手动上传"同构入队，统一由本自驱效应启动转码
     const nextIdx = queue.findIndex((item) => item.status === 'queued');
     if (nextIdx === -1) return;
 
@@ -122,6 +127,57 @@ export default function ElectronVideoUploader({ lastVideoAddedId }: ElectronVide
     // 自驱效应会在队列变化后自动启动第一个
   }, []);
 
+    // ── 监听模式（文件夹自动转码上传）：文件检测入队 + UI 开关 ─────────────────
+    // 主进程检测到新视频后广播路径，这里按"用户手动点选"完全相同的路径入队，
+    // 由上方 self-driver 统一调 transcodeExternal 启动 —— 下游 100% 复用模式 B。
+    const handleWatchFileDetected = useCallback((filePath: string) => {
+      setQueue((prev) => {
+        if (prev.some((q) => q.filePath === filePath)) return prev;
+        return [...prev, {
+          id: nextQueueId(),
+          filePath,
+          name: filePath.split(/[/\\]/).pop() ?? filePath,
+          status: 'queued' as const,
+        }];
+      });
+    }, []);
+
+    useEffect(() => {
+      const bridge = window.electronBridge!;
+      bridge.recorder.onWatchFileDetected((filePath) => handleWatchFileDetected(filePath));
+      // 启动时恢复监听状态（主进程持久化目录，UI 仅恢复标记）
+      bridge.recorder.getWatchStatus().then((st) => {
+        setWatchActive(st.active);
+        setWatchFolder(st.folderPath);
+      }).catch(() => { /* 非 Electron 环境忽略 */ });
+      return () => { bridge.recorder.offWatchFileDetected(); };
+    }, [handleWatchFileDetected]);
+
+  const handleSelectWatchFolder = useCallback(async () => {
+    const bridge = window.electronBridge!;
+    const res = await bridge.recorder.selectWatchFolder();
+    if (!res.cancelled && res.folderPath) setWatchFolder(res.folderPath);
+  }, []);
+
+    const handleToggleWatch = useCallback(async (checked: boolean) => {
+      const bridge = window.electronBridge!;
+      if (checked) {
+        let folder = watchFolder;
+        if (!folder) {
+          const res = await bridge.recorder.selectWatchFolder();
+          if (res.cancelled || !res.folderPath) return;
+          folder = res.folderPath;
+          setWatchFolder(folder);
+        }
+        const res = await bridge.recorder.startWatch(folder);
+        if (res.error) { console.error('[uploader] 启动监听失败：', res.error); return; }
+        setWatchActive(true);
+      } else {
+        await bridge.recorder.stopWatch();
+        setWatchActive(false);
+      }
+    }, [watchFolder]);
+
   // ── VIDEO_ADDED 广播：当前文件处理完毕 ────────────────────────────────────
 
   useEffect(() => {
@@ -184,6 +240,22 @@ export default function ElectronVideoUploader({ lastVideoAddedId }: ElectronVide
 
   return (
     <div className={styles.wrapper}>
+      {/* 监听模式开关 + 目录选择 + 状态（≤30 行 JSX，复用既有上传列表，不新建面板） */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 13 }}>
+        <span>监听文件夹自动上传</span>
+        <input
+          type="checkbox"
+          checked={watchActive}
+          onChange={(e) => void handleToggleWatch(e.target.checked)}
+        />
+        <button type="button" onClick={() => void handleSelectWatchFolder()} disabled={watchActive} style={{ fontSize: 12 }}>
+          选择目录
+        </button>
+        <span style={{ color: watchActive ? '#52c41a' : '#999' }}>
+          {watchActive ? `🔴 监听中 · ${watchFolder}` : '⚪ 已停止'}
+        </span>
+      </div>
+
       <label className={styles.idleBox} onClick={handleAddFiles}>
         <span className={styles.idleText}>
           点击选择视频文件

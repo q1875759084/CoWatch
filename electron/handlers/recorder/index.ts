@@ -87,6 +87,9 @@ import {
 } from './external-transcode';
 import type { ExternalTranscodeProgress } from '../../../src/types/recorder';
 
+// ─── 监听模式（文件夹自动转码上传）：IPC 注册从此文件拆出，避免继续膨胀 ──────────
+import { registerWatchHandlers } from './watch-mode/ipc';
+
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
 /** 最长录制时长（毫秒），到时自动停止 */
@@ -710,7 +713,7 @@ async function selectVideoFiles(): Promise<{ cancelled: boolean; filePaths: stri
   return { cancelled: result.canceled, filePaths: result.filePaths };
 }
 
-async function startExternalVideoTranscode(
+export async function startExternalVideoTranscode(
   roomId: string,
   authToken: string,
   inputPath: string,
@@ -718,6 +721,7 @@ async function startExternalVideoTranscode(
   if (isRecording() || isExternalTranscoding) {
     return { error: '录制或转码已在进行中' };
   }
+  // [phase2] modeGuard() 校验：四种录制/转码模式互斥入口（本期不实现，仅留口子）
   isExternalTranscoding = true;
 
   // ② 创建临时目录
@@ -823,12 +827,14 @@ async function handleExternalTranscodeComplete(
   fs.rm(extTmpDir, { recursive: true, force: true }, (err) => {
     if (err) console.warn('[recorder] 外部转码临时目录清理失败：', err.message);
   });
+
+  // [watch-mode] 任务完成：下游由渲染端既有进度/完成链路处理，无需额外钩子
 }
 
 async function handleExternalTranscodeError(
   _extSessionId: string,
   extTmpDir: string,
-  _errorMsg: string,
+  errorMsg: string,
 ): Promise<void> {
   cleanupUploader();
   isExternalTranscoding = false;
@@ -843,6 +849,8 @@ async function handleExternalTranscodeError(
       estimated: -1,
     });
   }
+
+  // [watch-mode] 任务失败：下游由渲染端既有进度/失败链路处理
 }
 
 // ─── IPC 注册 ─────────────────────────────────────────────────────────────────
@@ -932,4 +940,7 @@ export function registerRecorderHandlers(): void {
       console.error('[recorder] transcodeExternal:cancel 异常：', (err as Error).message);
     }
   });
+
+  // ─── 监听模式（文件夹自动转码上传）IPC（从本文件拆出，避免继续膨胀）──
+  registerWatchHandlers();
 }

@@ -1,0 +1,63 @@
+sequenceDiagram
+    autonumber
+    participant UI as WatchModeSettings (React)
+    participant BR as preload (RecorderBridge)
+    participant CO as recorder/index.ts (协调层)
+    participant WS as WatchSourceManager (新增)
+    participant CH as chokidar (源目录 watcher)
+    participant EXT as ExternalTranscodeController (既有)
+    participant ENG as ExternalTranscodeEngine (既有单例)
+    participant UP as UploadManager (既有单例)
+    participant API as 后端 /recording/*
+
+    Note over UI,API: ① 启动监听
+    UI->>BR: startWatchMode(roomId, authToken, folderPaths, options)
+    BR->>CO: ipc 'recorder:startWatchMode'
+    CO->>WS: start(folderPaths, options, roomId, authToken)
+    WS->>CH: chokidar.watch(folderPaths, {ignoreInitial:true, awaitWriteFinish:2000ms})
+    WS-->>BR: 返回 {error?}
+    CO-->>BR: 返回结果
+    BR-->>UI: 监听已启动
+
+    Note over UI,API: ② 外部软件写入新回放 (启动后才出现 → 触发)
+    CH->>WS: add(file.mp4)  (awaitWriteFinish 稳定后)
+    WS->>WS: 扩展名过滤 + 内存Set + manifest.has? 否 → 入队
+    WS->>BR: send 'recorder:watchMode:event' {type:'fileQueued'}
+    BR->>UI: onWatchModeEvent → 队列行 queued
+    WS->>WS: pump() 取队首, running=true
+
+    Note over UI,API: ③ 复用模式B链路 (逐文件串行)
+    WS->>EXT: startExternalVideoTranscode(roomId, authToken, file.mp4, onJobDone)
+    EXT->>EXT: 建 temp/cowatch-ext/<uuid> 输出目录 (每任务唯一)
+    EXT->>UP: initUploader({disableThrottle:true})
+    EXT->>ENG: startExternalTranscode({inputPath, outputDir, ...})
+    ENG->>ENG: spawn FFmpeg → 写 HLS 分段到输出目录
+    WS->>BR: send 'recorder:watchMode:event' {type:'fileStarted'}
+    BR->>UI: 队列行 → processing
+    loop 每产出一片 _opt.ts
+        ENG->>UP: onSegmentReady → enqueueUpload
+        UP->>API: POST /recording/segment (video/MP2T)
+        API-->>UP: 200 → segmentKeys.push + 删本地
+        EXT->>BR: send 'recorder:transcodeExternal:progress' {phase,uploaded,estimated}
+        BR->>UI: onProgress → 进度条/百分比
+    end
+    ENG-->>EXT: close(0) → onComplete
+    EXT->>UP: waitForUploadQueue()
+    EXT->>API: POST /recording/finish (segmentKeys)
+    API-->>EXT: VIDEO_ADDED 广播 (房间视频列表更新)
+    EXT->>EXT: cleanupUploader + fs.rm(输出目录)
+    EXT->>WS: onJobDone(true)
+
+    Note over UI,API: ④ 完成去重 + 自动下一个
+    WS->>WS: manifest.add(file.mp4)  (成功才记 → 重启不重处理)
+    WS->>BR: send 'recorder:watchMode:event' {type:'fileCompleted'}
+    BR->>UI: 队列行 → completed
+    WS->>WS: running=false; pump() → 处理下一文件 (若有)
+
+    Note over UI,API: ⑤ 停止监听
+    UI->>BR: stopWatchMode()
+    BR->>CO: ipc 'recorder:stopWatchMode'
+    CO->>WS: stop()
+    WS->>CH: watcher.close()  (在途任务跑完, 未启动排队任务丢弃, 源文件留盘)
+    WS-->>BR: 返回
+    BR-->>UI: 监听已停止

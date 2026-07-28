@@ -1,0 +1,89 @@
+classDiagram
+    %% ── 新增模块（监听模式） ──
+    class WatchSourceManager {
+        +FSWatcher watcher
+        +WatchJob[] pendingQueue
+        +Set~string~ memorySet
+        +ProcessedManifest manifest
+        +WatchModeOptions options
+        +string roomId
+        +string authToken
+        +boolean running
+        +start(folderPaths: string[]) void
+        +stop() Promise~void~
+        -onAddFile(filePath: string) void
+        -pump() Promise~void~
+        -emitEvent(e: WatchEvent) void
+    }
+
+    class ProcessedManifest {
+        +string filePath
+        +load() void
+        +has(path: string, mtimeMs: number, size: number) boolean
+        +add(path: string, mtimeMs: number, size: number) void
+        +save() void
+    }
+
+    class WatchModeUI {
+        +boolean watching
+        +WatchJob[] queue
+        +startWatching() void
+        +stopWatching() void
+        +onWatchEvent(e: WatchEvent) void
+        +onProgress(info: ExternalTranscodeProgress) void
+    }
+
+    class SharedQueueRow
+
+    %% ── 既有模块（直接复用，不改） ──
+    class ExternalTranscodeController {
+        <<existing coordinator>>
+        +startExternalVideoTranscode(roomId, authToken, inputPath, onJobDone?) Promise~void~
+        +handleExternalTranscodeComplete(...)
+        +handleExternalTranscodeError(...)
+    }
+
+    class ExternalTranscodeEngine {
+        <<existing singleton>>
+        +startExternalTranscode(cfg, cbs) void
+        +stopExternalTranscode() Promise~void~
+        +getExternalTranscodeState() ~active,outputDir~
+    }
+
+    class UploadManager {
+        <<existing singleton>>
+        +initUploader(cfg, cbs) void
+        +enqueueUpload(filePath) void
+        +waitForUploadQueue() Promise~void~
+        +getSegmentKeys() string[]
+        +cleanupUploader() void
+    }
+
+    class RecorderBridge {
+        <<existing preload>>
+        +selectWatchFolder() Promise~SelectFolderResult~
+        +startWatchMode(roomId, authToken, folderPaths, options?) Promise~Result~
+        +stopWatchMode() Promise~Result~
+        +getWatchStatus() Promise~WatchStatus~
+        +onWatchModeEvent(cb) void
+        +offWatchModeEvent() void
+        +transcodeExternal(roomId, authToken, filePath) Promise~Result~
+        +onExternalTranscodeProgress(cb) void
+    }
+
+    class ElectronVideoUploader {
+        <<existing, disabled when watching>>
+        +QueueItem[] queue
+        +transcodeExternal(filePath) void
+    }
+
+    %% ── 关系 ──
+    WatchSourceManager ..> ProcessedManifest : 去重查询/写入
+    WatchSourceManager ..> ExternalTranscodeController : 串行调用 startExternalVideoTranscode(onJobDone)
+    ExternalTranscodeController ..> ExternalTranscodeEngine : startExternalTranscode
+    ExternalTranscodeController ..> UploadManager : initUploader / enqueueUpload / finish
+    WatchSourceManager ..> RecorderBridge : IPC startWatchMode / watchMode:event
+    WatchModeUI ..> RecorderBridge : 调用 + 监听事件/进度
+    WatchModeUI *-- SharedQueueRow : 渲染队列行
+    ElectronVideoUploader *-- SharedQueueRow : 渲染队列行
+    WatchModeUI ..> ExternalTranscodeProgress : 复用进度类型

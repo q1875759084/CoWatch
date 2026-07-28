@@ -58,6 +58,26 @@ export interface ExternalTranscodeProgress {
   estimated: number;
 }
 
+/** 监听模式（文件夹自动转码上传）选项 */
+export interface WatchModeOptions {
+  /** 扩展名白名单，默认 [mp4,mov,mkv,avi,wmv,flv,ts,m2ts,webm] */
+  extensions?: string[];
+}
+
+/** 监听模式状态快照（getWatchStatus 返回，供 UI 恢复开关标签） */
+export interface WatchStatus {
+  /** 是否正在监听 */
+  active: boolean;
+  /** 当前监听的目录（单目录） */
+  folderPath: string;
+}
+
+/** 文件夹选择对话框结果 */
+export interface WatchFolderResult {
+  cancelled: boolean;
+  folderPath?: string;
+}
+
 /** window_capture 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 1080p、默认 6000kbps 封顶） */
 export type RecordingRcMode = 'cqp' | 'cbr' | 'vbr_ceil';
 

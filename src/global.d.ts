@@ -99,6 +99,23 @@ interface ElectronBridge {
       onExternalTranscodeProgress: (cb: (info: import('./types/recorder').ExternalTranscodeProgress) => void) => void;
       /** 移除外部视频转码进度回调 */
       offExternalTranscodeProgress: () => void;
+
+      // ─── 监听模式（文件夹自动转码上传）─────────────────────────────
+      /** 打开单目录选择对话框，返回选定目录路径 */
+      selectWatchFolder: () => Promise<import('./types/recorder').WatchFolderResult>;
+      /** 启动监听模式：监听 folderPath 下新增视频，检测到即广播路径给渲染端 */
+      startWatch: (
+        folderPath: string,
+        options?: import('./types/recorder').WatchModeOptions,
+      ) => Promise<{ error?: string }>;
+      /** 停止监听模式 */
+      stopWatch: () => Promise<{ error?: string }>;
+      /** 查询监听状态 */
+      getWatchStatus: () => Promise<import('./types/recorder').WatchStatus>;
+      /** 注册监听文件检测回调（path → 渲染端按手动上传同构入队） */
+      onWatchFileDetected: (cb: (filePath: string) => void) => void;
+      /** 注销监听文件检测回调 */
+      offWatchModeEvent: () => void;
   };
 
   /** 推送最新 JWT token 给主进程，token 无感刷新后调用，防止录制上传用过期 token */

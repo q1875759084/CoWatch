@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { RecordingRcMode, RecordingResolution } from '../src/types/recorder';
+import type {
+  RecordingRcMode,
+  RecordingResolution,
+  WatchModeOptions,
+  WatchFolderResult,
+} from '../src/types/recorder';
 
 /**
  * contextBridge 将受控 API 暴露给 renderer（React 页面）
@@ -100,6 +105,26 @@ contextBridge.exposeInMainWorld('electronBridge', {
     /** 移除外部视频转码进度回调 */
     offExternalTranscodeProgress: () => {
       ipcRenderer.removeAllListeners('recorder:transcodeExternal:progress');
+    },
+
+    // ─── 监听模式（文件夹自动转码上传）─────────────────────────────
+    /** 打开单目录选择对话框，返回选定目录路径 */
+    selectWatchFolder: () =>
+      ipcRenderer.invoke('recorder:watchMode:selectFolder') as Promise<WatchFolderResult>,
+    /** 启动监听模式：监听 folderPath 下新增视频，检测到即广播路径给渲染端（渲染端按手动上传同构处理） */
+    startWatch: (folderPath: string, options?: WatchModeOptions) =>
+      ipcRenderer.invoke('recorder:watchMode:start', folderPath, options),
+    /** 停止监听模式 */
+    stopWatch: () => ipcRenderer.invoke('recorder:watchMode:stop'),
+    /** 查询监听状态 */
+    getWatchStatus: () => ipcRenderer.invoke('recorder:watchMode:getStatus'),
+    /** 注册监听文件检测回调（path → 渲染端按手动上传同构入队） */
+    onWatchFileDetected: (cb: (filePath: string) => void) => {
+      ipcRenderer.on('recorder:watchMode:fileDetected', (_event, filePath: string) => cb(filePath));
+    },
+    /** 注销监听文件检测回调 */
+    offWatchFileDetected: () => {
+      ipcRenderer.removeAllListeners('recorder:watchMode:fileDetected');
     },
   },
 
