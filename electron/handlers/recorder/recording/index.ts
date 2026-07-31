@@ -16,7 +16,7 @@ import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { app } from 'electron';
 
-import { startWindowWatcher, isWindowAlive } from '../window-watch';
+import { isWindowAlive } from '../window-watch';
 import {
   getFfmpegPath,
   HLS_SEGMENT_DURATION,
@@ -78,7 +78,6 @@ let detectedEncoder = 'libx264';
 let isSoftwareEncoder = false;
 let isUserStopped = false;
 let crashRestartCount = 0;
-let windowWatcher: { stop: () => void } | null = null;
 let currentSourceId = '';
 let currentWindowTitle = '';
 let callbacks: RecordingCallbacks = {};
@@ -128,17 +127,6 @@ export async function startRecording(
     // screen 模式（feat 基线，原样保留）
     ffmpegProcess = spawnFfmpeg();
     attachFfmpegHandlers();
-  }
-
-  if (currentSourceId.startsWith('window:')) {
-    // 窗口模式由 sentinel 接管窗口检测，禁用 5s 轮询-stop 避免双重检测冲突。
-    windowWatcher = startWindowWatcher(
-      currentSourceId,
-      currentWindowTitle,
-      () => { cbs.onShouldStop?.(); },
-      () => isUserStopped,
-      { enablePollingStop: false },
-    );
   }
 
   cbs.onLog?.(`[recording] 录制启动成功，tmpDir=${tmpDir}`);
@@ -261,7 +249,6 @@ export async function stopRecording(): Promise<void> {
 
   if (currentSourceId.startsWith('window:')) {
     await gracefulQuitWindow();
-    if (windowWatcher) { windowWatcher.stop(); windowWatcher = null; }
     return;
   }
 
