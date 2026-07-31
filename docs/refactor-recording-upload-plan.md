@@ -183,7 +183,9 @@ let muxReady = false;                           // 永远为 false
 
 **现状**：`DiagnosticLogger` 类全仓零引用，但它是专为卡顿诊断写的（inferredCaptureFps/dup/drop），排查时最该接却没接
 
-**修复方向**：接入录制管道（解析 ffmpeg stderr 的 frame=/dup=/drop= 行），或如果 window 模式不需要则删除
+**定性**：**非纯冗余，是生产级错误上报基础**。当前根本无法追踪用户录屏失败的错误信息——DiagnosticLogger 是唯一能落盘 ffmpeg/exe 诊断数据的机制，应激活而非删除
+
+**修复方向**：接入录制管道（解析 ffmpeg stderr 的 frame=/dup=/drop= 行 + 错误行），落盘诊断日志供失败排查；window 模式解析 exe stdout JSON 协议（STATS/ERROR）一并记录
 
 ---
 
@@ -220,13 +222,66 @@ if (currentSourceId.startsWith('window:')) {  // crash 路径
 
 ---
 
-#### P1-6：`external-transcode` 与 `transcoding` 编码参数重复
+#### P1-6：FFmpeg 编码参数构建重复 3 处
 
-**位置**：`external-transcode/index.ts:188-231` vs `transcoding/index.ts:153-209`
+**位置**：`external-transcode/index.ts:188-231`（buildFfmpegArgs）/ `transcoding/index.ts:153-209`（transcodeFile）/ `recording/index.ts:480-491`（spawnFfmpeg screen 模式）
 
-**现状**：两处独立构建 NVENC/libx264 参数，容易不同步
+**现状**：三处独立构建 h264_nvenc/h264_qsv/libx264 编码器选择与参数，容易不同步
 
-**修复方向**：抽取共享的编码参数构建函数；但如果废弃转码层则此问题减半
+**修复方向**：抽取共享的编码参数构建函数。
+
+**注**：recording 层的 `spawnFfmpeg`（screen 模式）在 window_capture.exe 支持全屏后整层废弃（见 P2-3，exe 录制+编码+封装一步到位），届时此处重复自然消失，**当前不单独修改 ffmpeg 相关内容**（性价比低）；待 exe 全屏落地后，剩余重复为 external-transcode + transcoding 两处，再抽共享函数
+
+---
+
+#### P1-7：`store.ts` 整文件注释死代码
+
+**位置**：`electron/handlers/store.ts`（16 行，全部注释）
+
+**现状**：`storeHandlers` 整个对象被注释（L11-15），仅剩 import 和说明注释；preload.ts 未导入。阶段1本地存储方案废弃后的残留
+
+**修复方向**：**保留为未来扩展**（非纯冗余）。本地存储 IPC 框架（绕开 cookie sameSite 限制持久化 token），阶段1方案废弃但框架可复用；暂不删除，后续启用时取消注释并接入 preload + main.ts IPC handler
+
+---
+
+#### P1-8：`EncodeProfile` 死代码链
+
+**位置**：`recording/profiles.ts:32-39,67,130-135` + `recording/index.ts:30,38`
+
+**现状**：
+- `EncodeProfile` 接口定义了 bitrate/bf/rcLookahead/preset/gop
+- `makeDefaultProfiles()` 产出 encode profile
+- `buildExeArgs(enc)` 收 enc 参数但**函数体内完全不引用**（L71 注释「enc 字段预留…当前录制质量一律走 exe 默认值，不下传」）
+- `EncodeProfile.bitrate=8_000_000` 与实际 VBR 码率（4000/6000）完全不符
+
+**问题**：整条 encode 链（定义→产出→传递→接收但不读）是死代码，且 bitrate 值误导
+
+**修复方向**：删除 `EncodeProfile` 类型 + `makeDefaultProfiles` 的 encode 返回 + `buildExeArgs` 的 enc 参数 + recording/index.ts 的 encode 字段
+
+---
+
+#### P1-9：`CropRect` / RECT 解析链死代码
+
+**位置**：`recording/types.ts:14-19`（CropRect）+ `sentinel-client.ts:33,38,185`（解析 RECT）+ `index.ts:308`（onRect 空函数）
+
+**现状**：
+- sentinel-client 解析 RECT 协议 → 调用 `callbacks.onRect?.({x,y,w,h})`
+- 但 window 模式传的 onRect 是空函数 `(_rect) => { /* window 模式不使用 crop */ }`
+- CropRect 类型仅作为 onRect 参数类型存在，无实际数据消费
+
+**问题**：RECT 解析→回调→空函数，整条链是死代码（解析了但上层不用 crop）
+
+**修复方向**：删除 CropRect 类型 + sentinel-client 的 RECT 解析与 onRect 回调 + index.ts 的 onRect 空函数。screen 模式也不用 crop（全屏捕获无需裁剪）
+
+---
+
+#### P1-10：`/recording/finish` 接口调用重复 3 处
+
+**位置**：`index.ts:535`（stop）/ `index.ts:770`（另一 finish 路径）/ `persistence/index.ts:227`（resumeUpload）
+
+**现状**：三处独立拼接 `${apiOrigin}/api/rooms/${roomId}/recording/finish` 并 fetch，鉴权头/错误处理各不相同
+
+**修复方向**：抽取共享的 `callFinishApi(roomId, apiOrigin, token)` 函数
 
 ---
 
@@ -273,6 +328,51 @@ if (currentSourceId.startsWith('window:')) {  // crash 路径
 - screen 模式：`seg%03d.ts` / `seg%03d_opt.ts`（定宽3位、从0起）
 
 **修复方向**：统一为 `seq%05d.ts`（从1起），后端按文件名字典序重组时天然有序
+
+---
+
+#### P2-5：`shared.ts` 职责混乱
+
+**位置**：`recorder/shared.ts`（78 行）
+
+**现状**：一个文件混了三个不相关职责：
+- FFmpeg 路径解析（`getFfmpegPath()`）
+- SessionAnchor（pause/resume 续录锚点机制）
+- 共享常量（HLS_SEGMENT_DURATION 等）
+
+**修复方向**：拆分为 `ffmpeg-path.ts` + `session-anchor.ts` + 常量留在 shared.ts
+
+---
+
+#### P2-6：`detectEncoder` 与 window 模式脱节
+
+**位置**：`index.ts:188-220`（detectEncoder）+ `index.ts:326`（makeDefaultProfiles）
+
+**现状**：`detectEncoder()` 用 ffmpeg 探测 h264_nvenc/qsv/amf，但 window 模式实际用 exe 内部的 `obs_nvenc_h264_tex`（与 ffmpeg 探测结果无关）。检测结果传给 `makeDefaultProfiles` 产出 encode profile，但 encode 不下传（见 P1-8）→ 造成「检测有用」的假象
+
+**问题**：检测结果仅对 screen 模式（spawnFfmpeg）有意义；window 模式的检测是空转
+
+**修复方向**：screen 模式废弃后，detectEncoder 一并删除；过渡期可仅在 screen 分支调用
+
+---
+
+#### P2-7：`profiles.ts` 码率硬编码
+
+**位置**：`recording/profiles.ts:104-112`（buildExeArgs 内 vbrByRes）
+
+**现状**：`vbrByRes` 在函数内部定义，720p/900p 码率（4000/6000、6000/9000）硬编码，无法外部覆盖；新增分辨率档需改代码
+
+**修复方向**：码率配置外置为模块级常量或参数，buildExeArgs 从参数读取
+
+---
+
+#### P2-8：IPC 注册隐式依赖
+
+**位置**：`index.ts:924`（registerRecorderHandlers 末尾调用 registerWatchHandlers）
+
+**现状**：`registerWatchHandlers()` 在 `registerRecorderHandlers()` 末尾被隐式调用，watch-mode 的 IPC 注册依赖 recorder 的注册触发
+
+**修复方向**：在 main.ts 中显式调用 `registerWatchHandlers()`，解除隐式依赖
 
 ---
 

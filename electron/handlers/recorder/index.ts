@@ -141,7 +141,7 @@ let isRecordOnly = false;
 // ─── sentinel（窗口哨兵）接线状态 ───────────────────────────────────────────────
 /** 本录制会话中 sentinel 是否处于活动状态（仅 window: 源为 true）。 */
 let sentinelActive = false;
-/** recording 管道是否已拉起（防止 onRect 重复触发 / 区分 in-flight 暂停状态）。 */
+/** recording 管道是否已拉起（区分 in-flight 暂停状态）。 */
 let recordingLaunched = false;
 
 /** window 模式成品切片上传监听（替代 transcode 层，直接进 upload）。 */
@@ -304,8 +304,6 @@ async function start(
     sentinelActive = true;
     const hwnd = windowId.split(':')[1];
     startSentinel(hwnd, {
-      // 窗口模式忽略 RECT/crop（不再需要裁剪）
-      onRect: (_rect) => { /* window 模式不使用 crop */ },
       onNotFound: () => { /* 由 exe 兜底或 sentinel 触发停止，无需此处动作 */ },
       onPause: (reason) => { pauseRecording(reason); },
       onResume: () => { void resumeRecording(); },

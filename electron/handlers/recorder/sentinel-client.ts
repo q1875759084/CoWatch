@@ -3,26 +3,23 @@
  *
  * 职责：
  *   - 定位并拉起 Python 哨兵（electron/bin/window_sentinel.exe）
- *   - 解析其 stdout 行协议（RECT / PAUSE / RESUME / STOP / NOT_FOUND）
+ *   - 解析其 stdout 行协议（PAUSE / RESUME / STOP / NOT_FOUND）
  *   - 将协议事件分发到协调层回调
  *   - exe 缺失 / spawn 失败 → 触发 onNotFound 兜底（绝不阻塞录制流程）
  *
  * 行协议（与 T1 实测一致）：
- *   RECT x y w h            → 裁剪矩形（物理像素，相对主屏）
  *   PAUSE MINIMIZED         → 最小化暂停
  *   PAUSE FOREGROUND_LOST   → 切走 / alt+tab 暂停
  *   RESUME                  → 恢复
  *   STOP MOVED              → 窗口移动（去抖）→ 干净结束
  *   STOP CLOSED             → 窗口关闭 / 销毁 → 干净结束
- *   NOT_FOUND               → 标题未匹配窗口 → 无 crop 兜底
+ *   NOT_FOUND               → 标题未匹配窗口 → 兜底
  *   进程退出码 0 正常
- *
- * 坐标空间（见增量设计 v2.2 §9）：RECT 由 sentinel 在物理像素下计算（DWMWA − 主屏原点），
- * Node 侧原样透传，禁止 TS 侧做 DPI 换算。
  *
  * 注（T01 / feat/obs-wgc-capture）：本文件自 exp/ddagrab-crop-window 移植。
  * sentinel 仅作为「窗口事件探测器」与捕获源解耦——它只负责检测移动/关闭/最小化/切走
  * 并发出回调，捕获源启动（OBS WGC exe）留待 T06 实现。
+ * 注：RECT/crop 协议已随 ddagrab+crop 方案废弃删除（被 OBS WGC 方案取代）。
  */
 
 import fs from 'fs';
@@ -30,12 +27,10 @@ import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { app } from 'electron';
 
-import type { CropRect, PauseReason, StopReason } from './recording/types';
+import type { PauseReason, StopReason } from './recording/types';
 
 /** 哨兵事件回调集合。 */
 export interface SentinelCallbacks {
-  /** 收到 RECT → 提供裁剪矩形（物理像素，Node 原样透传）。 */
-  onRect?: (rect: CropRect) => void;
   /** 收到 PAUSE → 暂停（最小化 / 切走；方案 C 加固后切走仅在 500ms 去抖超时且非无关注窗口时触发）。 */
   onPause?: (reason: PauseReason) => void;
   /** 收到 RESUME → 恢复。 */
@@ -173,24 +168,6 @@ export function stopSentinel(): void {
  */
 function handleLine(line: string): void {
   callbacks.onLog?.(`[sentinel] ${line}`);
-
-  if (line.startsWith('RECT')) {
-    const parts = line.split(/\s+/);
-    if (parts.length >= 5) {
-      const x = Number.parseInt(parts[1], 10);
-      const y = Number.parseInt(parts[2], 10);
-      const w = Number.parseInt(parts[3], 10);
-      const h = Number.parseInt(parts[4], 10);
-      if ([x, y, w, h].every((n) => Number.isFinite(n))) {
-        callbacks.onRect?.({ x, y, w, h });
-        return;
-      }
-    }
-    // 解析失败 → 兜底（无 crop）
-    callbacks.onLog?.('[sentinel] RECT 解析失败，走 gfxcapture 兜底');
-    callbacks.onNotFound?.();
-    return;
-  }
 
   if (line.startsWith('PAUSE')) {
     if (line.includes('MINIMIZED')) {

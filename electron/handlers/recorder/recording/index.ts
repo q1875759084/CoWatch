@@ -85,11 +85,9 @@ let callbacks: RecordingCallbacks = {};
 
 // ─── 模块级状态（window 路径，方案2a 新增）──────────────────────────────────
 let captureProc: ChildProcess | null = null; // window_capture.exe
-let muxProc: ChildProcess | null = null;      // ffmpeg-mux（window 模式的 liveFfmpeg）
 let currentMuxProfile: MuxProfile | null = null;
 let lastCfg: RecordingConfig | null = null;
 let m_paused = false;
-let muxReady = false;
 let crashNotified = false; // window 模式：单次启动尝试内去重 crash 上报（防 close/error 双触发）
 let recordedSecondsAtPause = 0;
 let startOffsetForNextSession = 0;
@@ -107,7 +105,7 @@ export function getTmpDir(): string {
 
 export function isRecording(): boolean {
   if (isUserStopped) return false;
-  return ffmpegProcess !== null || captureProc !== null || muxProc !== null;
+  return ffmpegProcess !== null || captureProc !== null;
 }
 
 export async function startRecording(
@@ -172,7 +170,6 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
   const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution } = cfg.windowCapture;
   currentMuxProfile = { ...mux };
   m_paused = false;
-  muxReady = false;
 
   const exePath = getCaptureExePath();
   if (!exePath) {
@@ -348,12 +345,12 @@ export async function checkWindowAlive(sourceId: string): Promise<boolean> {
 
 /**
  * 暂停录制。
- *  - window 模式：整体终止 exe + ffmpeg-mux（Windows 不支持 SIGSTOP），记录续录偏移，保留会话。
+ *  - window 模式：整体终止 exe（Windows 不支持 SIGSTOP），记录续录偏移，保留会话。
  *  - screen 模式：SIGSTOP 挂起 ffmpeg（原样）。
  */
 export function pauseRecording(reason: PauseReason): void {
   callbacks.onLog?.(`[recording] 暂停录制（${reason}）`);
-  if (currentSourceId.startsWith('window:') && (captureProc || muxProc)) {
+  if (currentSourceId.startsWith('window:') && captureProc) {
     recordedSecondsAtPause = getNextSegmentNumber() * (currentMuxProfile?.seg ?? HLS_SEGMENT_DURATION);
     void gracefulQuitWindow();
     m_paused = true;
@@ -366,7 +363,7 @@ export function pauseRecording(reason: PauseReason): void {
 
 /**
  * 恢复录制。
- *  - window 模式：以 -start_number 续号重建 exe + ffmpeg-mux（音频随 exe 一起重启）。
+ *  - window 模式：以 -start_number 续号重建 exe（音频随 exe 一起重启）。
  *  - screen 模式：SIGCONT（原样）。
  */
 export function resumeRecording(): void {
@@ -377,7 +374,7 @@ export function resumeRecording(): void {
     return;
   }
   if (!m_paused || !lastCfg) return;
-  callbacks.onLog?.('[recording] 恢复录制（重启 exe + mux）');
+  callbacks.onLog?.('[recording] 恢复录制（重启 exe）');
   const nextSeg = getNextSegmentNumber();
   if (currentMuxProfile) currentMuxProfile.startNumber = nextSeg;
   startOffsetForNextSession = recordedSecondsAtPause;
