@@ -30,27 +30,13 @@ win:
   # gyan.dev full build ffmpeg.exe，仅 Windows 打包时携带。
   # 来源：https://www.gyan.dev/ffmpeg/builds/ 下载 ffmpeg-release-full.7z，
   #       解压后取 bin/ffmpeg.exe 放入 electron/bin/（已内置 ddagrab/gfxcapture filter，无需自编译）。
-  # electron/bin/ 目录不存在时此配置自动忽略，不影响 macOS 打包。
+  # electron/bin/ 目录不存在时此配置自动忽略，不影响打包。
   # getFfmpegPath() 在 packaged 模式下读取 resources/bin/ffmpeg.exe
   extraResources:
     - from: "electron/bin/"
       to: "bin/"
       filter:
         - "**/*"
-
-# ─── macOS 配置（仅用于开发机本地验证，不对外发布）─────────────────────────
-mac:
-  target:
-    - target: dmg        # .dmg 磁盘镜像，双击挂载即可运行，无需签名
-      arch:
-        - arm64          # Apple Silicon（M 系列芯片）
-        - x64            # Intel Mac（兼容）
-  # 本地验证不做代码签名，跳过公证
-  identity: null
-  # Info.plist 权限说明字符串（macOS 系统弹窗所必须）
-  # 缺少此项时打包后的 .app 调用 desktopCapturer.getSources 不会弹出授权对话框
-  extendInfo:
-    NSScreenCaptureUsageDescription: CoWatch 需要录制屏幕内容以支持房间同步录制功能。
 
 # NSIS 安装包配置
 nsis:

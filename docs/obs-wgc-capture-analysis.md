@@ -457,9 +457,8 @@ if (currentSourceId.startsWith('window:')) {
 
 **推荐方案1**：窗口录制完全由 window_capture.exe 处理，sentinel 只用于全屏 ddagrab+crop 场景（如果需要）。
 
-### 9.3 macOS/Linux
+### 9.3 Linux
 
-- macOS：继续用 avfoundation（稳定，无此问题）
 - Linux：用 PipeWire（类似 WGC 的推模式，但 Linux 不是 CoWatch 目标平台）
 
 ---

@@ -21,7 +21,7 @@ pro 会员增值功能。用户在游戏过程中后台静默录制，边录边�
 ### 屏幕捕获
 - `desktopCapturer.getSources()` 获取所有窗口列表
 - 捕获源传给 Renderer 的 `getDisplayMedia({ video: { mandatory: { chromeMediaSource, chromeMediaSourceId } } })`
-- ffmpeg 通过 `-f gdigrab`（Windows）或 `-f avfoundation`（Mac）直接捕获窗口，无需经过浏览器
+- ffmpeg 通过 `-f gdigrab`（Windows）直接捕获窗口，无需经过浏览器
 
 ### 编码器优先级（ffmpeg 参数层面）
 ```

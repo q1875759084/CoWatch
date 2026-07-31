@@ -26,7 +26,7 @@
 | 登录/注册 | `/auth` | 账号注册与登录 |
 | Dashboard | `/` | 我的房间列表、创建/加入房间入口；顶栏用户信息面板（hover 弹出：头像（可换图）+ 昵称（可改名）+ uid + 退出登录） |
 | 房间主页 | `/room/:roomId` | 视频播放区 + 视频列表（多段录像）+ 上传区 + 成员/控制权面板（合并了原 lobby 和 watch 两个页面）+ 进度条 Tag 标注 + 鼠标共享（Canvas PainterLayer 蒙层，多端实时同步光标位置）+ 协同绘制（绘制模式下按住左键画笔迹，WS 广播同步，支持黑/白/红三色）+ 开庭记录（右上角浮层，主控可编辑，节流 1000ms WS 广播同步，全员可导出为 txt）+ 聊天（右上角独立浮层按钮，全员可发，WS 广播含发送者自身，内存缓存最近 50 条，新成员加入时通过 ROOM_STATE 下发历史记录，不落库）+ 复盘/自由模式（非主控专属：跟随模式默认跟随主控进度；自由模式可独立操作播放器、切换房间内任意视频，不显示/发送画布笔迹；主控可一键拉回所有人至当前状态并强制恢复跟随） |
-| Electron 客户端录制 | 房间主页内悬浮控件 | **`vip:pro` 专属**。实时录制：ffmpeg HLS 实时编码 → chokidar 监听切片 → `net.fetch` 上传后端 → COS。Windows 音频：`audio_capture.exe`（WASAPI Loopback）pipe:0 传入 FFmpeg；macOS 静音。视频：Windows 全屏 ddagrab / 窗口 gfxcapture（GPU 零拷贝），macOS avfoundation。健壮性：窗口录制双层检测（crash 时单次枚举 + 5s 轮询兜底），目标窗口消失时优雅 stop()。外部视频转码：自带录屏软件的用户可直接在客户端选中本地视频文件，客户端用内置 ffmpeg 转码为 HLS 分段（参数与转码层对齐，900p / CQ 30 / g 300 / aac 128k，NVENC 实测 ~11x），边转边上传，不限速（`disableThrottle`），支持批量队列（串行，自动连续处理）。代码：`electron/handlers/recorder/`（index.ts + window-watch.ts + external-transcode/），前端 `src/pages/Lobby/ElectronVideoUploader/`。|
+| Electron 客户端录制 | 房间主页内悬浮控件 | **`vip:pro` 专属**。实时录制：ffmpeg HLS 实时编码 → chokidar 监听切片 → `net.fetch` 上传后端 → COS。Windows 音频：`audio_capture.exe`（WASAPI Loopback）pipe:0 传入 FFmpeg。视频：Windows 全屏 ddagrab / 窗口 gfxcapture（GPU 零拷贝）。健壮性：窗口录制双层检测（crash 时单次枚举 + 5s 轮询兜底），目标窗口消失时优雅 stop()。外部视频转码：自带录屏软件的用户可直接在客户端选中本地视频文件，客户端用内置 ffmpeg 转码为 HLS 分段（参数与转码层对齐，900p / CQ 30 / g 300 / aac 128k，NVENC 实测 ~11x），边转边上传，不限速（`disableThrottle`），支持批量队列（串行，自动连续处理）。代码：`electron/handlers/recorder/`（index.ts + window-watch.ts + external-transcode/），前端 `src/pages/Lobby/ElectronVideoUploader/`。|
 
 ### 控制权机制
 

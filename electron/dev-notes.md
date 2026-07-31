@@ -33,19 +33,6 @@ fs.rmSync(outDir, { recursive: true, force: true });
 
 ---
 
-### macOS 打包 DMG 需要 python，且版本有限制
-
-**现象：** `electron:pack:mac` 报错 `Exit code: 1. Command failed: which python`，随后改用 python3.14 后报 `ImportError: Symbol not found: _XML_SetAllocTrackerActivationThreshold`。
-
-**根因：** `dmg-builder` 依赖一个 Python 脚本（`dmgbuild/core.py`）生成 DMG 格式，这是 macOS 打包特有的依赖，Windows 打包（NSIS）无此问题。macOS 新系统只提供 `python3` 命令，没有 `python` 软链接。Python 3.14 与 macOS 系统 `libexpat` 存在符号不兼容（`_XML_SetAllocTrackerActivationThreshold` 未找到）。
-
-**解决：** 将 `python` 软链接指向 Python 3.9：
-```bash
-ln -sf /opt/homebrew/bin/python3.9 /opt/homebrew/bin/python
-```
-不能用 3.14（libexpat 符号冲突），用系统 `python3.9` 或 Homebrew 的 `python@3.9` 均可。
-
----
 
 ### Electron 加载本地产物时相对路径 API/WS/静态资源请求失效
 
@@ -392,7 +379,7 @@ m3u8 切片 URL 改为后端相对路径：
 
 **现象：** 点击"停止录制"后，录制结果缺少最后几秒内容——最后一个 `.ts` 切片（通常不足 `hls_time` = 10s）未上传到服务端。
 
-**根因：** `stop()` 流程先关闭 chokidar watcher，再向 ffmpeg 发 `SIGTERM`。ffmpeg 收到信号后仍会继续将内存帧 flush 写入磁盘（macOS `avfoundation` 尤其明显，可能需要数秒），但 watcher 已经关闭，新写入的切片无法触发 `add` 事件，无法进入上传队列。
+**根因：** `stop()` 流程先关闭 chokidar watcher，再向 ffmpeg 发 `SIGTERM`。ffmpeg 收到信号后仍会继续将内存帧 flush 写入磁盘（可能需要数秒），但 watcher 已经关闭，新写入的切片无法触发 `add` 事件，无法进入上传队列。
 
 **解决：** ffmpeg 进程彻底退出（`close` 事件）后，执行一次手动目录扫描：
 ```ts
@@ -405,55 +392,6 @@ for (const f of files) {
 }
 ```
 通过 `queuedFileNames` Set 去重，避免重复上传 watcher 已处理的切片。
-
----
-
-### macOS `avfoundation` 录制内容为空（0 字节或无视频流）
-
-**现象：** 点击"停止录制"，ffmpeg 报告退出成功，但上传的切片为空文件或后端解析时无视频流。日志显示 ffmpeg 收到 `SIGTERM` 后 stdout 仍持续输出约 1~2 秒。
-
-**根因：** macOS `avfoundation` 屏幕采集存在帧 I/O 缓冲，`SIGTERM` 后 ffmpeg 需要时间 flush 剩余帧到磁盘。若等待时间不足（原来为 5s，某些情况下 avfoundation 需要更长时间），文件尚未完整写入就被判定超时，进入 SIGKILL + 清理流程，导致切片内容为空。
-
-**解决：** 将 ffmpeg 退出等待时间从 5s 延长到 **15s**：
-```ts
-// 发送 SIGTERM
-ffmpegProcess.kill('SIGTERM');
-// 等待最多 15s，超时再 SIGKILL
-const killTimer = setTimeout(() => ffmpegProcess?.kill('SIGKILL'), 15_000);
-ffmpegProcess.on('close', () => clearTimeout(killTimer));
-```
-15s 兜底足以覆盖 avfoundation 的 flush 延迟，正常情况 ffmpeg 在 1~3s 内退出，`SIGKILL` 不会被触发。
-
----
-
-### macOS avfoundation 屏幕录制 PTS 差值为零，视频时长显示 0:00
-
-**现象：** ffmpeg 日志显示 `time=00:00:00.03 / dup=99% / Non-monotonous DTS`，录制了 3~13 秒的视频，播放器显示 `0:00 / 0:00`，且画面只有一帧（录制开始时的截图）。
-
-**根因：** macOS `avfoundation` 屏幕捕获给每一帧打的 PTS 差值为 0（不是绝对值太大，而是帧与帧之间没有时间差）。libx264 编码时每帧 duration=0，HLS muxer 写出时 DTS 不单调，输出文件中所有帧时间戳集中在约 0.03 秒内，`dup=N-2` 帧全是重复帧。
-
-**排查过程（三次无效尝试）：**
-
-| 尝试 | 为什么无效 |
-|------|-----------|
-| `-use_wallclock_as_timestamps 1` | avfoundation demuxer 直接忽略，该选项仅对 v4l2/alsa（Linux 设备）有效 |
-| `-vf setpts=PTS-STARTPTS` | 只做 PTS 绝对值平移，帧间差值仍为 0，每帧 duration 仍为 0 |
-| `setpts=PTS-STARTPTS` + `-bf 0` | B 帧消失、DTS 警告消失，但 duration=0 被原样传给编码器，切片文件真实时长仍只有 0.37s |
-
-**解决：** macOS 分支加 `-vf fps=30 -bf 0`：
-
-```ts
-const darwinExtraArgs: string[] = process.platform === 'darwin'
-  ? ['-vf', 'fps=30', '-bf', '0']
-  : [];
-```
-
-- **`-vf fps=30`**：完全丢弃 avfoundation 的原始 PTS，按 30fps 均匀重新分配时间戳（第 0 帧=0, 第 1 帧=1/30s, ...），等价于 OBS 的 "Use CFR" 选项。这是 avfoundation 屏幕录制的标准处理方式。
-- **`-bf 0`**：禁用 B 帧，使 DTS 严格等于 PTS，消除 HLS muxer 的 DTS 不单调警告。屏幕录制场景下 B 帧压缩收益极小（静止帧 P/B 几乎全为 skip），禁用无实质质量损失，且降低编码延迟。
-
-**验证方式：** 用 `ffprobe -v error -show_entries format=duration` 检查切片文件真实时长，而非只看 ffmpeg 日志。
-
-**Windows 不受影响：** gdigrab 由 ffmpeg 自己维护 PTS（不依赖外部驱动），天然单调，无需该修复。
 
 ---
 
@@ -551,7 +489,6 @@ gdigrab 在 f23a95c 提交时通过 Windows 真机测试，录制画质/帧率�
 // -list_devices true 会向 stderr 输出设备列表后以非零码退出（属正常行为）
 // 只要 stderr 含 [wasapi] 字样即判定可用
 spawn(ffmpeg, ['-f', 'wasapi', '-list_devices', 'true', '-i', 'dummy'])
-// macOS 直接返回 false（不支持系统音频录制，需第三方虚拟声卡如 BlackHole）
 ```
 
 探测在 `detectEncoder` 完成后顺带执行，结果通过 `EncoderDetectResult.isAudioAvailable` 返回给前端，Windows 10+ 通常均可用（极少数无声卡或远程桌面场景返回 false），探测加 5s 超时保护。
@@ -561,7 +498,7 @@ spawn(ffmpeg, ['-f', 'wasapi', '-list_devices', 'true', '-i', 'dummy'])
 - `isAudioAvailable=false` 时 Checkbox 置灰，Tooltip 说明原因
 - `AudioOptions` 类型从 Renderer 透传到主进程 `start()`，crash 重启时通过 `currentAudioOptions` 模块变量复用
 
-**无音频时加 `-an`：** macOS、或用户未勾选系统声音时，显式加 `-an` 参数，避免 HLS muxer 因无音频流输出警告。
+**无音频时加 `-an`：** 用户未勾选系统声音时，显式加 `-an` 参数，避免 HLS muxer 因无音频流输出警告。
 
 ---
 

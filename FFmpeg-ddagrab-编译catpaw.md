@@ -173,7 +173,7 @@ function getFfmpegPath(): string {
     // packaged 模式：优先用内嵌的带 ddagrab 版本（extraResources 打包）
     const bundledPath = path.join(process.resourcesPath, 'bin', binName);
     if (fs.existsSync(bundledPath)) return bundledPath;
-    // fallback 到 ffmpeg-static（macOS/Linux）
+    // fallback 到 ffmpeg-static
     return ffmpegPath as string;
   }
 
@@ -181,7 +181,7 @@ function getFfmpegPath(): string {
   const localBinPath = path.join(__dirname, '..', 'bin', binName);
   if (fs.existsSync(localBinPath)) return localBinPath;
 
-  // 最终 fallback（ffmpeg-static，macOS/Linux 或 Windows 未放自编译版时）
+  // 最终 fallback（ffmpeg-static，Windows 未放自编译版时）
   return ffmpegPath as string;
 }
 ```

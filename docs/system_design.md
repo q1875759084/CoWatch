@@ -119,7 +119,7 @@ gfxcapture/ddagrab(硬件帧) → [hwmap: D3D11→CUDA 原地映射, 仅一次, 
 | 1 | `shared.ts` | 改 | 新增开关：`CUDA_DIRECT_ENCODE`(Phase1主开关,默认false)、`CAPTURE_TARGET_WIDTH`(默认1280)、`USE_SCALE_NPP`(降分辨率GPU路径,默认false)、`E0_SINGLE_PASS`(单遍模型,默认false)、`RECORD_CFR`(默认true,回CFR)、`ENABLE_DIAG_FILE_LOG`(落盘诊断,默认true)。保留 `SKIP_TRANSCODE_IN_MODE_A`/`USE_VFR_RECORDING` 用于回滚（false=复原）。 |
 | 2 | `recording/index.ts` | 改 | `spawnFfmpeg` 改为调用新 `pipeline-builder` 组装参数；no-downscale 路径去除 hwdownload/CPU scale/hwupload，改 hwmap→直编；降分辨率走 scale_npp；接入 `diagnostics.ts` 落盘日志；`parseFfmpegLine` 同时写文件。 |
 | 3 | `recording/pipeline-builder.ts` | **新** | 纯函数：`buildCaptureSource()`、`buildVideoFilterChain()`（no-scale / scale_npp / legacy-cpu 三分支）、`buildEncodeArgs()`（legacy / E0）、`assembleFfmpegArgs()`。可单测。 |
-| 4 | `recording/capture-config.ts` | **新** | 集中管理捕获源 lavfi 串（gfxcapture/ddagrab/avfoundation）、目标分辨率协商、`needsHwmap()` 决策（源是 CUDA 还是 D3D11）。 |
+| 4 | `recording/capture-config.ts` | **新** | 集中管理捕获源 lavfi 串（gfxcapture/ddagrab）、目标分辨率协商、`needsHwmap()` 决策（源是 CUDA 还是 D3D11）。 |
 | 5 | `recording/diagnostics.ts` | **新** | `DiagnosticLogger`：把 `inferredCaptureFps`/dup/drop/window-watch/audio discontinuity 写入 `tmpDir/diag-<sessionId>.log`，**绕开终端截断**（同时解决浏览器录制 capture 侧未确认的开放问题）。 |
 | 6 | `transcoding/index.ts` | 改 | 新增 `finalizeVfrToCfr(input, output)`（stop 时一次性 VFR→CFR 重采样 + 质量精修），替换每 10s 脉冲；现有逐片队列在 E0/raw 下不启动（已由 SKIP 控制）。保留 `-vsync cfr -r 30`。 |
 | 7 | `index.ts`（协调层） | 改 | `start()` 按新开关选管线；`stop()` 在 raw 且需播放健壮性时调用 `finalizeVfrToCfr`（受 `RECORD_CFR` 控制，已 CFR 则跳过）；固化 E0 语义。 |

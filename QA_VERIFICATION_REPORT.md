@@ -107,7 +107,7 @@ if (audioCaptureProcess) {
 
 ## 真机验证步骤（如何确认修复生效）
 
-> 注意：本修复仅作用于 **Windows（win32）** 分支的 `stopRecording`。macOS/Linux 走 SIGTERM 分支，不受此改动影响，`unpipe` 日志在其它平台停止时不会触发。
+> 注意：本修复仅作用于 **Windows（win32）** 分支的 `stopRecording`，`unpipe` 诊断日志在 Windows 停止录制时触发。
 
 1. **环境**：Windows 上以 dev 或 packaged 模式启动 CoWatch（`audio_capture.exe` 须存在，音频采集启用）。
 2. **开始录制**：选屏幕或窗口开始录制，确认日志出现：

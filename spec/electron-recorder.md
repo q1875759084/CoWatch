@@ -14,7 +14,7 @@
 | HLS 片段缓存（Main 进程替代 SW） | `electron/handlers/cache.ts` |
 | Preload / contextBridge | `electron/preload.ts` |
 | Webpack（主进程 + Renderer） | `webpack.electron.js` / `webpack.electron-renderer.js` |
-| 打包配置（Windows NSIS + macOS DMG） | `electron-builder.yml` |
+| 打包配置（Windows NSIS） | `electron-builder.yml` |
 | 架构踩坑记录 | `electron/dev-notes.md` |
 
 ### 待实现模块

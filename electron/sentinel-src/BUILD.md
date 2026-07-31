@@ -79,15 +79,6 @@ rustup target add aarch64-pc-windows-msvc
 cargo build --release --target aarch64-pc-windows-msvc
 ```
 
-## 交叉编译（macOS 开发机上编译 Windows exe）
-
-需要安装 `x86_64-pc-windows-msvc` 目标，但 MSVC linker 在 macOS 上不可用。
-推荐替代方案：
-
-1. 在 Windows 上编译一次，将 exe 提交到仓库
-2. 使用 GitHub Actions CI 编译（推荐）
-3. 使用 `x86_64-pc-windows-gnu` 目标（MinGW linker，macOS 可用，但 ABI 与 MSVC 不同）
-
 ## CI 编译（GitHub Actions 示例）
 
 ```yaml

@@ -56,7 +56,7 @@ encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '30', '-b:v', '0',
               '-maxrate', '5000k', '-bufsize', '10000k'];
 
 // 全平台
-platformVfArgs = ['-bf', '0'];  // macOS 另有 fps+scale
+platformVfArgs = ['-bf', '0'];  // 全平台通用
 
 // 分辨率
 maxWidth = 1280  // 硬编
@@ -81,9 +81,9 @@ GOP = 30 * 10 = 300        // 每 300 帒一个 I 帧
 - **ddagrab/gfxcapture 捕获产生 VFR（可变帧率）**：帧间隔不规则（16ms/50ms/33ms 混合），由 Desktop Duplication API 的捕获节奏决定
 - **Phase 1 时**：lookahead 32 帧缓冲充当了帧率平滑器，将不规则 PTS 归一化为均匀输出 → 录制流畅
 - **Phase 2 时**：缓冲被移除，不规则 PTS 直通到 HLS 输出 → 播放卡顿
-- **macOS 不受影响**：macOS 一直有 `fps=30` 滤镜做 CFR 归一化，Windows 一直漏了
+- **Windows 受影响**：Windows 一直漏了 `fps=30` 滤镜做 CFR 归一化，移除缓冲后暴露 VFR 卡顿
 
-**修复：** 在 Windows lavfi 滤镜链末尾添加 `fps=30` 滤镜（CFR 归一化），与 macOS 对齐。
+**修复：** 在 Windows lavfi 滤镜链末尾添加 `fps=30` 滤镜（CFR 归一化）。
 
 ```typescript
 // 修复前（Windows）
@@ -103,7 +103,7 @@ winScaleFilter = `scale=w='min(iw,1280)':h=-2,format=yuv420p,fps=30`;
 
 | 改动 | 详情 | 原因 |
 |------|------|------|
-| Windows lavfi 链添加 `fps=30` | `winScaleFilter` 末尾追加 `,fps=30` | ddagrab/gfxcapture 产生 VFR，无 lookahead 缓冲后 PTS 不规则直通导致录制卡顿；与 macOS 的 `fps=30` 对齐 |
+| Windows lavfi 链添加 `fps=30` | `winScaleFilter` 末尾追加 `,fps=30` | ddagrab/gfxcapture 产生 VFR，无 lookahead 缓冲后 PTS 不规则直通导致录制卡顿 |
 
 **当前参数（Phase 3 修复后）：**
 
@@ -117,7 +117,7 @@ encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '30', '-b:v', '0',
 winScaleFilter = `scale=w='min(iw,1280)':h=-2,format=yuv420p,fps=30`;
 
 // 全平台
-platformVfArgs = ['-bf', '0'];  // macOS 另有 fps+scale
+platformVfArgs = ['-bf', '0'];  // 全平台通用
 
 // 分辨率
 maxWidth = 1280  // 硬编
@@ -209,7 +209,6 @@ VBV（Video Buffering Verifier）码率约束模型**必须同时有 `maxBitRate
 | 平台 | 全屏录制 | 窗口录制 |
 |------|----------|----------|
 | Windows | ddagrab（DXGI Desktop Duplication） | gfxcapture（WGC API，GPU 零拷贝） |
-| macOS | avfoundation | avfoundation |
 
 缩放策略：`scale=w='min(iw,1280)':h=-2`（等比缩放，最大宽 1280）
 
@@ -1081,7 +1080,7 @@ ffmpeg -i seg001.ts \
 | 编码器 | h264_nvenc |
 | 参数 | `-preset p4 -tune ll -rc-lookahead 0 -bf 0 -rc vbr -cq 23 -b:v 0` |
 | 分辨率 | 720p（maxWidth 1280） |
-| 帧率 | 60fps（`-vsync cfr -r 60`，ddagrab/gfxcapture/avfoundation 均设 60） |
+| 帧率 | 60fps（`-vsync cfr -r 60`，ddagrab/gfxcapture 均设 60） |
 | 切片时长 | 10s |
 | 原始码率 | ~18-35 Mbps（CQ23 + 720p@60fps，约22-44MB/片） |
 | 网络感知 | **无** — 不监听网络状态，不因网络停止 |
@@ -1360,20 +1359,10 @@ const winScaleFilter = `scale=w='min(iw\,${maxWidth})':h=-2,format=yuv420p,fps=3
 const winScaleFilter = `scale=w='min(iw\,${maxWidth})':h=-2,format=yuv420p`;
 ```
 
-**改动 2：** 移除 macOS `-vf` 中的 `fps=30`（两个平台统一）
+**改动 2：** 在编码器参数之后、GOP 参数之前，插入 `-vsync cfr -r {target_fps}`
 
 ```typescript
-// 修复前
-platformVfArgs = ['-vf', `fps=30,scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0'];
-
-// 修复后
-platformVfArgs = ['-vf', `scale=w='min(iw\,${maxWidth})':h=-2`, '-bf', '0'];
-```
-
-**改动 3：** 在编码器参数之后、GOP 参数之前，插入 `-vsync cfr -r {target_fps}`
-
-```typescript
-// 新增输出参数（两个平台统一，当前帧率 = 60fps）
+// 新增输出参数（统一输出参数，当前帧率 = 60fps）
 '-vsync', 'cfr', '-r', '60',
 '-g', String(60 * HLS_SEGMENT_DURATION),  // GOP = 600 帧 = 10 秒（60fps × 10s）
 ```

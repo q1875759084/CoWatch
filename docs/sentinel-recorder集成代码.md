@@ -39,11 +39,9 @@ let sentinelFallbackTimer: ReturnType<typeof setInterval> | null = null;
  *   cargo build --release --target x86_64-pc-windows-msvc
  *   将编译产物复制到 electron/bin/window_sentinel.exe
  *
- * macOS 不支持 sentinel（无 SetWinEventHook），始终返回 null。
  * 全屏录制模式不需要 sentinel，但此函数不做模式判断，由调用方决定。
  */
 function getSentinelPath(): string | null {
-  // macOS 不使用 sentinel
   if (process.platform !== 'win32') return null;
 
   const binName = 'window_sentinel.exe';
@@ -157,7 +155,7 @@ function startSentinel(displayTitle: string): void {
  * 检查 displayTitle 是否仍存在。消失时调用 stop() 优雅停止。
  *
  * 场景触发：
- *   1. window_sentinel.exe 不存在（macOS 或 Windows 上 exe 未安装）
+ *   1. window_sentinel.exe 不存在（Windows 上 exe 未安装）
  *   2. sentinel 异常退出（自身崩溃）
  *
  * 性能：desktopCapturer.getSources() 每 2s 调用一次，

@@ -14,7 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
-import { app, desktopCapturer } from 'electron';
+import { app } from 'electron';
 
 import { startWindowWatcher, isWindowAlive } from '../window-watch';
 import {
@@ -54,7 +54,6 @@ export interface RecordingConfig {
   tmpDir: string;
   detectedEncoder: string;
   isSoftwareEncoder: boolean;
-  cachedAvfIndex: number;
   /** window 模式注入的捕获/编码/封装 Profile 集合（方案2a 主进程注入）。 */
   windowCapture?: WindowCaptureConfig;
   /** 仅录制模式：跳过上传、切片持久化到本地（可选透传，当前由录制协调层控制，录制层无需使用）。 */
@@ -77,7 +76,6 @@ let audioCaptureProcess: ChildProcess | null = null;
 let tmpDir = '';
 let detectedEncoder = 'libx264';
 let isSoftwareEncoder = false;
-let cachedAvfIndex = -1;
 let isUserStopped = false;
 let crashRestartCount = 0;
 let windowWatcher: { stop: () => void } | null = null;
@@ -122,13 +120,8 @@ export async function startRecording(
   tmpDir = cfg.tmpDir;
   detectedEncoder = cfg.detectedEncoder;
   isSoftwareEncoder = cfg.isSoftwareEncoder;
-  cachedAvfIndex = cfg.cachedAvfIndex;
   currentSourceId = cfg.sourceId;
   currentWindowTitle = cfg.displayTitle;
-
-  if (process.platform === 'darwin' && cachedAvfIndex < 0) {
-    await resolveAvfIndex(cfg.sourceId);
-  }
 
   if (currentSourceId.startsWith('window:')) {
     // 窗口模式（方案2a）：spawn exe + 等 READY + spawn ffmpeg-mux
@@ -306,7 +299,7 @@ export async function stopRecording(): Promise<void> {
     } else {
       if (audioCaptureProcess) {
         try {
-          audioCaptureProcess.kill(process.platform === 'win32' ? 'SIGINT' : 'SIGTERM');
+          audioCaptureProcess.kill('SIGINT');
         } catch (_) { /* ignore */ }
         audioCaptureProcess = null;
       }
@@ -340,7 +333,7 @@ export async function restartRecording(displayTitle: string): Promise<void> {
   callbacks.onLog?.(`[recording] ffmpeg 崩溃，第 ${crashRestartCount} 次重启...`);
   if (audioCaptureProcess) {
     try {
-      audioCaptureProcess.kill(process.platform === 'win32' ? 'SIGINT' : 'SIGTERM');
+      audioCaptureProcess.kill('SIGINT');
     } catch (_) { /* ignore */ }
     audioCaptureProcess = null;
   }
@@ -420,7 +413,6 @@ function getNextSegmentNumber(): number {
 }
 
 function getAudioCapturePath(): string | null {
-  if (process.platform !== 'win32') return null;
   const binName = 'audio_capture.exe';
   if (app.isPackaged) {
     const bundledPath = path.join(process.resourcesPath, 'bin', binName);
@@ -433,48 +425,6 @@ function getAudioCapturePath(): string | null {
   return null;
 }
 
-async function resolveAvfIndex(sourceId: string): Promise<number> {
-  const ffmpeg = getFfmpegPath();
-  const screenRank = sourceId.startsWith('screen:')
-    ? parseInt(sourceId.split(':')[1] || '0', 10)
-    : 0;
-  const fallback = screenRank;
-
-  return new Promise((resolve) => {
-    let stderr = '';
-    const proc = spawn(ffmpeg, ['-list_devices', 'true', '-f', 'avfoundation', '-i', 'dummy'], {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-
-    proc.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-    proc.on('close', () => {
-      const videoSection = stderr.split(/AVFoundation audio devices/i)[0] || stderr;
-      const pattern = /\[(\d+)\]\s+Capture screen\s+(\d+)/gi;
-      let match;
-      while ((match = pattern.exec(videoSection)) !== null) {
-        const avfIdx = parseInt(match[1], 10);
-        const screenNum = parseInt(match[2], 10);
-        if (screenNum === screenRank) {
-          cachedAvfIndex = avfIdx;
-          resolve(avfIdx);
-          return;
-        }
-      }
-      cachedAvfIndex = fallback;
-      resolve(fallback);
-    });
-    proc.on('error', () => { cachedAvfIndex = fallback; resolve(fallback); });
-
-    const killTimer = setTimeout(() => {
-      try { proc.kill(); } catch (_) { /* ignore */ }
-      cachedAvfIndex = fallback;
-      resolve(fallback);
-    }, 5000);
-    proc.on('close', () => clearTimeout(killTimer));
-    proc.on('error', () => clearTimeout(killTimer));
-  });
-}
-
 function spawnFfmpeg(): ChildProcess {
   const ffmpeg = getFfmpegPath();
   const maxWidth = isSoftwareEncoder ? 854 : 1280;
@@ -483,31 +433,18 @@ function spawnFfmpeg(): ChildProcess {
   const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
 
   let inputArgs: string[];
-  if (process.platform === 'darwin') {
-    const screenSeq = currentSourceId.startsWith('screen:')
-      ? parseInt(currentSourceId.split(':')[1] || '0', 10)
-      : 0;
-    const avfIndex = cachedAvfIndex >= 0 ? cachedAvfIndex : screenSeq + 1;
+  if (currentSourceId.startsWith('screen:')) {
+    const screenIdx = parseInt(currentSourceId.split(':')[1] || '0', 10);
     inputArgs = [
-      '-f', 'avfoundation',
-      '-framerate', '30',
-      '-capture_cursor', '1',
-      '-i', `${avfIndex}:none`,
+      '-f', 'lavfi',
+      '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
     ];
   } else {
-    if (currentSourceId.startsWith('screen:')) {
-      const screenIdx = parseInt(currentSourceId.split(':')[1] || '0', 10);
-      inputArgs = [
-        '-f', 'lavfi',
-        '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
-      ];
-    } else {
-      const escapedTitle = currentWindowTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      inputArgs = [
-        '-f', 'lavfi',
-        '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
-      ];
-    }
+    const escapedTitle = currentWindowTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    inputArgs = [
+      '-f', 'lavfi',
+      '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
+    ];
   }
 
   let audioInputArgs: string[] = [];
@@ -553,12 +490,7 @@ function spawnFfmpeg(): ChildProcess {
     encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality'];
   }
 
-  let platformVfArgs: string[];
-  if (process.platform === 'darwin') {
-    platformVfArgs = ['-vf', `scale=w='min(iw\\,${maxWidth})':h=-2`, '-bf', '0'];
-  } else {
-    platformVfArgs = ['-bf', '0'];
-  }
+  const platformVfArgs: string[] = ['-bf', '0'];
 
   const args = [
     ...audioInputArgs,

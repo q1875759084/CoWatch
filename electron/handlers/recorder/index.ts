@@ -127,10 +127,6 @@ let currentAuthToken = '';
 let currentSourceId = '';
 /** 当前录制窗口的标题（用于 window-watch 备用检测），crash 重启时需要 */
 let currentWindowTitle = '';
-/**
- * macOS avfoundation 视频设备索引缓存（start 时通过枚举确定，crash 重启时复用）。
- */
-let cachedAvfIndex = -1;
 /** 后端 origin，由 main.ts 通过 setApiOrigin 注入 */
 let apiOrigin = 'http://localhost:3002';
 /** 检测到的编码器 */
@@ -267,7 +263,6 @@ async function start(
   currentAuthToken = authToken;
   isUserStopped = false;
   crashRestartCount = 0;
-  cachedAvfIndex = -1;
   recordStartTime = Date.now();
   recordingLaunched = false;
   sentinelActive = false;
@@ -291,20 +286,6 @@ async function start(
       console.warn('[recorder] temp 目录创建失败，降级到 userData：', fallbackTmpDir);
     }
     console.log(`[recorder] 临时目录：${tmpDir}`);
-  }
-
-  // macOS：解析 avfoundation 索引
-  if (process.platform === 'darwin' && windowId.startsWith('screen:')) {
-    try {
-      const allSources = await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: 0, height: 0 },
-      });
-      const idx = allSources.findIndex((s) => s.id === windowId);
-      cachedAvfIndex = idx >= 0 ? idx : 0;
-    } catch {
-      cachedAvfIndex = 0;
-    }
   }
 
   // recording 层回调（crash / stop 透传）
@@ -351,7 +332,6 @@ async function start(
         tmpDir,
         detectedEncoder,
         isSoftwareEncoder,
-        cachedAvfIndex,
         windowCapture: {
           capture: profiles.capture,
           encode: profiles.encode,
@@ -407,7 +387,6 @@ async function start(
       tmpDir,
       detectedEncoder,
       isSoftwareEncoder,
-      cachedAvfIndex,
     },
     recordingCallbacks,
   );

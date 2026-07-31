@@ -231,7 +231,7 @@ function getFfmpegPath(): string {
     );
     if (fs.existsSync(bundledPath)) return bundledPath;
     
-    // fallback 到 ffmpeg-static（macOS/Linux）
+    // fallback 到 ffmpeg-static
     return ffmpegPath;
   }
   

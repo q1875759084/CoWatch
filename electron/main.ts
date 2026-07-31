@@ -141,13 +141,9 @@ app.whenReady().then(() => {
   registerAppProtocol();
   createWindow();
 
-  // macOS：Dock 点击时若无窗口则重新创建（Windows 不触发此事件）
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
 });
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  app.quit();
 });
 
 // ─── TODO: before-quit 优雅停止录制 ─────────────────────────────────────────

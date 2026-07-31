@@ -229,7 +229,7 @@ function stripCosSignature(url: string): string {
 
 **方案二：WebCodecs API**
 
-- 浏览器原生 API（Chrome 94+，Firefox 不支持），通过系统编码器抽象层调用硬件加速（Windows 走 Media Foundation/NVENC，macOS 走 VideoToolbox）
+- 浏览器原生 API（Chrome 94+，Firefox 不支持），通过系统编码器抽象层调用硬件加速（Windows 走 Media Foundation/NVENC）
 - **优势**：有独显的玩家可走硬件编码，速度接近实时甚至更快；纯浏览器 API，无需客户端任何额外安装；HTTPS 下即可运行
 - **否决原因（核心）**：WebCodecs `VideoEncoder` 没有 CRF 模式，只支持 CBR/VBR 目标码率。硬件编码器（NVENC）在目标码率模式下，静止场景浪费码率、动态场景码率不足，实测画质比 x264 CRF 30 下降 15~25%，且输出文件可能更大——这与用户此前直接使用 NVENC 硬件加速时的体验一致（「文件更大画质更差」）。此外，mp4 容器的 `moov` box 必须在全部帧编码完成后才能写入文件头，因此无法实现真正的「边转码边上传」并行；若改用 fMP4 分片格式则需后端额外拼接逻辑，开发成本上升至 4~6 天
 
