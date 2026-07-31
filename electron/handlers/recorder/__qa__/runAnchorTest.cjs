@@ -1,7 +1,7 @@
 /**
  * QA 回归测试：CoWatch 录制跨 ffmpeg 会话连续时间轴锚点逻辑
  *
- * 方式：用 CommonJS require 桩替换 electron / ffmpeg-static，加载**真实编译产物**
+ * 方式：用 CommonJS require 桩替换 electron，加载**真实编译产物**
  * electron/handlers/recorder/__qa__/build/shared.js（源自 shared.ts），
  * 直接调用 registerSessionAnchor / getOutputTsOffset / resetSessionAnchors，
  * 验证暂停截断分片后时间轴连续、无 7s 空洞（Bug #遮挡卡死+丢声 的治本修复）。
@@ -14,9 +14,9 @@ const path = require('path');
 const Module = require('module');
 
 // ─── 模块桩：让 shared.js 能在 Node 下被 require ───────────────────────────────
-// shared.ts 顶部 import { app } from 'electron' 与 import ffmpegPath from 'ffmpeg-static'。
-// 锚点函数本身不触碰这两者（getFfmpegPath 仅在 spawnFfmpeg/transcode 时调用），
-// 但 require 解析需要这两个模块存在。
+// shared.ts 顶部 import { app } from 'electron'。
+// 锚点函数本身不触碰 electron（getFfmpegPath 仅在 spawnFfmpeg/transcode 时调用），
+// 但 require 解析需要该模块存在。
 const electronStub = {
   app: {
     isPackaged: false,
@@ -25,12 +25,10 @@ const electronStub = {
   },
   desktopCapturer: { getSources: async () => [] },
 };
-const ffmpegStaticStub = '/fake/ffmpeg';
 
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (request === 'electron') return electronStub;
-  if (request === 'ffmpeg-static') return ffmpegStaticStub;
   return origLoad.apply(this, arguments);
 };
 

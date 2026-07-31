@@ -5,7 +5,6 @@
 import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
-import ffmpegPath from 'ffmpeg-static';
 
 /** 每个 HLS 切片的目标时长（秒）——与后端 hlsService.ts 保持一致 */
 export const HLS_SEGMENT_DURATION = 10;
@@ -51,25 +50,30 @@ export function getOutputTsOffset(key: string): number {
 
 export function getFfmpegPath(): string {
   const binName = 'ffmpeg.exe';
+  const checked: string[] = [];
   if (app.isPackaged) {
     const bundledPath = path.join(process.resourcesPath ?? '', 'bin', binName);
+    checked.push(bundledPath);
     if (fs.existsSync(bundledPath)) return bundledPath;
   } else {
     // 开发/预览模式：优先使用源码目录 electron/bin/ 下的 ffmpeg.exe
     // 该目录与 electron-builder.yml 的 extraResources.from 保持一致，
     // 避免 preview 模式因未走 electron-builder 而找不到正确版本。
     const sourceBinPath = path.join(app.getAppPath(), 'electron', 'bin', binName);
+    checked.push(sourceBinPath);
     if (fs.existsSync(sourceBinPath)) return sourceBinPath;
 
     // 兼容旧路径：项目根目录 bin/ffmpeg.exe
     const legacyBinPath = path.join(__dirname, '..', '..', 'bin', binName);
+    checked.push(legacyBinPath);
     if (fs.existsSync(legacyBinPath)) return legacyBinPath;
   }
 
-  // 降级：用 ffmpeg-static
-  let raw = ffmpegPath as string;
-  if (app.isPackaged) {
-    return raw.replace('app.asar', 'app.asar.unpacked');
-  }
-  return raw;
+  // fail-fast：bin/ffmpeg.exe 不存在时抛错，不静默降级。
+  // 旧版曾降级到 ffmpeg-static，但 ffmpeg-static 不含 ddagrab/gfxcapture，
+  // screen 录制必失败，故改为显式报错。
+  throw new Error(
+    `[shared] ffmpeg.exe 未找到。已检查路径：${checked.join(' | ')}。` +
+      `请将 gyan.dev full build 的 ffmpeg.exe 放入 electron/bin/（dev）或检查 extraResources 打包（packaged）。`,
+  );
 }
