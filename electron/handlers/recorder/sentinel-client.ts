@@ -3,23 +3,21 @@
  *
  * 职责：
  *   - 定位并拉起 Python 哨兵（electron/bin/window_sentinel.exe）
- *   - 解析其 stdout 行协议（PAUSE / RESUME / STOP / NOT_FOUND）
+ *   - 解析其 stdout 行协议（STOP / NOT_FOUND）
  *   - 将协议事件分发到协调层回调
  *   - exe 缺失 / spawn 失败 → 触发 onNotFound 兜底（绝不阻塞录制流程）
  *
- * 行协议（与 T1 实测一致）：
- *   PAUSE MINIMIZED         → 最小化暂停
- *   PAUSE FOREGROUND_LOST   → 切走 / alt+tab 暂停
- *   RESUME                  → 恢复
- *   STOP MOVED              → 窗口移动（去抖）→ 干净结束
+ * 行协议（哨兵越权整改后，仅 DESTROY 探测）：
  *   STOP CLOSED             → 窗口关闭 / 销毁 → 干净结束
- *   NOT_FOUND               → 标题未匹配窗口 → 兜底
+ *   NOT_FOUND               → 未找到目标窗口 → 兜底
  *   进程退出码 0 正常
  *
  * 注（T01 / feat/obs-wgc-capture）：本文件自 exp/ddagrab-crop-window 移植。
- * sentinel 仅作为「窗口事件探测器」与捕获源解耦——它只负责检测移动/关闭/最小化/切走
+ * sentinel 仅作为「窗口事件探测器」与捕获源解耦——它只负责检测窗口销毁
  * 并发出回调，捕获源启动（OBS WGC exe）留待 T06 实现。
  * 注：RECT/crop 协议已随 ddagrab+crop 方案废弃删除（被 OBS WGC 方案取代）。
+ *   PAUSE/RESUME/STOP MOVED 协议已随哨兵越权整改删除（2026-08-01），
+ *   最小化/失焦/移动由 OBS wc_tick 原生处理，CoWatch 不再 kill+restart exe。
  */
 
 import fs from 'fs';
@@ -27,15 +25,11 @@ import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { app } from 'electron';
 
-import type { PauseReason, StopReason } from './recording/types';
+import type { StopReason } from './recording/types';
 
 /** 哨兵事件回调集合。 */
 export interface SentinelCallbacks {
-  /** 收到 PAUSE → 暂停（最小化 / 切走；方案 C 加固后切走仅在 500ms 去抖超时且非无关注窗口时触发）。 */
-  onPause?: (reason: PauseReason) => void;
-  /** 收到 RESUME → 恢复。 */
-  onResume?: () => void;
-  /** 收到 STOP → 干净结束录制（MOVED / CLOSED）。 */
+  /** 收到 STOP CLOSED → 干净结束录制。 */
   onStop?: (reason: StopReason) => void;
   /** 未匹配窗口 / exe 缺失 / 启动失败 → 走 gfxcapture 兜底。 */
   onNotFound?: () => void;
@@ -71,14 +65,10 @@ let callbacks: SentinelCallbacks = {};
  * 启动哨兵并监听其 stdout 行协议。
  * @param hwnd 目标窗口 HWND（十进制，字符串或数字均可；下传时 String()）。CoWatch 从 sourceId 中段直取。
  * @param cbs 事件回调。
- * @param opts 可选参数：
- *   - ignorePids：需忽略前台事件的进程 pid 列表（传给哨兵 --ignore-pid），
- *     用于避免 CoWatch 自身窗口 / 渲染进程短暂抢焦点被误判为切走。
  */
 export function startSentinel(
   hwnd: number | string,
   cbs: SentinelCallbacks,
-  opts?: { ignorePids?: number[] },
 ): void {
   callbacks = cbs;
   stopped = false;
@@ -92,14 +82,9 @@ export function startSentinel(
     return;
   }
 
-  // 将 ignorePids 展开为 --ignore-pid N 参数（方案 C：加固哨兵，避免自身窗口误暂停）
-  const ignoreArgs: string[] = (opts?.ignorePids ?? []).flatMap((pid) => [
-    '--ignore-pid', String(pid),
-  ]);
-
   let proc: ChildProcess;
   try {
-    proc = spawn(exePath, [String(hwnd), ...ignoreArgs], { stdio: ['ignore', 'pipe', 'pipe'] });
+    proc = spawn(exePath, [String(hwnd)], { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (err) {
     // 同步 spawn 失败（极少见）→ 兜底
     sentinelProc = null;
@@ -169,28 +154,9 @@ export function stopSentinel(): void {
 function handleLine(line: string): void {
   callbacks.onLog?.(`[sentinel] ${line}`);
 
-  if (line.startsWith('PAUSE')) {
-    if (line.includes('MINIMIZED')) {
-      callbacks.onPause?.('MINIMIZED');
-    } else {
-      // 含 FOREGROUND_LOST 或无细分 → 统一按 FOREGROUND_LOST
-      callbacks.onPause?.('FOREGROUND_LOST');
-    }
-    return;
-  }
-
-  if (line.startsWith('RESUME')) {
-    callbacks.onResume?.();
-    return;
-  }
-
   if (line.startsWith('STOP')) {
-    if (line.includes('CLOSED')) {
-      callbacks.onStop?.('CLOSED');
-    } else {
-      // 含 MOVED 或无细分 → 默认 MOVED
-      callbacks.onStop?.('MOVED');
-    }
+    // 哨兵越权整改后仅剩 STOP CLOSED（窗口销毁）；其余 STOP 细分已删除
+    callbacks.onStop?.('CLOSED');
     return;
   }
 

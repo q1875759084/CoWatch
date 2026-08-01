@@ -4,14 +4,13 @@
  * 职责（重构后）：
  *   - 编码器检测（h264_nvenc → h264_amf → h264_qsv → libx264 兜底）
  *   - 窗口/整屏列表获取
- *   - 协调三层：recording / transcoding / upload
+ *   - 协调两层：recording / upload（window/screen 均走 window_capture.exe 直出 HLS）
  *   - 录制开始/停止生命周期管理
- *   - 切片文件监听（委托 transcoding 层）
+ *   - 切片文件监听（chokidar 监听成品 .ts → upload）
  *   - 录制结束调用 /recording/finish 接口
  *
- * 三层架构：
- *   recording/  → FFmpeg 录制，管理临时目录
- *   transcoding/ → 逐片转码（chokidar 监听 → 串行转码队列）
+ * 两层架构：
+ *   recording/  → window_capture.exe 录制（WGC+NVENC+HLS 一体），管理临时目录
  *   upload/      → 串行上传队列 + 指数退避
  *
  * IPC 通道（ipcMain.handle / webContents.send）：
@@ -40,8 +39,6 @@ import {
   setEncoderInfo,
   getTmpDir,
   isRecording,
-  pauseRecording,
-  resumeRecording,
   type RecordingCallbacks,
 } from './recording';
 
@@ -50,13 +47,6 @@ import { startSentinel, stopSentinel } from './sentinel-client';
 import { makeDefaultProfiles } from './recording/profiles';
 
 import { HLS_SEGMENT_DURATION } from './shared';
-
-import {
-  startTranscodingWatcher,
-  stopTranscodingWatcher,
-  enqueueExistingRawFiles,
-  waitForTranscodeQueue,
-} from './transcoding';
 
 import {
   initUploader,
@@ -305,8 +295,6 @@ async function start(
     const hwnd = windowId.split(':')[1];
     startSentinel(hwnd, {
       onNotFound: () => { /* 由 exe 兜底或 sentinel 触发停止，无需此处动作 */ },
-      onPause: (reason) => { pauseRecording(reason); },
-      onResume: () => { void resumeRecording(); },
       onStop: (reason) => {
         console.log(`[recorder] sentinel 请求停止（${reason}），执行干净收尾`);
         BrowserWindow.getAllWindows().forEach((w) => {
@@ -318,7 +306,7 @@ async function start(
         console.log(`[recorder] sentinel 退出，code=${code}`);
       },
       onLog: (msg) => console.log(msg),
-    }, { ignorePids: [process.pid] });
+    });
 
     // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
     const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, hwnd, 30);
@@ -339,6 +327,7 @@ async function start(
           stats: false,
           rcMode,
           resolution,
+          captureMode: 'window',
         },
       },
       recordingCallbacks,
@@ -375,8 +364,8 @@ async function start(
     return;
   }
 
-  // screen 模式：保持 feat 基线原样（ddagrab 全屏，不调 sentinel、不调 Python）。
-  // ① 启动录制层
+  // screen 模式：复用 window_capture.exe（--capture-mode screen，无 hwnd），直出 HLS → upload（无 transcode）
+  const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, undefined, 30);
   await startRecording(
     {
       sessionId,
@@ -385,33 +374,26 @@ async function start(
       tmpDir,
       detectedEncoder,
       isSoftwareEncoder,
+      windowCapture: {
+        capture: profiles.capture,
+        encode: profiles.encode,
+        mux: profiles.mux,
+        audio: true,
+        muxTarget: 'file',
+        stats: false,
+        rcMode,
+        resolution,
+        captureMode: 'screen',
+      },
     },
     recordingCallbacks,
   );
   recordingLaunched = true;
 
-  // ② 启动转码层（chokidar 监听）
-  // 仅录制模式跳过转码层与上传层，仅保留本地切片（与 window 分支语义对齐）
+  // screen 模式：直接监听 tmpDir 成品切片进 upload（与 window 模式一致，无 transcode 层）
+  // 仅录制模式跳过上传监听与上传层初始化，仅保留本地切片
   if (!recordOnly) {
-    startTranscodingWatcher(
-      {
-        tmpDir,
-        detectedEncoder,
-        isSoftwareEncoder,
-      },
-      {
-        onTranscodeComplete: (transcodedPath) => {
-          // 转码完成 → 通知上传层
-          enqueueUpload(transcodedPath);
-        },
-        onTranscodeFailed: (rawPath) => {
-          // 转码失败 → 上传原始切片（降级策略 C）
-          enqueueRawUpload(rawPath);
-        },
-        onLog: (msg) => console.log(msg),
-        onProgress: () => pushProgress(),
-      },
-    );
+    startWindowUploadWatcher(tmpDir, recordingCallbacks);
 
     // ③ 启动上传层
     initUploader(
@@ -464,19 +446,11 @@ async function stop(): Promise<void> {
     hour: '2-digit', minute: '2-digit',
   }).replace(/\//g, '-')}`;
 
-  // ① 停止录制层（window: exe + ffmpeg-mux；screen: ffmpeg + audio_capture）
+  // ① 停止录制层（window/screen: window_capture.exe）
   await stopRecording();
 
   // window 模式：停止成品切片上传监听（无 transcode 层）
   await stopWindowUploadWatcher();
-
-  // ② 停止转码层监听（仅 screen 模式有转码层；window 模式跳过）
-  if (!currentSourceId.startsWith('window:')) {
-    await stopTranscodingWatcher();
-
-    // ②.5 等待转码队列排空（确保所有原始切片都被转码为 _opt.ts）
-    await waitForTranscodeQueue();
-  }
 
   if (!isRecordOnly) {
     // ③ 补传临时目录中遗漏的切片
@@ -623,10 +597,6 @@ async function handleFfmpegCrash(displayTitle: string): Promise<void> {
 
   // 重启录制层（-start_number 会自动从已有切片序号续接，不会覆盖）
   await restartRecording(displayTitle);
-
-  // 转码层 watcher 无需重启——它一直在监听同一个 tmpDir。
-  // 只需补扫 crash 期间可能遗漏的原始切片（chokidar awaitWriteFinish 可能漏掉崩溃时的半成品）。
-  enqueueExistingRawFiles(tmpDir);
 }
 
 // ─── window 模式成品切片上传监听（替代 transcode 层，直接进 upload）─────────────────

@@ -14,9 +14,9 @@ export const HLS_SEGMENT_DURATION = 10;
  * Windows：优先用项目自带的 ffmpeg.exe（确保 ddagrab/gfxcapture 支持）。
  */
 /**
- * 跨进程连续时间轴锚点（方案2a · window 模式 pause/resume 续录）。
+ * 跨进程连续时间轴锚点（方案2a · window 模式 crash 重启续录）。
  *
- * window 模式捕获源在 pause 时被整体终止（exe + ffmpeg-mux），resume 时以
+ * window 模式捕获源在 exe 崩溃重启时以
  * -start_number 续号重建，并登记锚点把续录会话映射到全局输出时间轴，
  * 保证 HLS 切片序号与时间戳连续（与 T01 实验版同构）。
  */

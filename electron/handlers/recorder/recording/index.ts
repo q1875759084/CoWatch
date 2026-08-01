@@ -5,10 +5,12 @@
  *   - window 源：spawn `window_capture.exe`（WGC + NVENC DX11 直送 + 内嵌 AAC + 内嵌 HLS 封装）
  *     → 等 READY → exe 直接写本地 HLS `.ts` 切片，由上传层 chokidar 监听目录进 upload 层
  *     （**去除 ffmpeg-mux 外部封装**，编码+封装都在 exe 内一体完成，无回读）。
- *   - screen 源：保持 feat 基线原样（ddagrab + audio_capture.exe 双进程 + 转码层），不改动。
+ *   - screen 源：复用 window_capture.exe（--capture-mode screen，无 hwnd），直出 HLS → upload（无 transcode）。
  *
- * pause/resume/stop + crash 重启 + 时间轴锚点沿用实验版语义；窗口模式 pause 即整体终止
- * exe（Windows 不支持 SIGSTOP），resume 以 -start_number 续号重建。
+ * stop + crash 重启 + 时间轴锚点沿用实验版语义；窗口模式录制执行由
+ * window_capture.exe + OBS wc_tick 原生处理（最小化/失焦/移动自动跳帧或照录）。
+ * CoWatch 仅在窗口销毁（STOP CLOSED）或 exe 崩溃（crash 看门狗）时介入。
+ * pause/resume 的 kill+restart 链路已随哨兵越权整改删除（2026-08-01）。
  */
 
 import fs from 'fs';
@@ -18,12 +20,9 @@ import { app } from 'electron';
 
 import { isWindowAlive } from '../window-watch';
 import {
-  getFfmpegPath,
-  HLS_SEGMENT_DURATION,
   registerSessionAnchor,
   getOutputTsOffset,
 } from '../shared';
-import type { PauseReason } from './types';
 import {
   buildExeArgs,
   type CaptureProfile,
@@ -45,6 +44,8 @@ export interface WindowCaptureConfig {
   rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
   /** 分辨率：720p（1280×720，默认）或 900p（1600×900），传给 window_capture.exe 的 --width/--height */
   resolution?: '720p' | '900p';
+  /** 捕获模式：window（默认）或 screen（全屏）。window_capture.exe 必填 CLI flag。 */
+  captureMode?: 'window' | 'screen';
 }
 
 export interface RecordingConfig {
@@ -70,9 +71,7 @@ export interface RecordingCallbacks {
 
 const MAX_CRASH_RESTARTS = 3;
 
-// ─── 模块级状态（screen 路径，保留不改）────────────────────────────────────
-let ffmpegProcess: ChildProcess | null = null;
-let audioCaptureProcess: ChildProcess | null = null;
+// ─── 模块级状态 ────────────────────────────────────────────────────────────────
 let tmpDir = '';
 let detectedEncoder = 'libx264';
 let isSoftwareEncoder = false;
@@ -82,14 +81,11 @@ let currentSourceId = '';
 let currentWindowTitle = '';
 let callbacks: RecordingCallbacks = {};
 
-// ─── 模块级状态（window 路径，方案2a 新增）──────────────────────────────────
+// ─── 模块级状态（window 路径，方案2a 新增）──────────────────────────────────────
 let captureProc: ChildProcess | null = null; // window_capture.exe
 let currentMuxProfile: MuxProfile | null = null;
 let lastCfg: RecordingConfig | null = null;
-let m_paused = false;
 let crashNotified = false; // window 模式：单次启动尝试内去重 crash 上报（防 close/error 双触发）
-let recordedSecondsAtPause = 0;
-let startOffsetForNextSession = 0;
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -104,7 +100,7 @@ export function getTmpDir(): string {
 
 export function isRecording(): boolean {
   if (isUserStopped) return false;
-  return ffmpegProcess !== null || captureProc !== null;
+  return captureProc !== null;
 }
 
 export async function startRecording(
@@ -120,13 +116,12 @@ export async function startRecording(
   currentSourceId = cfg.sourceId;
   currentWindowTitle = cfg.displayTitle;
 
-  if (currentSourceId.startsWith('window:')) {
-    // 窗口模式（方案2a）：spawn exe + 等 READY + spawn ffmpeg-mux
+  if (cfg.windowCapture) {
+    // window / screen 模式：spawn window_capture.exe（内嵌 HLS 封装，直接写本地 .ts 切片）
     await startWindowRecording(cfg, cbs);
   } else {
-    // screen 模式（feat 基线，原样保留）
-    ffmpegProcess = spawnFfmpeg();
-    attachFfmpegHandlers();
+    cbs.onLog?.('[recording] 缺少 windowCapture 配置，无法启动录制');
+    if (!crashNotified) { crashNotified = true; cbs.onCrash?.(cfg.displayTitle); }
   }
 
   cbs.onLog?.(`[recording] 录制启动成功，tmpDir=${tmpDir}`);
@@ -155,9 +150,8 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
   lastCfg = cfg;
-  const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution } = cfg.windowCapture;
+  const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution, captureMode } = cfg.windowCapture;
   currentMuxProfile = { ...mux };
-  m_paused = false;
 
   const exePath = getCaptureExePath();
   if (!exePath) {
@@ -166,7 +160,7 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
 
-  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice, rcMode, resolution });
+  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice, rcMode, resolution, captureMode });
   captureProc = spawn(exePath, exeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
 
   let buf = '';
@@ -241,55 +235,16 @@ function gracefulQuitWindow(): Promise<void> {
   });
 }
 
-// ─── 停止 / 重启 / 暂停 / 恢复 ──────────────────────────────────────────────────
+// ─── 停止 / 重启 ──────────────────────────────────────────────────────────────
 
 export async function stopRecording(): Promise<void> {
   if (isUserStopped) return;
   isUserStopped = true;
 
-  if (currentSourceId.startsWith('window:')) {
+  if (captureProc) {
     await gracefulQuitWindow();
     return;
   }
-
-  return new Promise((resolve) => {
-    if (ffmpegProcess) {
-      if (process.platform === 'win32') {
-        if (audioCaptureProcess) {
-          try { audioCaptureProcess.kill('SIGINT'); } catch (_) { /* ignore */ }
-          audioCaptureProcess = null;
-        }
-        setTimeout(() => {
-          ffmpegProcess?.stdin?.write('q');
-          ffmpegProcess?.stdin?.end();
-        }, 200);
-      } else {
-        ffmpegProcess.kill('SIGTERM');
-        if (audioCaptureProcess) {
-          try { audioCaptureProcess.kill('SIGTERM'); } catch (_) { /* ignore */ }
-          audioCaptureProcess = null;
-        }
-      }
-
-      ffmpegProcess.on('close', () => {
-        ffmpegProcess = null;
-        resolve();
-      });
-      setTimeout(() => {
-        try { ffmpegProcess?.kill('SIGKILL'); } catch (_) { /* ignore */ }
-        ffmpegProcess = null;
-        resolve();
-      }, 15_000);
-    } else {
-      if (audioCaptureProcess) {
-        try {
-          audioCaptureProcess.kill('SIGINT');
-        } catch (_) { /* ignore */ }
-        audioCaptureProcess = null;
-      }
-      resolve();
-    }
-  });
 }
 
 export async function restartRecording(displayTitle: string): Promise<void> {
@@ -300,7 +255,7 @@ export async function restartRecording(displayTitle: string): Promise<void> {
     return;
   }
 
-  if (currentSourceId.startsWith('window:') && lastCfg) {
+  if (lastCfg) {
     const nextSeg = getNextSegmentNumber();
     if (currentMuxProfile) currentMuxProfile.startNumber = nextSeg;
     registerSessionAnchor('window', {
@@ -312,69 +267,13 @@ export async function restartRecording(displayTitle: string): Promise<void> {
     void startWindowRecording(lastCfg, callbacks);
     return;
   }
-
-  // screen 路径（原样）
-  callbacks.onLog?.(`[recording] ffmpeg 崩溃，第 ${crashRestartCount} 次重启...`);
-  if (audioCaptureProcess) {
-    try {
-      audioCaptureProcess.kill('SIGINT');
-    } catch (_) { /* ignore */ }
-    audioCaptureProcess = null;
-  }
-  ffmpegProcess = spawnFfmpeg();
-  attachFfmpegHandlers();
-  callbacks.onLog?.(`[recording] FFmpeg 重启完成`);
 }
 
 export async function checkWindowAlive(sourceId: string): Promise<boolean> {
   return isWindowAlive(sourceId);
 }
 
-/**
- * 暂停录制。
- *  - window 模式：整体终止 exe（Windows 不支持 SIGSTOP），记录续录偏移，保留会话。
- *  - screen 模式：SIGSTOP 挂起 ffmpeg（原样）。
- */
-export function pauseRecording(reason: PauseReason): void {
-  callbacks.onLog?.(`[recording] 暂停录制（${reason}）`);
-  if (currentSourceId.startsWith('window:') && captureProc) {
-    recordedSecondsAtPause = getNextSegmentNumber() * (currentMuxProfile?.seg ?? HLS_SEGMENT_DURATION);
-    void gracefulQuitWindow();
-    m_paused = true;
-    return;
-  }
-  if (ffmpegProcess) {
-    try { ffmpegProcess.kill('SIGSTOP'); } catch (_) { /* ignore */ }
-  }
-}
-
-/**
- * 恢复录制。
- *  - window 模式：以 -start_number 续号重建 exe（音频随 exe 一起重启）。
- *  - screen 模式：SIGCONT（原样）。
- */
-export function resumeRecording(): void {
-  if (!currentSourceId.startsWith('window:')) {
-    if (ffmpegProcess) {
-      try { ffmpegProcess.kill('SIGCONT'); } catch (_) { /* ignore */ }
-    }
-    return;
-  }
-  if (!m_paused || !lastCfg) return;
-  callbacks.onLog?.('[recording] 恢复录制（重启 exe）');
-  const nextSeg = getNextSegmentNumber();
-  if (currentMuxProfile) currentMuxProfile.startNumber = nextSeg;
-  startOffsetForNextSession = recordedSecondsAtPause;
-  registerSessionAnchor('window', {
-    startSegmentNumber: nextSeg,
-    startOffsetSeconds: recordedSecondsAtPause,
-    registeredAt: Date.now(),
-  });
-  m_paused = false;
-  void startWindowRecording(lastCfg, callbacks);
-}
-
-// ─── screen 路径实现（feat 基线，原样保留）────────────────────────────────────
+// ─── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 /**
  * 扫描 tmpDir 中已有的 segNNN.ts 文件，返回下一个可用的切片序号。
@@ -394,136 +293,4 @@ function getNextSegmentNumber(): number {
   } catch {
     return 0;
   }
-}
-
-function getAudioCapturePath(): string | null {
-  const binName = 'audio_capture.exe';
-  if (app.isPackaged) {
-    const bundledPath = path.join(process.resourcesPath, 'bin', binName);
-    if (fs.existsSync(bundledPath)) return bundledPath;
-  } else {
-    // 开发/预览模式：使用项目源码目录 electron/bin/，与 getFfmpegPath 保持一致
-    const sourceBinPath = path.join(app.getAppPath(), 'electron', 'bin', binName);
-    if (fs.existsSync(sourceBinPath)) return sourceBinPath;
-  }
-  return null;
-}
-
-function spawnFfmpeg(): ChildProcess {
-  const ffmpeg = getFfmpegPath();
-  const maxWidth = isSoftwareEncoder ? 854 : 1280;
-  const segPattern = path.join(tmpDir, 'seg%03d.ts').replace(/\\/g, '/');
-  const m3u8Path = path.join(tmpDir, 'index.m3u8').replace(/\\/g, '/');
-  const winScaleFilter = `scale=w='min(iw\\,${maxWidth})':h=-2,format=yuv420p`;
-
-  let inputArgs: string[];
-  if (currentSourceId.startsWith('screen:')) {
-    const screenIdx = parseInt(currentSourceId.split(':')[1] || '0', 10);
-    inputArgs = [
-      '-f', 'lavfi',
-      '-i', `ddagrab=output_idx=${screenIdx}:framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
-    ];
-  } else {
-    const escapedTitle = currentWindowTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    inputArgs = [
-      '-f', 'lavfi',
-      '-i', `gfxcapture=window_title=${escapedTitle}:max_framerate=30,hwdownload,format=bgra,${winScaleFilter}`,
-    ];
-  }
-
-  let audioInputArgs: string[] = [];
-  let audioStreamArgs: string[] = [];
-  let audioEncodeArgs: string[] = ['-an'];
-  let mapArgs: string[] = [];
-  const audioCaptureBin = getAudioCapturePath();
-
-  if (audioCaptureBin) {
-    audioCaptureProcess = spawn(audioCaptureBin, [
-      '--sample-rate', '48000',
-      '--channels', '2',
-      '--bit-depth', '16',
-      '--chunk-duration', '0.1',
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    audioCaptureProcess.stderr?.on('data', (data: Buffer) => {
-      callbacks.onLog?.(`[audio_capture] ${data.toString().trim()}`);
-    });
-    audioCaptureProcess.on('close', (code: number | null) => {
-      if (!isUserStopped && code !== 0) {
-        callbacks.onLog?.('[recording] audio_capture 异常退出，后续录制静音');
-      }
-    });
-
-    audioInputArgs = ['-f', 's16le', '-ar', '48000', '-ac', '2', '-i', 'pipe:0'];
-    audioStreamArgs = ['-af', 'aresample=async=1:min_hard_comp=0.100:first_pts=0'];
-    audioEncodeArgs = ['-c:a', 'aac', '-b:a', '128k', '-strict', '-2'];
-    mapArgs = ['-map', '0:a', '-map', '1:v'];
-  }
-
-  let encodeArgs: string[];
-  if (isSoftwareEncoder) {
-    encodeArgs = ['-c:v', detectedEncoder, '-crf', '26', '-preset', 'veryfast'];
-  } else if (detectedEncoder === 'h264_nvenc') {
-    encodeArgs = ['-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '26', '-b:v', '0',
-                  '-preset', 'p4', '-tune', 'll', '-rc-lookahead', '0'];
-    // CQ 26 录制源质量，给转码层（CQ 30）留压缩空间
-    // NVENC 硬件编码速度不受 CQ 影响，代价仅是中间文件更大（用完即删）
-  } else if (detectedEncoder === 'h264_qsv') {
-    encodeArgs = ['-c:v', 'h264_qsv', '-global_quality', '26', '-look_ahead', '1'];
-  } else {
-    encodeArgs = ['-c:v', detectedEncoder, '-quality', 'quality'];
-  }
-
-  const platformVfArgs: string[] = ['-bf', '0'];
-
-  const args = [
-    ...audioInputArgs,
-    ...inputArgs,
-    ...platformVfArgs,
-    ...audioStreamArgs,
-    ...mapArgs,
-    ...encodeArgs,
-    ...audioEncodeArgs,
-    '-vsync', 'cfr', '-r', '30',
-    '-g', String(30 * HLS_SEGMENT_DURATION),
-    '-f', 'hls',
-    '-hls_time', String(HLS_SEGMENT_DURATION),
-    '-hls_list_size', '0',
-    '-start_number', String(getNextSegmentNumber()),
-    '-hls_segment_filename', segPattern,
-    m3u8Path,
-  ];
-
-  callbacks.onLog?.(`[recording] 启动 ffmpeg：${args.join(' ')}`);
-
-  const proc = spawn(ffmpeg, args, { stdio: ['pipe', 'ignore', 'pipe'] });
-
-  if (audioCaptureProcess) {
-    const stdout = audioCaptureProcess.stdout;
-    if (stdout) {
-      stdout.pipe(proc.stdin);
-    }
-    proc.stdin?.on('error', (err: NodeJS.ErrnoException) => {
-      if (err.code !== 'EPIPE' && !err.message.includes('ERR_STREAM_WRITE_AFTER_END')) {
-        callbacks.onLog?.(`[recording] audio_capture pipe error: ${err.message}`);
-      }
-    });
-  }
-
-  proc.stderr?.on('data', (chunk: Buffer) => {
-    process.stdout.write('[ffmpeg] ' + chunk.toString());
-  });
-
-  return proc;
-}
-
-function attachFfmpegHandlers(): void {
-  ffmpegProcess?.on('close', (code: number | null) => {
-    if (isUserStopped) {
-      callbacks.onLog?.(`[recording] ffmpeg 正常退出，code=${code}`);
-      return;
-    }
-    callbacks.onLog?.(`[recording] ffmpeg 异常退出，code=${code}`);
-    callbacks.onCrash?.(currentWindowTitle);
-  });
 }

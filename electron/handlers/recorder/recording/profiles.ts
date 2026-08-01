@@ -56,6 +56,8 @@ export interface WindowSpawnOptions {
   rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
   /** 分辨率：720p（1280×720，默认）或 900p（1600×900），传给 window_capture.exe 的 --width/--height，并决定 VBR 均值/峰值 */
   resolution?: '720p' | '900p';
+  /** 捕获模式：window（默认，需传 hwnd）或 screen（全屏，不传 hwnd）。window_capture.exe 必填 CLI flag。 */
+  captureMode?: 'window' | 'screen';
 }
 
 /**
@@ -70,6 +72,9 @@ export function buildExeArgs(
 ): string[] {
   // enc 字段预留给后续按 GPU 占用单独调参的入口；当前录制质量一律走 exe 默认值，不下传。
   const args: string[] = [];
+
+  // 捕获模式（必填 CLI flag）：window（默认）或 screen（全屏，无 hwnd）
+  args.push('--capture-mode', opts.captureMode ?? 'window');
 
   // 窗口定位（三选一必填，无默认值；hwnd > window > pid）
   if (cap.hwnd != null) {
@@ -130,7 +135,7 @@ export function buildExeArgs(
 export function makeDefaultProfiles(
   detectedEncoder: string,
   tmpDir: string,
-  hwnd: number | string,
+  hwnd?: number | string,
   fps = 30,
 ): { capture: CaptureProfile; encode: EncodeProfile; mux: MuxProfile } {
   const codec: CaptureCodec = detectedEncoder.includes('hevc')
@@ -139,7 +144,7 @@ export function makeDefaultProfiles(
 
   return {
     capture: {
-      hwnd,
+      ...(hwnd != null ? { hwnd } : {}),
       fps,
       cursor: true,
     },

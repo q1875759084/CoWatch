@@ -10,8 +10,5 @@
  * 无关，切勿混淆，也不要改动 src/ 下的类型。
  */
 
-/** 暂停原因（来自 sentinel PAUSE 协议）。 */
-export type PauseReason = 'MINIMIZED' | 'FOREGROUND_LOST';
-
-/** 自动结束原因（来自 sentinel STOP 协议；move/close → stop 收尾）。 */
-export type StopReason = 'MOVED' | 'CLOSED';
+/** 自动结束原因（来自 sentinel STOP CLOSED 协议）。 */
+export type StopReason = 'CLOSED';
