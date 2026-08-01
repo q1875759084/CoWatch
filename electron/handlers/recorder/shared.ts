@@ -10,18 +10,14 @@ import { app } from 'electron';
 export const HLS_SEGMENT_DURATION = 10;
 
 /**
- * 解析 FFmpeg 可执行文件路径。
- * Windows：优先用项目自带的 ffmpeg.exe（确保 ddagrab/gfxcapture 支持）。
- */
-/**
  * 跨进程连续时间轴锚点（方案2a · window 模式 crash 重启续录）。
  *
- * window 模式捕获源在 exe 崩溃重启时以
- * -start_number 续号重建，并登记锚点把续录会话映射到全局输出时间轴，
+ * exe 崩溃重启时登记锚点，把续录会话映射到全局输出时间轴，
  * 保证 HLS 切片序号与时间戳连续（与 T01 实验版同构）。
+ * 注：续号尚未下传 exe（exe 当前硬编码 start_number=1），待 --start-number 决策补全。
  */
 export interface SessionAnchor {
-  /** 续录会话的起始切片序号（ffmpeg-mux -start_number）。 */
+  /** 续录会话的起始切片序号（待 --start-number 决策后下传 exe）。 */
   startSegmentNumber: number;
   /** 续录会话在输出时间轴上的偏移（秒）。 */
   startOffsetSeconds: number;
@@ -33,14 +29,6 @@ const sessionAnchors = new Map<string, SessionAnchor>();
 
 export function registerSessionAnchor(key: string, anchor: SessionAnchor): void {
   sessionAnchors.set(key, anchor);
-}
-
-export function resetSessionAnchors(): void {
-  sessionAnchors.clear();
-}
-
-export function getSessionAnchor(key: string): SessionAnchor | undefined {
-  return sessionAnchors.get(key);
 }
 
 /** 取某锚点的输出时间轴偏移（秒）；无锚点返回 0。 */

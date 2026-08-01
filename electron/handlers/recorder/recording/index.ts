@@ -26,7 +26,6 @@ import {
 import {
   buildExeArgs,
   type CaptureProfile,
-  type EncodeProfile,
   type MuxProfile,
 } from './profiles';
 
@@ -34,7 +33,6 @@ import {
 
 export interface WindowCaptureConfig {
   capture: CaptureProfile;
-  encode: EncodeProfile;
   mux: MuxProfile;
   audio: boolean;
   audioDevice?: string;
@@ -83,7 +81,6 @@ let callbacks: RecordingCallbacks = {};
 
 // ─── 模块级状态（window 路径，方案2a 新增）──────────────────────────────────────
 let captureProc: ChildProcess | null = null; // window_capture.exe
-let currentMuxProfile: MuxProfile | null = null;
 let lastCfg: RecordingConfig | null = null;
 let crashNotified = false; // window 模式：单次启动尝试内去重 crash 上报（防 close/error 双触发）
 
@@ -150,8 +147,7 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
   lastCfg = cfg;
-  const { capture, encode, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution, captureMode } = cfg.windowCapture;
-  currentMuxProfile = { ...mux };
+  const { capture, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution, captureMode } = cfg.windowCapture;
 
   const exePath = getCaptureExePath();
   if (!exePath) {
@@ -160,7 +156,7 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     return;
   }
 
-  const exeArgs = buildExeArgs(capture, encode, currentMuxProfile, { muxTarget, stats, audio, audioDevice, rcMode, resolution, captureMode });
+  const exeArgs = buildExeArgs(capture, mux, { muxTarget, stats, audio, audioDevice, rcMode, resolution, captureMode });
   captureProc = spawn(exePath, exeArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
 
   let buf = '';
@@ -206,8 +202,6 @@ function handleCaptureLine(line: string, cfg: RecordingConfig, cbs: RecordingCal
   }
   if (msg.type === 'READY') {
     cbs.onLog?.(`[recording] capture READY w=${msg.w} h=${msg.h} fps=${msg.fps} codec=${msg.codec} hasAudio=${String(msg.hasAudio)}`);
-    // 以 exe 实际音频能力为准更新 mux profile（仅用于 crash 续录锚点续号，不影响 exe 内封装）。
-    if (currentMuxProfile) currentMuxProfile.hasAudio = !!msg.hasAudio;
   } else if (msg.type === 'CLOSED') {
     cbs.onLog?.(`[recording] capture CLOSED reason=${msg.reason}`);
     if (msg.reason === 'window_closed') cbs.onShouldStop?.();
@@ -257,7 +251,6 @@ export async function restartRecording(displayTitle: string): Promise<void> {
 
   if (lastCfg) {
     const nextSeg = getNextSegmentNumber();
-    if (currentMuxProfile) currentMuxProfile.startNumber = nextSeg;
     registerSessionAnchor('window', {
       startSegmentNumber: nextSeg,
       startOffsetSeconds: getOutputTsOffset('window'),

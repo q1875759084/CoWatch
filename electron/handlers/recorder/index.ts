@@ -309,7 +309,7 @@ async function start(
     });
 
     // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
-    const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, hwnd, 30);
+    const profiles = makeDefaultProfiles(tmpDir, hwnd, 30);
     await startRecording(
       {
         sessionId,
@@ -320,7 +320,6 @@ async function start(
         isSoftwareEncoder,
         windowCapture: {
           capture: profiles.capture,
-          encode: profiles.encode,
           mux: profiles.mux,
           audio: true,
           muxTarget: 'file', // 生产态：exe 内 ffmpeg_muxer 直接写本地 HLS .ts
@@ -365,7 +364,7 @@ async function start(
   }
 
   // screen 模式：复用 window_capture.exe（--capture-mode screen，无 hwnd），直出 HLS → upload（无 transcode）
-  const profiles = makeDefaultProfiles(detectedEncoder, tmpDir, undefined, 30);
+  const profiles = makeDefaultProfiles(tmpDir, undefined, 30);
   await startRecording(
     {
       sessionId,
@@ -376,7 +375,6 @@ async function start(
       isSoftwareEncoder,
       windowCapture: {
         capture: profiles.capture,
-        encode: profiles.encode,
         mux: profiles.mux,
         audio: true,
         muxTarget: 'file',

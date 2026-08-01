@@ -1,19 +1,15 @@
 /**
  * profiles.ts — 捕获 / 编码 / 封装 配置集中注入（方案2a §1.5）
  *
- * 主进程（coordinator）集中维护 CaptureProfile / EncodeProfile / MuxProfile，
+ * 主进程（coordinator）集中维护 CaptureProfile / MuxProfile，
  * 按硬件/模式下发给 window_capture.exe（exe 内一体编码 + HLS 封装），
  * 不写死、不开放终端用户。本文件提供：
- *   - 三套 Profile 类型
+ *   - 两套 Profile 类型
  *   - buildExeArgs()：展开为 window_capture.exe CLI
  *   - makeDefaultProfiles()：按检测结果产出默认配置
  *
- * 与 OBS「UI 改参、CoWatch 由主进程注入」一致。所有质量/码率均来自此处，exe 不硬编码。
+ * 与 OBS「UI 改参、CoWatch 由主进程注入」一致。捕获/封装参数由主进程注入；录制质量（码率/预设/GOP）走 exe 默认值，不下传。
  */
-
-import { HLS_SEGMENT_DURATION } from '../shared';
-
-export type CaptureCodec = 'h264_nvenc' | 'hevc_nvenc';
 
 /** 窗口定位（优先级：hwnd > window > pid，exe 内部裁决；title 仅用于 crash 日志，不进 CLI）。 */
 export interface CaptureProfile {
@@ -28,23 +24,9 @@ export interface CaptureProfile {
   cursor?: boolean;
 }
 
-/** 视频编码（NVENC，DX11 直送，不回读）。 */
-export interface EncodeProfile {
-  codec: CaptureCodec;
-  bitrate: number; // bps（CBR）
-  bf: number;
-  rcLookahead: number;
-  preset: string; // p1..p7
-  gop: number; // = hls_time × fps
-}
-
-/** 封装（ffmpeg-mux 仅封装压缩流）。 */
+/** 封装（exe 内 ffmpeg_muxer 直接写本地 HLS .ts；CoWatch 仅传输出目录）。 */
 export interface MuxProfile {
   outDir: string;
-  seg: number; // 秒
-  startNumber: number; // 续录续号
-  codec: CaptureCodec; // 决定 ffmpeg -f h264/hevc
-  hasAudio: boolean;
 }
 
 export interface WindowSpawnOptions {
@@ -66,11 +48,9 @@ export interface WindowSpawnOptions {
  */
 export function buildExeArgs(
   cap: CaptureProfile,
-  enc: EncodeProfile,
   mux: MuxProfile,
   opts: WindowSpawnOptions,
 ): string[] {
-  // enc 字段预留给后续按 GPU 占用单独调参的入口；当前录制质量一律走 exe 默认值，不下传。
   const args: string[] = [];
 
   // 捕获模式（必填 CLI flag）：window（默认）或 screen（全屏，无 hwnd）
@@ -127,41 +107,23 @@ export function buildExeArgs(
 
 /**
  * 按检测结果产出 window 模式默认 Profile 集合。
- * @param detectedEncoder 主进程检测的编码器（h264_nvenc/hevc_nvenc/...）
  * @param tmpDir           HLS 输出目录
  * @param hwnd            目标窗口 HWND（十进制，主契约；string 或 number 皆可）
  * @param fps             目标帧率
  */
 export function makeDefaultProfiles(
-  detectedEncoder: string,
   tmpDir: string,
   hwnd?: number | string,
   fps = 30,
-): { capture: CaptureProfile; encode: EncodeProfile; mux: MuxProfile } {
-  const codec: CaptureCodec = detectedEncoder.includes('hevc')
-    ? 'hevc_nvenc'
-    : 'h264_nvenc';
-
+): { capture: CaptureProfile; mux: MuxProfile } {
   return {
     capture: {
       ...(hwnd != null ? { hwnd } : {}),
       fps,
       cursor: true,
     },
-    encode: {
-      codec,
-      bitrate: 8_000_000, // 8 Mbps CBR（可承受上行，应用层 throttle 限速）
-      bf: 2, // 窗口模式编码在 GPU 内，可安全用 B 帧
-      rcLookahead: 20,
-      preset: 'p4',
-      gop: HLS_SEGMENT_DURATION * fps, // 关键帧对齐切片
-    },
     mux: {
       outDir: tmpDir,
-      seg: HLS_SEGMENT_DURATION,
-      startNumber: 0,
-      codec,
-      hasAudio: true,
     },
   };
 }
