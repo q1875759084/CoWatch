@@ -288,18 +288,14 @@ async function start(
     sentinelActive = true;
     const hwnd = windowId.split(':')[1];
     startSentinel(hwnd, {
-      onNotFound: () => { /* 由 exe 兜底或 sentinel 触发停止，无需此处动作 */ },
-      onStop: (reason) => {
-        console.log(`[recorder] sentinel 请求停止（${reason}），执行干净收尾`);
-        BrowserWindow.getAllWindows().forEach((w) => {
-          w.webContents.send('recorder:stopped');
-        });
-        void stop();
-      },
-      onExit: (code) => {
-        console.log(`[recorder] sentinel 退出，code=${code}`);
-      },
-      onLog: (msg) => console.log(msg),
+      // 未匹配窗口 / exe 缺失 / 启动失败：由 window_capture.exe 兜底，无需此处动作
+      onNotFound: () => {},
+      // 窗口销毁：window_capture.exe 的 OBS wc_tick 会静默重连，CoWatch 不主动介入。
+      // 后续如需埋点/日志上报，在此添加上报函数。
+      onStop: (_reason) => {},
+      // sentinel 进程退出：无需动作（stopSentinel 后正常退出，异常退出由 onLog 记录）
+      onExit: (_code) => {},
+      onLog: (_msg) => {},
     });
 
     // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
