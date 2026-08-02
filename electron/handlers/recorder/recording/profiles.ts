@@ -8,7 +8,7 @@
  *   - buildExeArgs()：展开为 window_capture.exe CLI
  *   - makeDefaultProfiles()：按检测结果产出默认配置
  *
- * 与 OBS「UI 改参、CoWatch 由主进程注入」一致。捕获/封装参数由主进程注入；录制质量（码率/预设/GOP）走 exe 默认值，不下传。
+ * 与 OBS「UI 改参、CoWatch 由主进程注入」一致。捕获/封装参数由主进程注入；录制预设（--nvenc-preset p4）显式下传，其余 NVENC 参数（multipass/tune/bf/lookahead）暂走 exe 内部默认。
  */
 
 /** 窗口定位（优先级：hwnd > window > pid，exe 内部裁决；title 仅用于 crash 日志，不进 CLI）。 */
@@ -94,6 +94,10 @@ export function buildExeArgs(
     args.push('--vbr-bitrate', String(vbr.bitrate));
     args.push('--vbr-max-bitrate', String(vbr.maxBitrate));
   }
+
+  // NVENC 预设：显式下传 p4（ME 搜索范围中等），覆盖 exe 默认 p6/VBR 改写 p5。
+  // 其他 NVENC 参数（multipass/tune/bf/lookahead）暂走 exe 内部默认，后续单独改 window_capture。
+  args.push('--nvenc-preset', 'p4');
 
   // 诊断（可选）：capture/encode/gpu 占用，供后续按 GPU 调参
   if (opts.stats === true) args.push('--stats');

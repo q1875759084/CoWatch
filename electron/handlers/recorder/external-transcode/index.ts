@@ -197,9 +197,11 @@ function buildFfmpegArgs(cfg: ExternalTranscodeConfig): string[] {
   if (isSoft) {
     videoArgs = ['-c:v', encoder, '-crf', '30', '-preset', 'medium'];
   } else if (encoder === 'h264_nvenc') {
+    // CQ 模式（VBR with target quality）：-cq 强制 averageBitRate/vbvBufferSize 清零，
+    // 仅 -maxrate 生效用于约束瞬时码率。preset p4 自带 bf≈3/profile=Main/tune=hq。
     videoArgs = [
-      '-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '30', '-b:v', '0',
-      '-preset', 'p5', '-bf', '2', '-rc-lookahead', '20',
+      '-c:v', 'h264_nvenc', '-rc', 'vbr', '-cq', '28', '-b:v', '0',
+      '-preset', 'p4', '-maxrate', '15M',
     ];
   } else if (encoder === 'h264_qsv') {
     videoArgs = [
