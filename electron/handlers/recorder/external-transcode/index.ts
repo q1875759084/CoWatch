@@ -3,7 +3,7 @@
  *
  * 职责：
  *   - 构建 FFmpeg 命令（编码器自适应，参数与 transcoding 层对齐，见 design.md §4.1）
- *   - spawn FFmpeg，输出 HLS 分段（seg%03d_opt.ts）到指定目录
+ *   - spawn FFmpeg，输出 HLS 分段（seq%05d.ts）到指定目录
  *   - chokidar 监听输出目录，新分段出现时回调 onSegmentReady → 对接 upload 层
  *   - 解析 FFmpeg stderr 获取时长/进度 → 回调 onProgress
  *
@@ -17,6 +17,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import chokidar from 'chokidar';
 
 import { getFfmpegPath, HLS_SEGMENT_DURATION } from '../shared';
+import { SEGMENT_PATTERN } from '../shared/segment-naming';
 import type { ExternalTranscodeProgress } from '../../../../src/types/recorder';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ export function startExternalTranscode(
   });
 
   watcher.on('add', (filePath: string) => {
-    if (!filePath.endsWith('_opt.ts')) return;
+    if (!filePath.endsWith('.ts') || !/^seq\d+\.ts$/.test(path.basename(filePath))) return;
     if (detectedFiles.has(filePath)) return;
     detectedFiles.add(filePath);
     segOrder.push(filePath);
@@ -188,7 +189,7 @@ export function getExternalTranscodeState(): { active: boolean; outputDir: strin
 function buildFfmpegArgs(cfg: ExternalTranscodeConfig): string[] {
   const encoder = cfg.detectedEncoder;
   const isSoft = cfg.isSoftwareEncoder;
-  const segPattern = path.join(cfg.outputDir, 'seg%03d_opt.ts').replace(/\\/g, '/');
+  const segPattern = path.join(cfg.outputDir, SEGMENT_PATTERN).replace(/\\/g, '/');
   const m3u8Path = path.join(cfg.outputDir, 'index.m3u8').replace(/\\/g, '/');
 
   // 视频编码参数（与 transcoding/index.ts 对齐）
@@ -267,14 +268,14 @@ function parseTime(text: string): number | null {
 // ─── 末段补扫 ─────────────────────────────────────────────────────────────────
 
 /**
- * FFmpeg 正常退出后，扫描输出目录中未被 chokidar 检测到的 _opt.ts 文件。
+ * FFmpeg 正常退出后，扫描输出目录中未被 chokidar 检测到的 seq*.ts 文件。
  * 处理场景：FFmpeg 写入最后一段后立即退出，chokidar awaitWriteFinish 可能尚未触发。
  */
 function scanRemainingSegments(dir: string): void {
   try {
     const files = fs.readdirSync(dir);
     for (const f of files) {
-      if (!f.endsWith('_opt.ts')) continue;
+      if (!/^seq\d+\.ts$/.test(f)) continue;
       const filePath = path.join(dir, f);
       if (detectedFiles.has(filePath)) continue;
       detectedFiles.add(filePath);

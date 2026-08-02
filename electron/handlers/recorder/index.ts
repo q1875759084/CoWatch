@@ -92,7 +92,7 @@ const ENCODER_CANDIDATES = ['h264_nvenc', 'h264_amf', 'h264_qsv', 'libx264'] as 
 
 /** 当前会话 ID，录制开始时生成，结束后清空 */
 let sessionId = '';
-/** 录制临时目录（存放 ffmpeg 生成的 seg*.ts 和转码后的 seg*_opt.ts） */
+/** 录制临时目录（存放 window_capture.exe 生成的 seq*.ts 切片） */
 let tmpDir = '';
 /** 计时器：每秒推 recorder:tick */
 let tickTimer: ReturnType<typeof setInterval> | null = null;

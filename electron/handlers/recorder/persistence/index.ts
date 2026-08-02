@@ -13,6 +13,7 @@ import path from 'path';
 import { app, net } from 'electron';
 
 import { initUploader, doUpload, cleanupUploader } from '../upload';
+import { parseSegmentIndex } from '../shared/segment-naming';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -52,10 +53,6 @@ function getPendingDir(): string {
   return path.join(app.getPath('userData'), 'pending-uploads');
 }
 
-function parseSegmentIndex(fileName: string): number {
-  const m = fileName.match(/^seg(\d+)/);
-  return m ? parseInt(m[1], 10) : 0;
-}
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
 
