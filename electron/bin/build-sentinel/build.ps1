@@ -1,6 +1,6 @@
-# 打包 window_sentinel.py → electron/bin/window_sentinel.exe
-# 单文件 / 无控制台(--noconsole) / 禁用 UPX(--noupx，规避杀软误报)
-# 在 build-sentinel/ 目录执行，--distpath .. 使产物直接落到 electron/bin/
+# Build window_sentinel.py -> electron/bin/window_sentinel.exe
+# onefile / no console (--noconsole) / no UPX (--noupx to avoid AV false positives)
+# Run inside build-sentinel/, --distpath .. lands output in electron/bin/
 
 $ErrorActionPreference = "Stop"
 
@@ -8,13 +8,23 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Push-Location $ScriptDir
 
 try {
-    # 优先使用虚拟环境内的 pyinstaller；若不在 PATH 则回退到 python -m PyInstaller
-    $pyinstaller = "pyinstaller"
+    $pyi = "pyinstaller"
     if (-not (Get-Command pyinstaller -ErrorAction SilentlyContinue)) {
-        $pyinstaller = "python -m PyInstaller"
+        if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+            Write-Error "PyInstaller not found and 'python' is not on PATH. Install it with: pip install pyinstaller"
+            exit 1
+        }
+        $pyi = "python -m PyInstaller"
     }
 
-    Invoke-Expression "$pyinstaller -F --name window_sentinel --noconsole --noupx --distpath .. window_sentinel.py"
+    Write-Host "[build-sentinel] Using: $pyi"
+    Invoke-Expression "$pyi -F --name window_sentinel --noconsole --noupx --distpath .. window_sentinel.py"
+
+    if (-not (Test-Path "..\window_sentinel.exe")) {
+        Write-Error "Build completed but window_sentinel.exe was not produced."
+        exit 1
+    }
+    Write-Host "[build-sentinel] Success: ..\window_sentinel.exe"
 }
 finally {
     Pop-Location

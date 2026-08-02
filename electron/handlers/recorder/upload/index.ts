@@ -255,7 +255,7 @@ export function updateAuthToken(token: string): void {
  * 此函数在 Electron 主进程直接调用 /api/auth/refresh，
  * defaultSession 共享 renderer 的 HttpOnly refresh cookie。
  */
-async function refreshTokenFromMainProcess(): Promise<string | null> {
+export async function refreshTokenFromMainProcess(): Promise<string | null> {
   if (!config) return null;
 
   try {

@@ -62,6 +62,7 @@ import {
   getSegmentKeys,
   getUploadedCount,
   getAuthToken,
+  refreshTokenFromMainProcess,
 } from './upload';
 
 import {
@@ -676,7 +677,7 @@ export async function startExternalVideoTranscode(
 
   // ③ 初始化上传层
   initUploader(
-    { roomId, sessionId: extSessionId, authToken, apiOrigin, disableThrottle: true },
+    { roomId, sessionId: extSessionId, authToken, apiOrigin },
     {
       onProgress: () => pushExternalProgress(),
       onLog: (msg) => console.log(msg),
@@ -732,13 +733,14 @@ async function handleExternalTranscodeComplete(
   const keys = getSegmentKeys();
   if (keys.length > 0) {
     try {
+      const finishToken = getAuthToken();
       const response = await net.fetch(
         `${apiOrigin}/api/rooms/${roomId}/recording/finish`,
         {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {}),
+            ...(finishToken ? { 'Authorization': `Bearer ${finishToken}` } : {}),
           },
           body: JSON.stringify({
             segmentKeys: keys,
@@ -750,7 +752,35 @@ async function handleExternalTranscodeComplete(
       );
 
       if (!response.ok) {
-        console.error(`[recorder] 外部转码 finish 接口失败：HTTP ${response.status}`);
+        if (response.status === 401) {
+          // token 可能过期：复用上传层单点刷新（refreshTokenFromMainProcess 会更新 config.authToken），重试一次
+          const refreshed = await refreshTokenFromMainProcess();
+          if (refreshed) {
+            const retryResp = await net.fetch(
+              `${apiOrigin}/api/rooms/${roomId}/recording/finish`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${refreshed}`,
+                },
+                body: JSON.stringify({
+                  segmentKeys: keys,
+                  displayName: `外部视频 ${new Date().toLocaleString('zh-CN')}`,
+                  durationSeconds: keys.length * HLS_SEGMENT_DURATION,
+                }),
+                duplex: 'half',
+              } as RequestInit,
+            );
+            if (!retryResp.ok) {
+              console.error(`[recorder] 外部转码 finish 重试仍失败：HTTP ${retryResp.status}`);
+            }
+          } else {
+            console.error('[recorder] 外部转码 finish 刷新 token 失败，放弃收尾');
+          }
+        } else {
+          console.error(`[recorder] 外部转码 finish 接口失败：HTTP ${response.status}`);
+        }
       }
     } catch (err) {
       console.error('[recorder] 外部转码 finish 接口异常：', (err as Error).message);

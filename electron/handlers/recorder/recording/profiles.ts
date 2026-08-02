@@ -21,7 +21,6 @@ export interface CaptureProfile {
   fps: number;
   w?: number;
   h?: number;
-  cursor?: boolean;
 }
 
 /** 封装（exe 内 ffmpeg_muxer 直接写本地 HLS .ts；CoWatch 仅传输出目录）。 */
@@ -30,7 +29,7 @@ export interface MuxProfile {
 }
 
 export interface WindowSpawnOptions {
-  muxTarget: 'pipe' | 'file' | 'null';
+  muxTarget: 'file' | 'null';
   stats: boolean;
   audio: boolean;
   audioDevice?: string;
@@ -120,7 +119,6 @@ export function makeDefaultProfiles(
     capture: {
       ...(hwnd != null ? { hwnd } : {}),
       fps,
-      cursor: true,
     },
     mux: {
       outDir: tmpDir,

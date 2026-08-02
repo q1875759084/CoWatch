@@ -36,7 +36,7 @@ export interface WindowCaptureConfig {
   mux: MuxProfile;
   audio: boolean;
   audioDevice?: string;
-  muxTarget: 'pipe' | 'file' | 'null';
+  muxTarget: 'file' | 'null';
   stats: boolean;
   /** 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 900p、默认 6000kbps 封顶）。其余参数走 exe 默认值。 */
   rcMode?: 'cqp' | 'cbr' | 'vbr_ceil';
