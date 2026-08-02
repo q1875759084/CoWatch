@@ -14,6 +14,7 @@ import { app, net } from 'electron';
 
 import { initUploader, doUpload, cleanupUploader } from '../upload';
 import { parseSegmentIndex } from '../shared/segment-naming';
+import type { PendingRecording } from '../../../../src/types/recorder';
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -34,17 +35,6 @@ export interface Manifest {
   displayName: string;
   durationSeconds: number;
   apiOrigin: string;
-}
-
-export interface PendingRecording {
-  sessionId: string;
-  roomId: string;
-  createdAt: string;
-  totalSegments: number;
-  uploadedCount: number;
-  totalSize: number;
-  displayName: string;
-  durationSeconds: number;
 }
 
 // ─── 工具 ─────────────────────────────────────────────────────────────────────

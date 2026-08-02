@@ -279,15 +279,17 @@ async function start(
     onLog: (msg) => console.log(msg),
   };
 
-  // ─── mode 分支 ────────────────────────────────────────────────────────────
-  if (currentSourceId.startsWith('window:')) {
-    // window 模式（方案2a 终态）：
-    //   sentinel 负责窗口事件探测（与捕获源解耦），recording 层 spawn window_capture.exe
-    //   （内嵌 HLS 封装，直接写本地 .ts 切片），成品 sessionN.ts 直接进 upload（无 transcode）。
-    //   sourceId 形如 window:<HWND十进制>[:suffix]，中段即目标窗口 HWND（主契约）。
+  // ─── mode 参数推导（window/screen 唯一差异：captureMode + hwnd）─────────
+  // 历史背景：v1/v2 时代 screen 走 ffmpeg、window 走 window_capture，两分支参数差异大；
+  // v3 统一走 window_capture.exe 后，差异收敛为仅 captureMode + hwnd 两点，其余逻辑完全一致。
+  const isWindow = currentSourceId.startsWith('window:');
+  const hwnd = isWindow ? windowId.split(':')[1] : undefined;
+  const captureMode: 'window' | 'screen' = isWindow ? 'window' : 'screen';
+
+  // window 模式才启动 sentinel（窗口事件监听基建，screen 无目标窗口无需监听）
+  if (isWindow) {
     sentinelActive = true;
-    const hwnd = windowId.split(':')[1];
-    startSentinel(hwnd, {
+    startSentinel(hwnd!, {
       // 未匹配窗口 / exe 缺失 / 启动失败：由 window_capture.exe 兜底，无需此处动作
       onNotFound: () => {},
       // 窗口销毁：window_capture.exe 的 OBS wc_tick 会静默重连，CoWatch 不主动介入。
@@ -297,64 +299,10 @@ async function start(
       onExit: (_code) => {},
       onLog: (_msg) => {},
     });
-
-    // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
-    const profiles = makeDefaultProfiles(tmpDir, hwnd, 30);
-    await startRecording(
-      {
-        sessionId,
-        sourceId: windowId,
-        displayTitle,
-        tmpDir,
-        detectedEncoder,
-        isSoftwareEncoder,
-        windowCapture: {
-          capture: profiles.capture,
-          mux: profiles.mux,
-          audio: true,
-          muxTarget: 'file', // 生产态：exe 内 ffmpeg_muxer 直接写本地 HLS .ts
-          stats: false,
-          rcMode,
-          resolution,
-          captureMode: 'window',
-        },
-      },
-      recordingCallbacks,
-    );
-    recordingLaunched = true;
-
-    // window 模式：直接监听 tmpDir 成品切片进 upload（无 transcode 层）
-    // 仅录制模式跳过上传监听与上传层初始化，仅保留本地切片
-    if (!recordOnly) {
-      startWindowUploadWatcher(tmpDir, recordingCallbacks);
-
-      // ③ 启动上传层
-      initUploader(
-        { roomId, sessionId, authToken, apiOrigin },
-        { onProgress: () => pushProgress(), onLog: (msg) => console.log(msg) },
-      );
-    }
-
-    // ④ 启动 tick 计时器
-    tickTimer = setInterval(() => {
-      const seconds = Math.floor((Date.now() - recordStartTime) / 1000);
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('recorder:tick', seconds);
-      }
-    }, 1000);
-
-    // ⑤ 最长录制时间保护
-    timeoutTimer = setTimeout(() => {
-      console.log('[recorder] 达到最大录制时长 2 小时，自动停止');
-      void stop();
-    }, MAX_RECORD_MS);
-
-    console.log(`[recorder] window 模式录制开始，sessionId=${sessionId}`);
-    return;
   }
 
-  // screen 模式：复用 window_capture.exe（--capture-mode screen，无 hwnd），直出 HLS → upload（无 transcode）
-  const profiles = makeDefaultProfiles(tmpDir, undefined, 30);
+  // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
+  const profiles = makeDefaultProfiles(tmpDir, hwnd, 30);
   await startRecording(
     {
       sessionId,
@@ -367,38 +315,28 @@ async function start(
         capture: profiles.capture,
         mux: profiles.mux,
         audio: true,
-        muxTarget: 'file',
+        muxTarget: 'file', // 生产态：exe 内 ffmpeg_muxer 直接写本地 HLS .ts
         stats: false,
         rcMode,
         resolution,
-        captureMode: 'screen',
+        captureMode,
       },
     },
     recordingCallbacks,
   );
   recordingLaunched = true;
 
-  // screen 模式：直接监听 tmpDir 成品切片进 upload（与 window 模式一致，无 transcode 层）
-  // 仅录制模式跳过上传监听与上传层初始化，仅保留本地切片
+  // 成品切片上传监听（无 transcode 层）；仅录制模式跳过上传层初始化
   if (!recordOnly) {
-    startWindowUploadWatcher(tmpDir, recordingCallbacks);
+    startWindowUploadWatcher(tmpDir);
 
-    // ③ 启动上传层
     initUploader(
-      {
-        roomId,
-        sessionId,
-        authToken,
-        apiOrigin,
-      },
-      {
-        onProgress: () => pushProgress(),
-        onLog: (msg) => console.log(msg),
-      },
+      { roomId, sessionId, authToken, apiOrigin },
+      { onProgress: () => pushProgress(), onLog: (msg) => console.log(msg) },
     );
   }
 
-  // ④ 启动 tick 计时器
+  // tick 计时器：每秒推录制时长到渲染端
   tickTimer = setInterval(() => {
     const seconds = Math.floor((Date.now() - recordStartTime) / 1000);
     for (const win of BrowserWindow.getAllWindows()) {
@@ -406,13 +344,13 @@ async function start(
     }
   }, 1000);
 
-  // ⑤ 最长录制时间保护
+  // 最长录制时间保护：2 小时到时自动停止
   timeoutTimer = setTimeout(() => {
     console.log('[recorder] 达到最大录制时长 2 小时，自动停止');
     void stop();
   }, MAX_RECORD_MS);
 
-  console.log(`[recorder] 录制开始，sessionId=${sessionId}，roomId=${roomId}`);
+  console.log(`[recorder] ${captureMode} 模式录制开始，sessionId=${sessionId}，roomId=${roomId}`);
 }
 
 async function stop(): Promise<void> {
@@ -578,9 +516,8 @@ async function handleFfmpegCrash(_displayTitle: string): Promise<void> {
  * awaitWriteFinish 避免拾取半写切片。
  *
  * @param dir  监听目录（录制临时目录，= exe 的 --out 所在目录）
- * @param _cbs 透传录制回调（保留签名一致性，本函数不直接使用）
  */
-function startWindowUploadWatcher(dir: string, _cbs?: RecordingCallbacks): void {
+function startWindowUploadWatcher(dir: string): void {
   if (windowUploadWatcher) {
     void windowUploadWatcher.close();
     windowUploadWatcher = null;
