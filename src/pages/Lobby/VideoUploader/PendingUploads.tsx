@@ -28,7 +28,7 @@ export default function PendingUploads() {
   // 监听补传进度
   useEffect(() => {
     if (!bridge) return;
-    bridge.recorder.onProgress((info) => {
+    const unsub = bridge.recorder.onProgress((info) => {
       const total = info.uploaded + info.pending;
       if (total > 0) {
         // 找到正在补传的那条（loading 态），更新进度
@@ -38,7 +38,8 @@ export default function PendingUploads() {
         }
       }
     });
-    return () => bridge.recorder.offProgress();
+    // 按引用摘除自身 listener，避免与 Recorder 组件订阅的 onProgress 互相踩踏
+    return unsub;
   }, [bridge, loadingMap]);
 
   const handleResume = useMemoizedFn(async (sessionId: string) => {

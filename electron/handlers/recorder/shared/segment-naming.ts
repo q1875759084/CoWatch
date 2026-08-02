@@ -20,16 +20,8 @@ export const SEGMENT_PATTERN = 'seq%05d.ts';
 
 /**
  * 解析切片序号（仅 v3 格式）。
- *
- * 不兼容 v2 的 seg%03d_opt.ts：补传时直接读 manifest.json 的 segments 数组，
- * 不重新解析文件名；旧格式切片上传到 COS 后与旧 m3u8 配套，无需新解析器认识。
  */
 export function parseSegmentIndex(fileName: string): number {
   const m = fileName.match(/^seq(\d+)\.ts$/);
   return m ? parseInt(m[1], 10) : 0;
-}
-
-/** 生成切片文件名（仅 v3 格式） */
-export function formatSegmentName(index: number): string {
-  return `seq${String(index).padStart(5, '0')}.ts`;
 }

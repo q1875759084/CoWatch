@@ -75,15 +75,15 @@ export function Recorder({ roomId }: RecorderProps) {
   useEffect(() => {
     if (!bridge) return;
 
-    bridge.recorder.onTick((seconds) => {
+    const unsubTick = bridge.recorder.onTick((seconds) => {
       tickSecRef.current = seconds;
       setTickSeconds(seconds);
     });
-    bridge.recorder.onProgress((info) => {
+    const unsubProgress = bridge.recorder.onProgress((info) => {
       setProgress(info);
     });
     // 主进程 abortRecording 触发：网络持续不可用 / 积压超限
-    bridge.recorder.onError((err: RecorderError) => {
+    const unsubError = bridge.recorder.onError((err: RecorderError) => {
       console.error('[Recorder] 主进程异常中止：', err.reason);
       // 重置为 ready，允许用户手动重新录制
       updateState('ready');
@@ -94,10 +94,12 @@ export function Recorder({ roomId }: RecorderProps) {
       });
     });
 
+    // 按引用摘除各自 listener，避免 removeAllListeners 误删其他订阅者
+    // （PendingUploads 也订阅 onProgress，全局清空会踩踏）
     return () => {
-      bridge.recorder.offTick();
-      bridge.recorder.offProgress();
-      bridge.recorder.offError();
+      unsubTick();
+      unsubProgress();
+      unsubError();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bridge, localState]);

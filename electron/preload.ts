@@ -50,45 +50,42 @@ contextBridge.exposeInMainWorld('electronBridge', {
     ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, recordOnly, rcMode, resolution),
     /** 停止录制（等待剩余切片上传完成后通知后端） */
     stop: () => ipcRenderer.invoke('recorder:stop'),
-    /** 注册每秒录制计时回调，seconds 为已录秒数 */
+    /**
+     * 注册每秒录制计时回调，seconds 为已录秒数。
+     * 返回 unsubscribe 函数，调用方在 useEffect cleanup 中调用以按引用摘除自身 listener，
+     * 避免使用 removeAllListeners 误删其他订阅者的监听器（多组件订阅同一 channel 时会互相踩踏）。
+     */
     onTick: (cb: (seconds: number) => void) => {
-      ipcRenderer.on('recorder:tick', (_event, seconds: number) => cb(seconds));
+      const wrapped = (_event: Electron.IpcRendererEvent, seconds: number) => cb(seconds);
+      ipcRenderer.on('recorder:tick', wrapped);
+      return () => ipcRenderer.removeListener('recorder:tick', wrapped);
     },
-    /** 注册上传进度回调 */
+    /** 注册上传进度回调，返回 unsubscribe 函数（同 onTick） */
     onProgress: (cb: (info: { uploaded: number; pending: number }) => void) => {
-      ipcRenderer.on('recorder:progress', (_event, info) => cb(info));
-    },
-    /** 移除录制计时回调 */
-    offTick: () => {
-      ipcRenderer.removeAllListeners('recorder:tick');
-    },
-    /** 移除上传进度回调 */
-    offProgress: () => {
-      ipcRenderer.removeAllListeners('recorder:progress');
+      const wrapped = (_event: Electron.IpcRendererEvent, info: { uploaded: number; pending: number }) => cb(info);
+      ipcRenderer.on('recorder:progress', wrapped);
+      return () => ipcRenderer.removeListener('recorder:progress', wrapped);
     },
     /**
      * 注册录制异常中止回调（网络持续不可用 / 积压超限时由主进程触发）。
      * 收到后应重置 UI 状态并向用户展示错误原因。
+     * 返回 unsubscribe 函数（同 onTick）。
      */
     onError: (cb: (err: { reason: string }) => void) => {
-      ipcRenderer.on('recorder:error', (_event, err: { reason: string }) => cb(err));
-    },
-    /** 移除录制异常中止回调 */
-    offError: () => {
-      ipcRenderer.removeAllListeners('recorder:error');
+      const wrapped = (_event: Electron.IpcRendererEvent, err: { reason: string }) => cb(err);
+      ipcRenderer.on('recorder:error', wrapped);
+      return () => ipcRenderer.removeListener('recorder:error', wrapped);
     },
     /** 获取本地持久化的待补传录制列表 */
     getPendingRecordings: () => ipcRenderer.invoke('recorder:getPendingRecordings'),
     /** 启动补传单条持久化录制 */
     resumePending: (sessionId: string, authToken: string) =>
       ipcRenderer.invoke('recorder:resumePending', sessionId, authToken),
-    /** 注册补传进度更新回调 */
+    /** 注册补传进度更新回调，返回 unsubscribe 函数（同 onTick） */
     onPendingUpdate: (cb: (list: unknown[]) => void) => {
-      ipcRenderer.on('recorder:pendingUpdate', (_event, list) => cb(list));
-    },
-    /** 移除补传进度更新回调 */
-    offPendingUpdate: () => {
-      ipcRenderer.removeAllListeners('recorder:pendingUpdate');
+      const wrapped = (_event: Electron.IpcRendererEvent, list: unknown[]) => cb(list);
+      ipcRenderer.on('recorder:pendingUpdate', wrapped);
+      return () => ipcRenderer.removeListener('recorder:pendingUpdate', wrapped);
     },
 
     // ─── 外部视频转码 ─────────────────────────────────────────────────────
@@ -98,13 +95,11 @@ contextBridge.exposeInMainWorld('electronBridge', {
     /** 转码指定文件为 HLS 分段并上传 */
     transcodeExternal: (roomId: string, authToken: string, filePath: string) =>
       ipcRenderer.invoke('recorder:transcodeExternal', roomId, authToken, filePath),
-    /** 注册外部视频转码进度回调 */
+    /** 注册外部视频转码进度回调，返回 unsubscribe 函数（同 onTick） */
     onExternalTranscodeProgress: (cb: (info: unknown) => void) => {
-      ipcRenderer.on('recorder:transcodeExternal:progress', (_event, info) => cb(info));
-    },
-    /** 移除外部视频转码进度回调 */
-    offExternalTranscodeProgress: () => {
-      ipcRenderer.removeAllListeners('recorder:transcodeExternal:progress');
+      const wrapped = (_event: Electron.IpcRendererEvent, info: unknown) => cb(info);
+      ipcRenderer.on('recorder:transcodeExternal:progress', wrapped);
+      return () => ipcRenderer.removeListener('recorder:transcodeExternal:progress', wrapped);
     },
 
     // ─── 监听模式（文件夹自动转码上传）─────────────────────────────
@@ -118,13 +113,11 @@ contextBridge.exposeInMainWorld('electronBridge', {
     stopWatch: () => ipcRenderer.invoke('recorder:watchMode:stop'),
     /** 查询监听状态 */
     getWatchStatus: () => ipcRenderer.invoke('recorder:watchMode:getStatus'),
-    /** 注册监听文件检测回调（path → 渲染端按手动上传同构入队） */
+    /** 注册监听文件检测回调（path → 渲染端按手动上传同构入队），返回 unsubscribe 函数（同 onTick） */
     onWatchFileDetected: (cb: (filePath: string) => void) => {
-      ipcRenderer.on('recorder:watchMode:fileDetected', (_event, filePath: string) => cb(filePath));
-    },
-    /** 注销监听文件检测回调 */
-    offWatchFileDetected: () => {
-      ipcRenderer.removeAllListeners('recorder:watchMode:fileDetected');
+      const wrapped = (_event: Electron.IpcRendererEvent, filePath: string) => cb(filePath);
+      ipcRenderer.on('recorder:watchMode:fileDetected', wrapped);
+      return () => ipcRenderer.removeListener('recorder:watchMode:fileDetected', wrapped);
     },
   },
 

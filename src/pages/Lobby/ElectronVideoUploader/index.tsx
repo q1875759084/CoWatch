@@ -144,13 +144,13 @@ export default function ElectronVideoUploader({ lastVideoAddedId }: ElectronVide
 
     useEffect(() => {
       const bridge = window.electronBridge!;
-      bridge.recorder.onWatchFileDetected((filePath) => handleWatchFileDetected(filePath));
+      const unsub = bridge.recorder.onWatchFileDetected((filePath) => handleWatchFileDetected(filePath));
       // 启动时恢复监听状态（主进程持久化目录，UI 仅恢复标记）
       bridge.recorder.getWatchStatus().then((st) => {
         setWatchActive(st.active);
         setWatchFolder(st.folderPath);
       }).catch(() => { /* 非 Electron 环境忽略 */ });
-      return () => { bridge.recorder.offWatchFileDetected(); };
+      return unsub;
     }, [handleWatchFileDetected]);
 
   const handleSelectWatchFolder = useCallback(async () => {
@@ -199,7 +199,7 @@ export default function ElectronVideoUploader({ lastVideoAddedId }: ElectronVide
 
   useEffect(() => {
     const bridge = window.electronBridge!;
-    bridge.recorder.onExternalTranscodeProgress((raw: unknown) => {
+    const unsub = bridge.recorder.onExternalTranscodeProgress((raw: unknown) => {
       const info = raw as ExternalTranscodeProgress;
       setProgress({ uploaded: info.uploaded, estimated: info.estimated });
 
@@ -223,7 +223,7 @@ export default function ElectronVideoUploader({ lastVideoAddedId }: ElectronVide
         setWaitingServer(false);
       }
     });
-    return () => { bridge.recorder.offExternalTranscodeProgress(); };
+    return unsub;
   }, []);
 
   // ── 进度计算 ────────────────────────────────────────────────────────────────
