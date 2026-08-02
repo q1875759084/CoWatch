@@ -7,10 +7,11 @@
  *     （**去除 ffmpeg-mux 外部封装**，编码+封装都在 exe 内一体完成，无回读）。
  *   - screen 源：复用 window_capture.exe（--capture-mode screen，无 hwnd），直出 HLS → upload（无 transcode）。
  *
- * stop + crash 重启 + 时间轴锚点沿用实验版语义；窗口模式录制执行由
+ * stop 沿用实验版语义；窗口模式录制执行由
  * window_capture.exe + OBS wc_tick 原生处理（最小化/失焦/移动自动跳帧或照录）。
  * CoWatch 仅在窗口销毁（STOP CLOSED）或 exe 崩溃（crash 看门狗）时介入。
  * pause/resume 的 kill+restart 链路已随哨兵越权整改删除（2026-08-01）。
+ * crash 重启续录机制已删除（2026-08-02）：v3 架构下 exe 稳定，续录锚点无下游消费。
  */
 
 import fs from 'fs';
@@ -18,11 +19,6 @@ import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { app } from 'electron';
 
-import { isWindowAlive } from '../window-watch';
-import {
-  registerSessionAnchor,
-  getOutputTsOffset,
-} from '../shared';
 import {
   buildExeArgs,
   type CaptureProfile,
@@ -67,21 +63,17 @@ export interface RecordingCallbacks {
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
-const MAX_CRASH_RESTARTS = 3;
-
 // ─── 模块级状态 ────────────────────────────────────────────────────────────────
 let tmpDir = '';
 let detectedEncoder = 'libx264';
 let isSoftwareEncoder = false;
 let isUserStopped = false;
-let crashRestartCount = 0;
 let currentSourceId = '';
 let currentWindowTitle = '';
 let callbacks: RecordingCallbacks = {};
 
 // ─── 模块级状态（window 路径，方案2a 新增）──────────────────────────────────────
 let captureProc: ChildProcess | null = null; // window_capture.exe
-let lastCfg: RecordingConfig | null = null;
 let crashNotified = false; // window 模式：单次启动尝试内去重 crash 上报（防 close/error 双触发）
 
 // ─── 公开 API ─────────────────────────────────────────────────────────────────
@@ -89,10 +81,6 @@ let crashNotified = false; // window 模式：单次启动尝试内去重 crash 
 export function setEncoderInfo(encoder: string, soft: boolean): void {
   detectedEncoder = encoder;
   isSoftwareEncoder = soft;
-}
-
-export function getTmpDir(): string {
-  return tmpDir;
 }
 
 export function isRecording(): boolean {
@@ -106,7 +94,6 @@ export async function startRecording(
 ): Promise<void> {
   callbacks = cbs;
   isUserStopped = false;
-  crashRestartCount = 0;
   tmpDir = cfg.tmpDir;
   detectedEncoder = cfg.detectedEncoder;
   isSoftwareEncoder = cfg.isSoftwareEncoder;
@@ -146,7 +133,6 @@ async function startWindowRecording(cfg: RecordingConfig, cbs: RecordingCallback
     if (!crashNotified) { crashNotified = true; cbs.onCrash?.(cfg.displayTitle); }
     return;
   }
-  lastCfg = cfg;
   const { capture, mux, audio, audioDevice, muxTarget, stats, rcMode, resolution, captureMode } = cfg.windowCapture;
 
   const exePath = getCaptureExePath();
@@ -202,14 +188,10 @@ function handleCaptureLine(line: string, cfg: RecordingConfig, cbs: RecordingCal
   }
   if (msg.type === 'READY') {
     cbs.onLog?.(`[recording] capture READY w=${msg.w} h=${msg.h} fps=${msg.fps} codec=${msg.codec} hasAudio=${String(msg.hasAudio)}`);
-  } else if (msg.type === 'CLOSED') {
-    cbs.onLog?.(`[recording] capture CLOSED reason=${msg.reason}`);
-    if (msg.reason === 'window_closed') cbs.onShouldStop?.();
   } else if (msg.type === 'ERROR') {
     cbs.onLog?.(`[recording] capture ERROR code=${msg.code} msg=${msg.msg}`);
-    // KI-1：不再单独 onCrash——exe 在 emitError 后必以非 0 退出，captureProc.on('close')
-    // 会统一上报 crash（restartRecording）。此处若也 onCrash 会级联 2 次 restartRecording，
-    // 更快耗尽 MAX_CRASH_RESTARTS=3。仅日志，避免双重触发。
+    // KI-1：不在此处 onCrash——exe 在 emitError 后必以非 0 退出，captureProc.on('close')
+    // 会统一上报 crash。此处若也 onCrash 会级联 2 次上报。仅日志，避免双重触发。
   } else {
     cbs.onLog?.(`[capture] ${line}`);
   }
@@ -229,7 +211,7 @@ function gracefulQuitWindow(): Promise<void> {
   });
 }
 
-// ─── 停止 / 重启 ──────────────────────────────────────────────────────────────
+// ─── 停止 ──────────────────────────────────────────────────────────────────────
 
 export async function stopRecording(): Promise<void> {
   if (isUserStopped) return;
@@ -238,52 +220,5 @@ export async function stopRecording(): Promise<void> {
   if (captureProc) {
     await gracefulQuitWindow();
     return;
-  }
-}
-
-export async function restartRecording(displayTitle: string): Promise<void> {
-  if (isUserStopped) return;
-  crashRestartCount++;
-  if (crashRestartCount > MAX_CRASH_RESTARTS) {
-    callbacks.onLog?.(`[recording] 捕获源已连续崩溃 ${crashRestartCount} 次，放弃重启`);
-    return;
-  }
-
-  if (lastCfg) {
-    const nextSeg = getNextSegmentNumber();
-    registerSessionAnchor('window', {
-      startSegmentNumber: nextSeg,
-      startOffsetSeconds: getOutputTsOffset('window'),
-      registeredAt: Date.now(),
-    });
-    callbacks.onLog?.(`[recording] window 捕获源重启，第 ${crashRestartCount} 次（续号 ${nextSeg}）`);
-    void startWindowRecording(lastCfg, callbacks);
-    return;
-  }
-}
-
-export async function checkWindowAlive(sourceId: string): Promise<boolean> {
-  return isWindowAlive(sourceId);
-}
-
-// ─── 辅助函数 ──────────────────────────────────────────────────────────────────
-
-/**
- * 扫描 tmpDir 中已有的 segNNN.ts 文件，返回下一个可用的切片序号。
- */
-function getNextSegmentNumber(): number {
-  try {
-    const files = fs.readdirSync(tmpDir);
-    let maxNum = -1;
-    for (const f of files) {
-      const match = f.match(/^seg(\d+)_opt\.ts$/);
-      if (match) {
-        const num = parseInt(match[1], 10);
-        if (num > maxNum) maxNum = num;
-      }
-    }
-    return maxNum + 1;
-  } catch {
-    return 0;
   }
 }

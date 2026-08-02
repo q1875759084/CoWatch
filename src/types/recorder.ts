@@ -83,9 +83,3 @@ export type RecordingRcMode = 'cqp' | 'cbr' | 'vbr_ceil';
 
 /** 录制分辨率选项 */
 export type RecordingResolution = '720p' | '900p';
-
-/** 分辨率到像素尺寸映射 */
-export const RESOLUTION_MAP: Record<RecordingResolution, { width: number; height: number }> = {
-  '720p': { width: 1280, height: 720 },
-  '900p': { width: 1600, height: 900 },
-};

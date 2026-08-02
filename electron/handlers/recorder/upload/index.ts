@@ -122,14 +122,6 @@ export function enqueueUpload(filePath: string): void {
   processUploadQueue();
 }
 
-export function enqueueRawUpload(filePath: string): void {
-  // 转码失败后的降级：直接上传原始切片
-  // 与 enqueueUpload 逻辑相同，只是记录日志区分
-  const fileName = path.basename(filePath);
-  callbacks.onLog?.(`[upload] 上传原始切片（转码失败降级）：${fileName}`);
-  enqueueUpload(filePath);
-}
-
 /**
  * 串行上传队列处理：一次只上传一个切片，完成后自动处理下一个。
  * 通过 isUploading 标志防止并发，确保上传串行执行。
@@ -163,10 +155,6 @@ async function processUploadQueue(): Promise<void> {
 
 export function getActiveUploads(): Set<Promise<void>> {
   return activeUploads;
-}
-
-export function getQueuedFileNames(): Set<string> {
-  return queuedFileNames;
 }
 
 export function getPendingQueue(): string[] {

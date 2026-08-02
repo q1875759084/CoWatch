@@ -34,10 +34,7 @@ import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../
 import {
   startRecording,
   stopRecording,
-  restartRecording,
-  checkWindowAlive,
   setEncoderInfo,
-  getTmpDir,
   isRecording,
   type RecordingCallbacks,
 } from './recording';
@@ -51,7 +48,6 @@ import { HLS_SEGMENT_DURATION } from './shared';
 import {
   initUploader,
   enqueueUpload,
-  enqueueRawUpload,
   enqueueMissingFiles,
   waitForUploadQueue,
   flushPendingQueue,
@@ -104,8 +100,6 @@ let tickTimer: ReturnType<typeof setInterval> | null = null;
 let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
 /** 用户主动停止标志，区分正常停止和 ffmpeg crash */
 let isUserStopped = false;
-/** ffmpeg crash 重启次数，超过上限后放弃重启 */
-let crashRestartCount = 0;
 /** 录制开始时间戳（ms），用于计算时长 */
 let recordStartTime = 0;
 /** 当前房间 ID，上传和 finish 接口需要 */
@@ -114,9 +108,9 @@ let currentRoomId = '';
  * 当前用户的 JWT AccessToken，上传接口鉴权用。
  */
 let currentAuthToken = '';
-/** 当前录制源 id（desktopCapturer source id），crash 重启时需要 */
+/** 当前录制源 id（desktopCapturer source id），用于区分 window/screen 模式 */
 let currentSourceId = '';
-/** 当前录制窗口的标题（用于 window-watch 备用检测），crash 重启时需要 */
+/** 当前录制窗口的标题（sentinel onStop 时回调查询用） */
 let currentWindowTitle = '';
 /** 后端 origin，由 main.ts 通过 setApiOrigin 注入 */
 let apiOrigin = 'http://localhost:3002';
@@ -253,7 +247,6 @@ async function start(
   currentWindowTitle = displayTitle;
   currentAuthToken = authToken;
   isUserStopped = false;
-  crashRestartCount = 0;
   recordStartTime = Date.now();
   recordingLaunched = false;
   sentinelActive = false;
@@ -551,7 +544,6 @@ async function stop(): Promise<void> {
   tmpDir = '';
   currentRoomId = '';
   currentAuthToken = '';
-  crashRestartCount = 0;
   recordingLaunched = false;
   sentinelActive = false;
   isRecordOnly = false;
@@ -565,37 +557,17 @@ async function stop(): Promise<void> {
 
 // ─── crash 处理 ───────────────────────────────────────────────────────────────
 
-async function handleFfmpegCrash(displayTitle: string): Promise<void> {
+async function handleFfmpegCrash(_displayTitle: string): Promise<void> {
   if (isUserStopped) return;
 
-  // 窗口录制：先检查目标窗口是否还存在
-  if (currentSourceId.startsWith('window:')) {
-    const alive = await checkWindowAlive(currentSourceId);
-    if (!alive) {
-      console.log('[recorder] 窗口录制目标已消失，ffmpeg crash 属预期行为，触发优雅停止');
-      void stop();
-      return;
-    }
+  // v3 架构：window_capture.exe 基于 OBS WGC，窗口消失时静默重连不 crash。
+  // exe 非 0 退出即真实 crash（启动失败 / 运行时 SEH），不再区分窗口存活，不再重启续录。
+  // v2 时期的 checkWindowAlive 区分逻辑 + window-watch.ts 已一并删除。
+  console.error('[recorder] window_capture 进程异常退出，终止录制');
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('recorder:error', { reason: '录制进程异常退出' });
   }
-
-  crashRestartCount++;
-  if (crashRestartCount > 3) {
-    console.error(`[recorder] ffmpeg 已连续崩溃 ${crashRestartCount} 次，放弃重启`);
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('recorder:error', { reason: 'ffmpeg 持续崩溃，录制已终止' });
-    }
-    return;
-  }
-
-  console.warn(`[recorder] ffmpeg 进程异常退出，第 ${crashRestartCount} 次重启续录...`);
-
-  // 等待当前上传完成
-  await Promise.allSettled(Array.from(getActiveUploads()));
-
-  if (isUserStopped) return;
-
-  // 重启录制层（-start_number 会自动从已有切片序号续接，不会覆盖）
-  await restartRecording(displayTitle);
+  void stop();
 }
 
 // ─── window 模式成品切片上传监听（替代 transcode 层，直接进 upload）─────────────────
