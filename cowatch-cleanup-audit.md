@@ -71,9 +71,9 @@ CoWatch 录制链路经历 v1（单 FFmpeg 直出）→ v2（双 FFmpeg 三层�
 
 | # | 问题 | 位置 | 整改方向 |
 |---|---|---|---|
-| P1-1 | **录制侧 finish 仍无 401 重试，token 过期会静默丢播放列表**（05566a8 只给外部转码侧加了重试，两侧仍不对称） | 录制侧 `recorder/index.ts:430-456`（仅 console.error）vs 外部侧 `:660-685`（401→`refreshTokenFromMainProcess()`→重试） | 抽公共 `finishAndRetry()` 收口到 upload/backend-client 域，两条路径共用。**若线上 401 非罕见，此条应即刻升 P0** — 请团队确认 token 过期实际发生率后定档 |
-| P1-2 | **watch-mode watcher error 静默自停，不通知渲染端**（UI 卡死症状已缓解：已改 `getWatchStatus` 驱动，不再只在挂载时拉一次） | `watch-mode/index.ts:94-98` 仍不发事件 | 自停时补推 `watchMode:error` 事件。随主题③一并解决 |
-| P1-3 | **`transcodeExternal:cancel` 无调用入口，用户误点转码后无法取消** | `recorder/index.ts:814-820` 注册；preload 无桥 | 补桥 + UI 取消按钮，或明确删除该 handler。**二选一，不要继续悬空** |
+| P1-1 | **录制侧 finish 仍无 401 重试，token 过期会静默丢播放列表**（05566a8 只给外部转码侧加了重试，两侧仍不对称） | 录制侧 `recorder/index.ts:430-456`（仅 console.error）vs 外部侧 `:660-685`（401→`refreshTokenFromMainProcess()`→重试） | 抽公共 `finishAndRetry()` 收口到 upload 域，两条路径共用。**token 状态当前散落 4 处**（协调层 `currentAuthToken` + upload 层 `config.authToken` + `getAuthToken()` + `refreshTokenFromMainProcess()`），应一并收敛为 upload 层单一所有权。录制侧 stop() 开头虽有 `getAuthToken()` 同步（:393-394），但 finish 调用前的窄窗口仍可能 401 |
+| P1-2 | **watch-mode watcher error 静默自停，不通知渲染端**（UI 卡死症状已缓解：已改 `getWatchStatus` 驱动，不再只在挂载时拉一次） | `watch-mode/index.ts:94-98` 仍不发事件 | 自停时补推 `watchMode:error` 事件。随主题 C 一并解决 |
+| P1-3 | **`transcodeExternal:cancel` 无调用入口，用户误点转码后无法取消** | `recorder/index.ts:814-820` 注册；preload 无桥 | **用户决策：cqp/cbr/vbr 整体结构调整时一并补齐 UI 入口**，当前降级为 P2，不再悬空等待 |
 | P1-4 | **协调层越权解析 HWND** | `recorder/index.ts:296`（合并后行号） | 下沉至 `sentinel-client`，协调层不认识 windowId 格式 |
 | P1-5 | **upload 细节裸露在协调层 stop()** | `recorder/index.ts` stop() 内 5 连调（enqueueMissingFiles/getPendingQueue/getSegmentKeys/cleanupUploader/persistRecording） | upload 导出 `finalizeSession()` 用例级接口 |
 | P1-7 | **进度推送三份 + chokidar 配置三处重复** | `recorder/index.ts:157`、`:710`、`persistence/index.ts:261`；`recorder/index.ts:620-624`、`external-transcode:74-78`、watch-mode | 各收敛为一处工具函数 |
@@ -83,7 +83,7 @@ CoWatch 录制链路经历 v1（单 FFmpeg 直出）→ v2（双 FFmpeg 三层�
 
 ### P2（清洁度，可后续一次性清理）
 
-- **纯死代码删除**：`segOrder`（external-transcode:51/84/281）、`parseTime`（:256-265）、`getExternalTranscodeState().outputDir`（:183）、多余 export `startExternalVideoTranscode`（recorder/index.ts:662）、`handleFfmpegCrash` 命名/日志全称 ffmpeg（实为 exe）（:494,575,582-583,590）
+- **纯死代码删除**：`segOrder`（external-transcode:52，只 push 从不读，上传顺序实际由 chokidar add 事件保证）、`parseTime`（:259-268，调用结果在空 if 块中丢弃，注释自承"此处不重复"）、`getExternalTranscodeState()` 返回值的 `outputDir` 字段（:184，调用方 index.ts:616 只解构 `active`，`outputDir` 从不被读）、多余 export `startExternalVideoTranscode`（recorder/index.ts:662）、`handleFfmpegCrash` 命名/日志全称 ffmpeg（实为 exe）（:494,575,582-583,590）
 - **死配置/死字段**：`RecordingConfig.recordOnly`（recording/index.ts:55，录制层从不读取）、`CaptureProfile.fps`（profiles.ts:21）
 - **无生产者的配置旋钮（不能照删）**：`UploadConfig.disableThrottle`（`upload/index.ts:38` 声明，`:291` `cfg.disableThrottle ? 0 : ...` **有读取**）、`UploadConfig.recordOnly`（`:40` 声明，`:116` `if (config?.recordOnly) return` **有读取**）。二者参与运行时决策，只是全仓无处传入 → 恒 `undefined`，等价于"开限流 + 不跳过"。**处置：要么补上生产者，要么连同读取点一起删；直接删字段会改变运行时分支语义**
 - **双向皆死的 IPC**：`onPendingUpdate/offPendingUpdate`（preload.ts:85-92、global.d.ts:90-93）
@@ -151,8 +151,8 @@ segment-naming（已落地） → format / parse 单一事实来源
 
 ## 五、落地前必须先确认的未决问题
 
-1. **`transcodeExternal:cancel` 与 CQP/CBR 三选一，产品侧要补齐还是要下线？** —— 产品决策非技术决策，需 PM 确认后才能定 P1-3 与对应 P2 处理方式
-2. **token 过期实际发生率？** —— 决定 P1-1（finish 合并）是 P1 还是 P0
+1. **~~`transcodeExternal:cancel` 与 CQP/CBR 三选一，产品侧要补齐还是要下线？~~** ✅ 已决策：整体结构调整时一并补齐 UI 入口，P1-3 降级为 P2
+2. **token 过期实际发生率？** —— 决定 P1-1（finish 合并）是 P1 还是 P0。当前后端是否有 3 分钟兜底 finish 机制需确认（若有，则 P1-1 影响"用户体验"而非"数据丢失"）
 3. **F5：window_capture.exe 的 main.cpp 是否仍发 CLOSED 消息？** —— 需查 C++ 源码确认
 
 ---
