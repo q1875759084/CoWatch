@@ -81,15 +81,17 @@ CoWatch 录制链路经历 v1（单 FFmpeg 直出）→ v2（双 FFmpeg 三层�
 
 > P1-6 已与清洁列表的 A2 合并，不再单列。
 
-### P2（清洁度，可后续一次性清理）
+### P2（清洁度，可后续一次性清理）⚠️ 整体存疑，需重新评审
 
-- **纯死代码删除**：`segOrder`（external-transcode:52，只 push 从不读，上传顺序实际由 chokidar add 事件保证）、`parseTime`（:259-268，调用结果在空 if 块中丢弃，注释自承"此处不重复"）、`getExternalTranscodeState()` 返回值的 `outputDir` 字段（:184，调用方 index.ts:616 只解构 `active`，`outputDir` 从不被读）、多余 export `startExternalVideoTranscode`（recorder/index.ts:662）、`handleFfmpegCrash` 命名/日志全称 ffmpeg（实为 exe）（:494,575,582-583,590）
-- **死配置/死字段**：`RecordingConfig.recordOnly`（recording/index.ts:55，录制层从不读取）、`CaptureProfile.fps`（profiles.ts:21）
+> **2026-08-03 标注**：本轮尝试清理 P2 时发现多处误判（`recordOnly` 是录制模式契约、`fps` 是预留扩展、`outputDir` 是扩展字段方便修改输出路径），P2 清单的可信度存疑。在重新逐项核实前，**不要据此清单执行删除**。以下原文保留仅作线索，每项需人工确认后再定去留。
+
+- **纯死代码删除（待核实）**：`segOrder`（external-transcode:52，只 push 从不读，上传顺序实际由 chokidar add 事件保证）、`parseTime`（:259-268，调用结果在空 if 块中丢弃，注释自承"此处不重复"）、`getExternalTranscodeState()` 返回值的 `outputDir` 字段（:184，调用方 index.ts:616 只解构 `active`，`outputDir` 从不被读）、多余 export `startExternalVideoTranscode`（recorder/index.ts:662）、`handleFfmpegCrash` 命名/日志全称 ffmpeg（实为 exe）（:494,575,582-583,590）
+- **死配置/死字段（待核实）**：`RecordingConfig.recordOnly`、`CaptureProfile.fps`、`getExternalTranscodeState().outputDir`
 - **无生产者的配置旋钮（不能照删）**：`UploadConfig.disableThrottle`（`upload/index.ts:38` 声明，`:291` `cfg.disableThrottle ? 0 : ...` **有读取**）、`UploadConfig.recordOnly`（`:40` 声明，`:116` `if (config?.recordOnly) return` **有读取**）。二者参与运行时决策，只是全仓无处传入 → 恒 `undefined`，等价于"开限流 + 不跳过"。**处置：要么补上生产者，要么连同读取点一起删；直接删字段会改变运行时分支语义**
-- **双向皆死的 IPC**：`onPendingUpdate/offPendingUpdate`（preload.ts:85-92、global.d.ts:90-93）
-- **渲染端**：`WindowPicker.onConfirm` 第 2 参 sourceType（WindowPicker.tsx:11,38 / Recorder/index.tsx:143）、`isPreview` 死 prop、永久 disabled 的 CQP/CBR 三选一（:92-94，建议改为展示当前模式或补齐功能）
+- **双向皆死的 IPC（待核实）**：`onPendingUpdate/offPendingUpdate`（preload.ts:85-92、global.d.ts:90-93）
+- **渲染端（待核实）**：`WindowPicker.onConfirm` 第 2 参 sourceType（WindowPicker.tsx:11,38 / Recorder/index.tsx:143）、`isPreview` 死 prop、永久 disabled 的 CQP/CBR 三选一（:92-94，建议改为展示当前模式或补齐功能）
 - **类型重复**：`rcMode`/`resolution` 联合类型三处字面重复（recorder/index.ts:242-243、recording/index.ts:42-44、profiles.ts:37-39）→ 提取共享类型
-- **过期注释**：detectEncoder「含 ddagrab」（recorder/index.ts:180）、upload/index.ts:11-14、external-transcode:194、`[phase2] modeGuard()`（recorder/index.ts:575）
+- **过期注释（低风险）**：detectEncoder「含 ddagrab」（recorder/index.ts:180）、upload/index.ts:11-14、external-transcode:194、`[phase2] modeGuard()`（recorder/index.ts:575）
 - **未建模能力**：cursor 开关（exe 有 `--no-capture-cursor`，buildExeArgs 不发）——若产品不需要则连同 profile 字段一起明确标注"不支持"，不要留空白
 
 ---
@@ -159,7 +161,9 @@ segment-naming（已落地） → format / parse 单一事实来源
 
 ## 六、风险分级速查
 
-### ✅ 低风险纯删除（可放心先清，建议独立 PR）
+### ✅ 低风险纯删除（可放心先清，建议独立 PR）⚠️ 待重新评审
+
+> **2026-08-03 标注**：原列表中的多项经实测为误判（`recordOnly`/`fps`/`outputDir` 均为有效字段或预留扩展）。在逐项重新核实前，**不要据此清单执行删除**。
 
 `segOrder` · `parseTime` · `outputDir` 字段 · `startExternalVideoTranscode` 多余 export · `RecordingConfig.recordOnly` · `CaptureProfile.fps` · `onPendingUpdate/offPendingUpdate` · `WindowPicker` 的 `sourceType` 第 2 参与 `isPreview` 死 prop · 全部过期注释 · `handleFfmpegCrash` 命名/日志
 
