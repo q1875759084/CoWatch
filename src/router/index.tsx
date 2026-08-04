@@ -1,5 +1,6 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 import AuthPage from '@/pages/Auth';
+import SettingsPage from '@/pages/Settings';
 import Dashboard from '@/pages/Dashboard';
 import RoomPage from '@/pages/Lobby';
 import { AuthGuard } from '@/components/AuthGuard';
@@ -17,6 +18,10 @@ const router = createBrowserRouter([
   {
     path: '/auth',
     element: <AuthPage />,
+  },
+  {
+    path: '/settings',
+    element: <SettingsPage />,
   },
   {
     path: '/',

@@ -1,17 +1,16 @@
 import { useState } from "react";
 
-import { Modal, Button, Radio } from "antd";
+import { Modal, Button } from "antd";
 
-import type { RecorderSource, RecordingRcMode, RecordingResolution } from "@/types/recorder";
+import type { RecorderSource } from "@/types/recorder";
 
 import styles from "./index.module.scss";
 
 interface WindowPickerProps {
   sources: RecorderSource[];
-  onConfirm: (source: RecorderSource, sourceType: "screen" | "window", recordOnly: boolean, rcMode: RecordingRcMode, resolution: RecordingResolution) => void;
+  onConfirm: (source: RecorderSource, sourceType: "screen" | "window", recordOnly: boolean) => void;
   onCancel: () => void;
   onRefresh?: () => void | Promise<void>;
-  isPreview?: boolean;
 }
 
 /**
@@ -25,17 +24,14 @@ export function WindowPicker({
   onConfirm,
   onCancel,
   onRefresh,
-  isPreview = false,
 }: WindowPickerProps) {
   const [selectedId, setSelectedId] = useState<string>("");
-  const [rcMode, setRcMode] = useState<RecordingRcMode>('vbr_ceil');
-  const [resolution, setResolution] = useState<RecordingResolution>('720p');
 
   const selectedSource = sources.find((s) => s.id === selectedId) ?? null;
 
   const handleConfirmWithRecord = (recordOnly: boolean) => {
     if (!selectedSource) return;
-    onConfirm(selectedSource, selectedSource.sourceType, recordOnly, rcMode, resolution);
+    onConfirm(selectedSource, selectedSource.sourceType, recordOnly);
   };
 
   /** 判断缩略图是否为纯黑（整屏录制独占游戏时的预期情况） */
@@ -81,31 +77,6 @@ export function WindowPicker({
       centered
       className={styles.pickerModal}
     >
-        <div className={styles.modeToggle}>
-          <span className={styles.modeLabel}>录制模式</span>
-          <Radio.Group
-            value={rcMode}
-            onChange={(e) => setRcMode(e.target.value as RecordingRcMode)}
-            optionType="button"
-            buttonStyle="solid"
-          >
-            <Radio value="vbr_ceil">VBR（弹性码率）</Radio>
-            <Radio value="cqp" disabled>CQP（质量优先）</Radio>
-            <Radio value="cbr" disabled>CBR（恒定码率）</Radio>
-          </Radio.Group>
-        </div>
-        <div className={styles.modeToggle}>
-          <span className={styles.modeLabel}>分辨率</span>
-          <Radio.Group
-            value={resolution}
-            onChange={(e) => setResolution(e.target.value as RecordingResolution)}
-            optionType="button"
-            buttonStyle="solid"
-          >
-            <Radio value="720p">1280 × 720</Radio>
-            <Radio value="900p">1600 × 900</Radio>
-          </Radio.Group>
-        </div>
       {sources.length === 0 ? (
         <div className={styles.emptyWrap}>
           <p className={styles.empty}>未检测到可录制的窗口</p>

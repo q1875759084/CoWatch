@@ -77,9 +77,3 @@ export interface WatchFolderResult {
   cancelled: boolean;
   folderPath?: string;
 }
-
-/** window_capture 码率控制模式：cqp=质量优先（默认），cbr=恒定码率上限，vbr_ceil=弹性封顶 VBR（强制 900p、默认 6000kbps 封顶） */
-export type RecordingRcMode = 'cqp' | 'cbr' | 'vbr_ceil';
-
-/** 录制分辨率选项 */
-export type RecordingResolution = '720p' | '900p';

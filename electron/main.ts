@@ -1,8 +1,9 @@
-import { app, BrowserWindow, protocol, net } from 'electron';
+import { app, BrowserWindow, protocol, net, Menu } from 'electron';
 import path from 'path';
 import { URL } from 'url';
 import { initHlsCache, setApiOrigin, isHlsSegment, handleHlsSegment } from './handlers/cache';
 import { registerRecorderHandlers, setApiOriginForRecorder } from './handlers/recorder/index';
+import { registerSettingsHandlers } from './handlers/settings-store';
 
 // ─── 三种运行模式 ────────────────────────────────────────────────────────────
 //
@@ -120,6 +121,7 @@ function createWindow(): void {
       contextIsolation: true,
     },
   });
+  mainWindow = win;
 
   if (!app.isPackaged && !isPreview) {
     // dev 模式：webpack-dev-server 自带 proxy，直接加载 HTTP URL
@@ -133,14 +135,98 @@ function createWindow(): void {
   }
 }
 
+// ─── 设置窗口（单例）─────────────────────────────────────────────────────
+let mainWindow: BrowserWindow | null = null;
+let settingsWin: BrowserWindow | null = null;
+
+/**
+ * 打开设置窗口。复用主应用同一个 index.html + bundle.js，通过 React Router /settings 路由渲染。
+ * 单例：已存在则 focus 并重新加载带新 section query 的 URL，不新建窗口。
+ */
+function createSettingsWindow(section: 'recording' | 'transcode') {
+  // 单例守卫：已存在则 focus + 通过 IPC 通知切 Tab（不重新加载页面，避免闪烁和表单值丢失）
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    settingsWin.focus();
+    settingsWin.webContents.send('settings:switch-tab', section);
+    return;
+  }
+
+  settingsWin = new BrowserWindow({
+    width: 680,
+    height: 560,
+    title: '设置',
+    parent: mainWindow ?? undefined,
+    modal: true,
+    minimizable: false,
+    maximizable: false,
+    // 复用与主窗口相同的 preload（设置窗口需通过 electronBridge.settings 访问设置 IPC）
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+    show: false,
+  });
+
+  // 设置窗口为对话框性质，移除应用菜单栏
+  settingsWin.setMenu(null);
+
+  const url =
+    app.isPackaged || isPreview
+      ? `app://localhost/settings?section=${section}`
+      : `http://localhost:3001/settings?section=${section}`;
+  settingsWin.loadURL(url);
+
+  settingsWin.once('ready-to-show', () => {
+    settingsWin?.show();
+  });
+
+  settingsWin.once('closed', () => {
+    settingsWin = null;
+  });
+}
+
 app.whenReady().then(() => {
   initHlsCache();
   setApiOrigin(API_ORIGIN);
   setApiOriginForRecorder(API_ORIGIN);
   registerRecorderHandlers();
+  registerSettingsHandlers();
   registerAppProtocol();
   createWindow();
 
+  // 自定义应用菜单
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: '查看',
+      submenu: [
+        { role: 'reload', label: '重新加载' },
+        { role: 'forceReload', label: '强制重新加载' },
+        { role: 'toggleDevTools', label: '开发者工具' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: '重置缩放' },
+        { role: 'zoomIn', label: '放大' },
+        { role: 'zoomOut', label: '缩小' },
+        { type: 'separator' },
+        { role: 'togglefullscreen', label: '全屏' },
+      ],
+    },
+    {
+      label: '设置',
+      submenu: [
+        {
+          label: '录制设置',
+          click: () => createSettingsWindow('recording'),
+        },
+        {
+          label: '转码设置',
+          click: () => createSettingsWindow('transcode'),
+        },
+      ],
+    },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 });
 app.on('window-all-closed', () => {
   app.quit();

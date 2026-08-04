@@ -18,6 +18,7 @@ import chokidar from 'chokidar';
 
 import { getFfmpegPath, HLS_SEGMENT_DURATION } from '../shared';
 import { SEGMENT_PATTERN } from '../shared/segment-naming';
+import { getSettings } from '../../settings-store';
 import type { ExternalTranscodeProgress } from '../../../../src/types/recorder';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────────
@@ -192,6 +193,10 @@ function buildFfmpegArgs(cfg: ExternalTranscodeConfig): string[] {
   const segPattern = path.join(cfg.outputDir, SEGMENT_PATTERN).replace(/\\/g, '/');
   const m3u8Path = path.join(cfg.outputDir, 'index.m3u8').replace(/\\/g, '/');
 
+  // 从设置存储读取转码参数（帧率）
+  const transcodeSettings = getSettings().transcode;
+  const fps = String(transcodeSettings.fps);
+
   // 视频编码参数（与 transcoding/index.ts 对齐）
   let videoArgs: string[];
   if (isSoft) {
@@ -221,7 +226,7 @@ function buildFfmpegArgs(cfg: ExternalTranscodeConfig): string[] {
     '-vf', "scale=w='min(iw,1600)':h=-2,format=yuv420p",
     ...videoArgs,
     '-c:a', 'aac', '-b:a', '128k',
-    '-vsync', 'cfr', '-r', '30',
+    '-vsync', 'cfr', '-r', fps,
     '-g', '300',
     '-f', 'hls',
     '-hls_time', String(HLS_SEGMENT_DURATION),

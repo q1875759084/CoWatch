@@ -73,6 +73,8 @@ import {
   getExternalTranscodeState,
 } from './external-transcode';
 import type { ExternalTranscodeProgress } from '../../../src/types/recorder';
+import { getSettings } from '../settings-store';
+import type { RecordingSettings } from '../../../src/types/settings';
 
 // ─── 监听模式（文件夹自动转码上传）：IPC 注册从此文件拆出，避免继续膨胀 ──────────
 import { registerWatchHandlers } from './watch-mode/ipc';
@@ -233,8 +235,6 @@ async function start(
   roomId: string,
   authToken: string,
   recordOnly: boolean = false,
-  rcMode: 'cqp' | 'cbr' | 'vbr_ceil' = 'vbr_ceil',
-  resolution: '720p' | '900p' = '720p',
 ): Promise<void> {
   if (isRecording()) {
     throw new Error('[recorder] 录制已在进行中');
@@ -301,8 +301,11 @@ async function start(
     });
   }
 
+  // 从设置存储读取录制参数（分辨率/帧率由设置窗口配置）
+  const recordingSettings: RecordingSettings = getSettings().recording;
+
   // recording 层：spawn exe + 等 READY（exe 内一体编码+封装，直接写本地 HLS .ts）
-  const profiles = makeDefaultProfiles(tmpDir, hwnd, 30);
+  const profiles = makeDefaultProfiles(tmpDir, hwnd, recordingSettings.fps);
   await startRecording(
     {
       sessionId,
@@ -317,8 +320,7 @@ async function start(
         audio: true,
         muxTarget: 'file', // 生产态：exe 内 ffmpeg_muxer 直接写本地 HLS .ts
         stats: false,
-        rcMode,
-        resolution,
+        resolution: recordingSettings.resolution,
         captureMode,
       },
     },
@@ -761,11 +763,9 @@ export function registerRecorderHandlers(): void {
     roomId: string,
     authToken: string,
     recordOnly?: boolean,
-    rcMode?: 'cqp' | 'cbr' | 'vbr_ceil',
-    resolution?: '720p' | '900p',
   ) => {
     try {
-      await start(windowId, displayTitle, roomId, authToken, recordOnly ?? false, rcMode ?? 'vbr_ceil', resolution ?? '720p');
+      await start(windowId, displayTitle, roomId, authToken, recordOnly ?? false);
     } catch (err) {
       console.error('[recorder] start 异常：', (err as Error).message);
       throw err;

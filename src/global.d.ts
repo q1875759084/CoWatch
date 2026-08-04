@@ -73,7 +73,6 @@ interface ElectronBridge {
       roomId: string,
       authToken: string,
       recordOnly?: boolean,
-      rcMode?: import('./types/recorder').RecordingRcMode,
     ) => Promise<void>;
     /** 停止录制（等待剩余切片上传完成后调用 finish 接口） */
     stop: () => Promise<void>;
@@ -110,6 +109,19 @@ interface ElectronBridge {
       getWatchStatus: () => Promise<import('./types/recorder').WatchStatus>;
       /** 注册监听文件检测回调（path → 渲染端按手动上传同构入队），返回 unsubscribe 函数 */
       onWatchFileDetected: (cb: (filePath: string) => void) => ElectronUnsubscribe;
+  };
+
+  /** 设置：读取/持久化录制与转码参数 */
+  settings: {
+    /** 读取完整应用设置（录制 + 转码） */
+    get: () => Promise<import('./types/settings').AppSettings>;
+    /** 更新指定段的设置，合并写入并持久化，返回更新后的完整设置 */
+    set: (
+      section: import('./types/settings').SettingsSection,
+      values: Partial<import('./types/settings').RecordingSettings> | Partial<import('./types/settings').TranscodeSettings>,
+    ) => Promise<import('./types/settings').AppSettings>;
+    /** 监听主进程发来的 Tab 切换通知（单例窗口再次打开时），返回 unsubscribe 函数 */
+    onSwitchTab: (cb: (section: 'recording' | 'transcode') => void) => ElectronUnsubscribe;
   };
 
   /** 推送最新 JWT token 给主进程，token 无感刷新后调用，防止录制上传用过期 token */

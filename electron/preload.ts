@@ -1,7 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
-  RecordingRcMode,
-  RecordingResolution,
   WatchModeOptions,
   WatchFolderResult,
 } from '../src/types/recorder';
@@ -45,9 +43,7 @@ contextBridge.exposeInMainWorld('electronBridge', {
       roomId: string,
       authToken: string,
       recordOnly?: boolean,
-      rcMode?: RecordingRcMode,
-      resolution?: RecordingResolution,
-    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, recordOnly, rcMode, resolution),
+    ) => ipcRenderer.invoke('recorder:start', windowId, displayTitle, roomId, authToken, recordOnly),
     /** 停止录制（等待剩余切片上传完成后通知后端） */
     stop: () => ipcRenderer.invoke('recorder:stop'),
     /**
@@ -118,6 +114,21 @@ contextBridge.exposeInMainWorld('electronBridge', {
       const wrapped = (_event: Electron.IpcRendererEvent, filePath: string) => cb(filePath);
       ipcRenderer.on('recorder:watchMode:fileDetected', wrapped);
       return () => ipcRenderer.removeListener('recorder:watchMode:fileDetected', wrapped);
+    },
+  },
+
+  // ─── 设置 ─────────────────────────────────────────────────────────────
+  settings: {
+    /** 读取完整应用设置（录制 + 转码） */
+    get: () => ipcRenderer.invoke('settings:get'),
+    /** 更新指定段的设置，合并写入并持久化 */
+    set: (section: 'recording' | 'transcode', values: Record<string, unknown>) =>
+      ipcRenderer.invoke('settings:set', section, values),
+    /** 监听主进程发来的 Tab 切换通知（单例窗口再次打开时），返回 unsubscribe 函数 */
+    onSwitchTab: (cb: (section: 'recording' | 'transcode') => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, section: 'recording' | 'transcode') => cb(section);
+      ipcRenderer.on('settings:switch-tab', listener);
+      return () => { ipcRenderer.removeListener('settings:switch-tab', listener); };
     },
   },
 
