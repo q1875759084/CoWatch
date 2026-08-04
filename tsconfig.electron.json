@@ -12,7 +12,15 @@
     // 主进程有 Node.js 全局类型（fs、path、child_process 等）
     "types": ["node"],
     "outDir": "dist-electron",
-    "rootDir": "electron"
+    // 本配置只做类型检查，不负责 emit：electron 产物由 webpack + babel-loader 构建。
+    // 因此不设 rootDir —— rootDir 是 emit 布局锚点，不是架构边界工具；
+    // 跨层边界（electron/** 只许依赖 src/types/**）由 ESLint import/no-restricted-paths 守卫。
+    "noEmit": true,
+    // 与渲染端 tsconfig.json 对齐，避免 @/ 别名在主进程侧解析失败（TS2307）
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
   },
   "include": ["electron/**/*", "src/global.d.ts"],
   "exclude": ["node_modules", "dist", "dist-electron", "src"]

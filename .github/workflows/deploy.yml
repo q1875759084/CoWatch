@@ -2,7 +2,7 @@ name: CoWatch 前端 CI/CD
 
 # ==================== 触发机制说明 ====================
 #
-# push 分支     → 触发 CI（只读：lint + build 校验）
+# push 分支     → 触发 CI（只读：type-check + build 校验）
 # workflow_dispatch → 触发 CD（有副作用：构建镜像、改变服务器状态）
 # git push tag  → 不触发任何 job（零副作用，只是版本归档）
 #
@@ -55,6 +55,15 @@ jobs:
 
       - name: 安装依赖
         run: npm ci
+
+      # ── 类型闸门（P0-5）────────────────────────────────────────────────
+      # build 走 babel-loader 只转译不查类型，类型错误可以一路上线；
+      # 故必须在 build 之前独立跑 tsc --noEmit，覆盖双 tsconfig：
+      #   type-check:web      → tsconfig.json（渲染端）
+      #   type-check:electron → tsconfig.electron.json（主进程 + preload）
+      # 非零退出即中断整个 job（无 continue-on-error、无棘轮、无白名单）。
+      - name: 类型检查（渲染端 + 主进程，失败即中断）
+        run: npm run type-check
 
       - name: 构建校验
         run: npm run build

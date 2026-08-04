@@ -24,9 +24,9 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import chokidar from 'chokidar';
 import { app, desktopCapturer, dialog, ipcMain, BrowserWindow, net } from 'electron';
-import { v4 as uuidv4 } from 'uuid';
 
 import type { RecorderSource, EncoderDetectResult, RecordingProgress } from '../../../src/types/recorder';
 
@@ -241,7 +241,7 @@ async function start(
   }
 
   // 初始化状态
-  sessionId = uuidv4();
+  sessionId = randomUUID();
   currentRoomId = roomId;
   currentSourceId = windowId;
   currentWindowTitle = displayTitle;
@@ -578,7 +578,7 @@ export async function startExternalVideoTranscode(
   isExternalTranscoding = true;
 
   // ② 创建临时目录
-  const extSessionId = uuidv4();
+  const extSessionId = randomUUID();
   const extTmpDir = path.join(app.getPath('temp'), 'cowatch-ext', extSessionId);
   fs.mkdirSync(extTmpDir, { recursive: true });
 

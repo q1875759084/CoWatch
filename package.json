@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "webpack serve --config webpack.dev.js",
     "build": "webpack --config webpack.prod.js",
-    "type-check": "tsc --noEmit",
+    "type-check": "npm run type-check:web && npm run type-check:electron",
+    "type-check:web": "tsc --noEmit --project tsconfig.json",
     "type-check:electron": "tsc --noEmit --project tsconfig.electron.json",
     "electron:build-main": "webpack --config webpack.electron.js",
     "electron:dev": "npm run electron:build-main && electron .",
@@ -37,6 +38,7 @@
     "@types/node": "20.19.41",
     "@types/react": "19.1.6",
     "@types/react-dom": "19.1.6",
+    "@types/webpack-env": "^1.18.8",
     "babel-loader": "9.2.1",
     "cross-env": "^7.0.3",
     "css-loader": "6.10.0",
