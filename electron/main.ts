@@ -1,25 +1,11 @@
-import { app, BrowserWindow, protocol, net, Menu } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import path from 'path';
-import { URL } from 'url';
-import { initHlsCache, setApiOrigin, isHlsSegment, handleHlsSegment } from './handlers/cache';
+import { initHlsCache, setApiOrigin } from './handlers/cache';
 import { registerRecorderHandlers, setApiOriginForRecorder } from './handlers/recorder/index';
 import { registerSettingsHandlers } from './handlers/settings-store';
+import { registerAppProtocol } from './app-protocol';
+import { createSettingsWindow } from './windows/settings-window';
 
-// ─── 三种运行模式 ────────────────────────────────────────────────────────────
-//
-// 1. electron:dev     → electron . 直接运行，ELECTRON_PREVIEW 未设置
-//                       加载 webpack-dev-server（http://localhost:3001）
-//                       DevTools 自动打开
-//
-// 2. electron:preview → electron . 直接运行，ELECTRON_PREVIEW=true
-//                       加载本地 dist 产物（app:// 协议）
-//                       DevTools 自动打开，用于验证 build 行为和调试打包问题
-//
-// 3. 打包后运行        → app.isPackaged === true
-//                       加载本地 dist 产物（app:// 协议）
-//                       不开 DevTools
-//
-// app.isPackaged 是 Electron 内置运行时属性，不依赖任何编译时注入的常量。
 const DEV_SERVER_URL = 'http://localhost:3001';
 const isPreview = process.env.ELECTRON_PREVIEW === 'true';
 
@@ -29,87 +15,6 @@ const isPreview = process.env.ELECTRON_PREVIEW === 'true';
 //   - electron:preview 手动设环境变量 → 运行时读取
 //   - 都没有 → localhost:3002
 const API_ORIGIN = (__API_ORIGIN__ as string) || process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002';
-
-// ─── 注册 app:// 自定义协议 ──────────────────────────────────────────────────
-// 背景：
-//   打包后无法直接用 file:// 加载页面——file:// 没有 origin，业务代码里所有
-//   相对路径（/api/xxx）会被补全为 file:///api/xxx，不走网络，全部失败。
-//
-// 方案：自定义 app:// 协议作为中间层
-//   1. win.loadURL('app://localhost/index.html')
-//      → 页面 origin 变为 app://localhost
-//      → 相对路径 /api/xxx 补全为 app://localhost/api/xxx
-//      → 由 protocol.handle 拦截，业务代码无需修改
-//
-//   2. protocol.handle 充当反向代理：
-//      - 后端路径（/api/、/socket、/uploads/、/avatar/）
-//        → 拼接真实后端地址 API_ORIGIN，用 net.fetch 发出真实 HTTP 请求
-//        → 转发前删除 Origin 头（原值为 app://localhost，后端 CORS 不认）
-//      - 静态资源路径（JS/CSS/图片等）
-//        → 从本地 dist 目录读取（file:// 协议）
-//
-//   3. net.fetch 底层仍是 Chromium C++ 网络栈，DNS/TCP/TLS 由 Chromium 处理，
-//      我们只做 URL 映射，无需手动实现任何网络协议。
-//
-// 注意：registerSchemesAsPrivileged 必须在 app.whenReady() 之前调用。
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: 'app',
-    privileges: {
-      standard: true,       // 允许相对路径解析
-      secure: true,         // 视为安全源，允许 fetch / XHR
-      supportFetchAPI: true,
-      corsEnabled: true,
-      stream: true,         // 支持流式响应（m3u8、视频等）
-    },
-  },
-]);
-
-function registerAppProtocol(): void {
-  protocol.handle('app', async (request) => {
-    const reqUrl = new URL(request.url);
-    const pathname = reqUrl.pathname;
-
-    // ── 后端路径 → 转发到真实后端 ─────────────────────────────────────────
-    const isBackendPath =
-      pathname.startsWith('/api/') ||
-      pathname.startsWith('/socket') ||
-      pathname.startsWith('/uploads/') ||
-      pathname.startsWith('/avatar/');
-
-    // ── HLS 片段 → 文件系统 cache-first ──────────────────────────────────
-    if (isHlsSegment(request.url)) {
-      return handleHlsSegment(request);
-    }
-
-    if (isBackendPath) {
-      const backendUrl = `${API_ORIGIN}${pathname}${reqUrl.search}`;
-      // Origin 头值为 app://localhost，后端 CORS 白名单里没有该 scheme，会直接拒绝。
-      // 反向代理的标准做法是不透传浏览器 Origin（nginx 同理），删掉即可。
-      // 后端 cors 中间件收不到 Origin 时默认放行，不影响功能。
-      const headers = new Headers(request.headers);
-      headers.delete('origin');
-      // GET / HEAD 不能带 body；有 body 时需要加 duplex: 'half'
-      // （Electron net.fetch 底层是 Node.js undici，发送 body 时必须声明此选项；
-      //   标准浏览器 fetch 不需要）
-      const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
-      return net.fetch(backendUrl, {
-        method: request.method,
-        headers,
-        body: hasBody ? request.body : undefined,
-        ...(hasBody ? { duplex: 'half' } : {}),
-      } as RequestInit);
-    }
-
-    // ── 前端静态资源 → 从本地 dist 读取 ──────────────────────────────────
-    const distDir = path.join(__dirname, '../dist');
-    const hasExt = path.extname(pathname) !== '';
-    const localPath = hasExt
-      ? path.join(distDir, pathname)
-      : path.join(distDir, 'index.html'); // SPA history 路由兜底
-    return net.fetch(`file://${localPath}`);
-  });
-}
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -124,75 +29,43 @@ function createWindow(): void {
   mainWindow = win;
 
   if (!app.isPackaged && !isPreview) {
+    // app.isPackaged 是 Electron 内置运行时属性，不依赖任何编译时注入的常量。
     // dev 模式：webpack-dev-server 自带 proxy，直接加载 HTTP URL
     win.loadURL(DEV_SERVER_URL);
-    win.webContents.openDevTools();
   } else {
     // preview / packaged 模式：通过 app:// 协议加载本地 dist 产物
     win.loadURL('app://localhost/index.html');
-    // preview 模式和 packaged 模式都开 DevTools，用于调试打包问题
-    if (isPreview) win.webContents.openDevTools();
   }
 }
 
-// ─── 设置窗口（单例）─────────────────────────────────────────────────────
+// ─── 主窗口实例 ───────────────────────────────────────────────────────────────
 let mainWindow: BrowserWindow | null = null;
-let settingsWin: BrowserWindow | null = null;
 
 /**
- * 打开设置窗口。复用主应用同一个 index.html + bundle.js，通过 React Router /settings 路由渲染。
- * 单例：已存在则 focus 并重新加载带新 section query 的 URL，不新建窗口。
+ * requestSingleInstanceLock：OS层面建立一把命名锁。
+ * 进程 A（首启）：requestSingleInstanceLock() → true  → 建锁成功 → 正常 whenReady 启动
+ * 进程 B（再点）：requestSingleInstanceLock() → false → 锁已被占 → 应 app.quit(), 同时会把 B 的 argv 发给 A
+ * 进程 A 收到 'second-instance' 事件（带 B 的 argv）→ A 负责 restore+show+focus 自己的窗口
  */
-function createSettingsWindow(section: 'recording' | 'transcode') {
-  // 单例守卫：已存在则 focus + 通过 IPC 通知切 Tab（不重新加载页面，避免闪烁和表单值丢失）
-  if (settingsWin && !settingsWin.isDestroyed()) {
-    settingsWin.focus();
-    settingsWin.webContents.send('settings:switch-tab', section);
-    return;
-  }
-
-  settingsWin = new BrowserWindow({
-    width: 680,
-    height: 560,
-    title: '设置',
-    parent: mainWindow ?? undefined,
-    modal: true,
-    minimizable: false,
-    maximizable: false,
-    // 复用与主窗口相同的 preload（设置窗口需通过 electronBridge.settings 访问设置 IPC）
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-    show: false,
-  });
-
-  // 设置窗口为对话框性质，移除应用菜单栏
-  settingsWin.setMenu(null);
-
-  const url =
-    app.isPackaged || isPreview
-      ? `app://localhost/settings?section=${section}`
-      : `http://localhost:3001/settings?section=${section}`;
-  settingsWin.loadURL(url);
-
-  settingsWin.once('ready-to-show', () => {
-    settingsWin?.show();
-  });
-
-  settingsWin.once('closed', () => {
-    settingsWin = null;
-  });
+const gotLock = app.requestSingleInstanceLock();
+if(!gotLock){
+  /**
+   * app.quit() 在 ready 之前调用是不可靠的。它只是"请求退出"。
+   * 这会导致第二次启动时，主进程启动，执行ready阶段代码，创建一个窗口，屏幕上短暂出现，然后quit。表现为一次闪烁。
+   */
+  // app.quit();
+  app.exit(0); // 同步硬杀,whenReady 不会触发,createWindow 不执行 → 无窗口闪
 }
 
+// ready作为一次性事件，且通常需要处理异步任务。采用promise写法，使用whenReady
+// 等价于 app.on('ready')
 app.whenReady().then(() => {
   initHlsCache();
   setApiOrigin(API_ORIGIN);
   setApiOriginForRecorder(API_ORIGIN);
   registerRecorderHandlers();
   registerSettingsHandlers();
-  registerAppProtocol();
+  registerAppProtocol(API_ORIGIN);
   createWindow();
 
   // 自定义应用菜单
@@ -203,12 +76,6 @@ app.whenReady().then(() => {
         { role: 'reload', label: '重新加载' },
         { role: 'forceReload', label: '强制重新加载' },
         { role: 'toggleDevTools', label: '开发者工具' },
-        { type: 'separator' },
-        { role: 'resetZoom', label: '重置缩放' },
-        { role: 'zoomIn', label: '放大' },
-        { role: 'zoomOut', label: '缩小' },
-        { type: 'separator' },
-        { role: 'togglefullscreen', label: '全屏' },
       ],
     },
     {
@@ -216,11 +83,11 @@ app.whenReady().then(() => {
       submenu: [
         {
           label: '录制设置',
-          click: () => createSettingsWindow('recording'),
+          click: () => createSettingsWindow(mainWindow, 'recording'),
         },
         {
           label: '转码设置',
-          click: () => createSettingsWindow('transcode'),
+          click: () => createSettingsWindow(mainWindow, 'transcode'),
         },
       ],
     },
@@ -228,9 +95,14 @@ app.whenReady().then(() => {
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 });
-app.on('window-all-closed', () => {
-  app.quit();
-});
+
+app.on('second-instance',(event,argv)=>{
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+})
 
 // ─── TODO: before-quit 优雅停止录制 ─────────────────────────────────────────
 //
@@ -255,5 +127,10 @@ app.on('window-all-closed', () => {
 //   - 进程崩溃/强杀不触发 before-quit，由后端超时自动收尾（方案B）兜底
 //   - stop() 内有网络请求，需设超时（建议 10s），防止网络故障导致永远无法退出
 //   - isRecording() 需从 recorder/index.ts 导出
+app.on('before-quit',(event)=>{
 
-// ─── 录制 IPC 处理器已通过 registerRecorderHandlers() 注册（见上方 whenReady）────
+})
+
+app.on('window-all-closed', () => {
+  app.quit();
+});

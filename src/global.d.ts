@@ -58,8 +58,6 @@ interface ElectronBridge {
    * 供 src/utils/env.ts 使用，业务代码不直接读取此字段。
    */
   readonly apiOrigin: string;
-  /** 是否 preview 模式（ELECTRON_PREVIEW=true），决定是否暴露录制调试选项 */
-  readonly isPreview: boolean;
 
   recorder: {
     /** 检测当前机器可用的最佳硬件/软件编码器 */

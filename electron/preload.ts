@@ -15,14 +15,10 @@ contextBridge.exposeInMainWorld('electronBridge', {
   isElectron: true as const,
 
   /**
-   * 后端 origin，格式如 'http://localhost:3002' 或 'https://cowatch.daibao.site'。
    * app:// 协议的 host 不含端口，无法从 window.location 推断真实后端地址，
    * 由此字段补全，供 env.ts 的 apiOrigin 使用（WS 地址推断等场景）。
    */
   apiOrigin: (__API_ORIGIN__ as string) || process.env.ELECTRON_API_ORIGIN || 'http://localhost:3002',
-
-  /** 是否 preview 模式（ELECTRON_PREVIEW=true），用于决定是否暴露录制调试选项 */
-  isPreview: process.env.ELECTRON_PREVIEW === 'true',
 
   // ─── 录制相关 ─────────────────────────────────────────────────────────────
   recorder: {
